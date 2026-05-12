@@ -11,7 +11,8 @@ export type CommitAction =
   | { kind: "checkout-detached"; oid: string }
   | { kind: "create-branch"; oid: string }
   | { kind: "reset"; oid: string }
-  | { kind: "rebase"; oid: string };
+  | { kind: "rebase"; oid: string }
+  | { kind: "merge"; oid: string; label: string };
 
 interface Props {
   item: PositionedCommit;
@@ -22,6 +23,8 @@ interface Props {
 export function CommitContextMenu({ item, onAction, children }: Props) {
   const oid = item.commit.oid;
   const short = oid.slice(0, 8);
+  // First local branch ref on this commit (no "/" and not bare "HEAD").
+  const localBranch = item.commit.refs.find((r) => !r.includes("/") && r !== "HEAD") ?? "";
 
   return (
     <ContextMenu>
@@ -38,6 +41,10 @@ export function CommitContextMenu({ item, onAction, children }: Props) {
         </ContextMenuItem>
 
         <ContextMenuSeparator />
+
+        <ContextMenuItem onClick={() => onAction({ kind: "merge", oid, label: localBranch })}>
+          Merge into current branch
+        </ContextMenuItem>
 
         <ContextMenuItem onClick={() => onAction({ kind: "rebase", oid })}>
           Rebase current branch here

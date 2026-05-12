@@ -8,6 +8,7 @@ use crate::repo::RepoState;
 pub struct StatusInfo {
     pub staged_count: usize,
     pub unstaged_count: usize,
+    pub merge_in_progress: bool,
 }
 
 /// Return counts of staged and unstaged (including untracked) changes.
@@ -41,7 +42,8 @@ pub fn get_repo_status(repo_id: String, state: State<RepoState>) -> Result<Statu
         )
     }).count();
 
-    Ok(StatusInfo { staged_count, unstaged_count })
+    let merge_in_progress = repo.path().join("MERGE_HEAD").exists();
+    Ok(StatusInfo { staged_count, unstaged_count, merge_in_progress })
 }
 
 #[derive(Debug, Serialize)]

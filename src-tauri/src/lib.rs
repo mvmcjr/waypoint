@@ -32,6 +32,12 @@ pub fn run() {
             commands::staging::stage_paths,
             commands::staging::unstage_paths,
             commands::staging::do_commit,
+            commands::merge::merge_commit,
+            commands::merge::get_merge_status,
+            commands::merge::resolve_ours,
+            commands::merge::resolve_theirs,
+            commands::merge::finish_merge,
+            commands::merge::abort_merge,
         ])
         .run(tauri::generate_context!())
         .expect("error while running waypoint");

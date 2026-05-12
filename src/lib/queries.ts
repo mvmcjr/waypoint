@@ -56,6 +56,15 @@ export function useRepoStatus(repoId: string | null) {
   });
 }
 
+export function useMergeStatus(repoId: string | null) {
+  return useQuery({
+    queryKey: ["merge-status", repoId],
+    queryFn: () => ipc.getMergeStatus(repoId!),
+    enabled: !!repoId,
+    refetchInterval: 2000,
+  });
+}
+
 /** Invalidates commits, refs, head, and status after a mutating action. */
 export function useRefreshRepo(repoId: string | null) {
   const qc = useQueryClient();
@@ -65,5 +74,6 @@ export function useRefreshRepo(repoId: string | null) {
     qc.invalidateQueries({ queryKey: ["head", repoId] });
     qc.invalidateQueries({ queryKey: ["status", repoId] });
     qc.invalidateQueries({ queryKey: ["staging", repoId] });
+    qc.invalidateQueries({ queryKey: ["merge-status", repoId] });
   }, [qc, repoId]);
 }

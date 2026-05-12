@@ -59,6 +59,19 @@ export interface HeadInfo {
 export interface StatusInfo {
   staged_count: number;
   unstaged_count: number;
+  merge_in_progress: boolean;
+}
+
+export interface MergeResult {
+  kind: "fast_forward" | "merged" | "up_to_date" | "conflicts";
+  conflicted: string[];
+}
+
+export interface MergeStatus {
+  in_progress: boolean;
+  conflicted_paths: string[];
+  merge_head_oid: string | null;
+  default_message: string;
 }
 
 export interface FileStatus {
@@ -124,4 +137,22 @@ export const ipc = {
 
   doCommit: (repoId: string, message: string) =>
     invoke<void>("do_commit", { repoId, message }),
+
+  mergeCommit: (repoId: string, oid: string, label: string) =>
+    invoke<MergeResult>("merge_commit", { repoId, oid, label }),
+
+  getMergeStatus: (repoId: string) =>
+    invoke<MergeStatus>("get_merge_status", { repoId }),
+
+  resolveOurs: (repoId: string, path: string) =>
+    invoke<void>("resolve_ours", { repoId, path }),
+
+  resolveTheirs: (repoId: string, path: string) =>
+    invoke<void>("resolve_theirs", { repoId, path }),
+
+  finishMerge: (repoId: string, message: string) =>
+    invoke<void>("finish_merge", { repoId, message }),
+
+  abortMerge: (repoId: string) =>
+    invoke<void>("abort_merge", { repoId }),
 };

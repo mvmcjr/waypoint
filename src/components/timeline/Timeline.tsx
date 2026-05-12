@@ -46,7 +46,8 @@ export function Timeline({ repoId, commits, selectedOid, headOid, headBranch, on
   }, 1);
   const graphWidth = searchActive ? 0 : maxLanes * LANE_WIDTH + LANE_WIDTH;
 
-  const hasWip = !!status && (status.staged_count + status.unstaged_count) > 0;
+  const mergeInProgress = !!status?.merge_in_progress;
+  const hasWip = !!status && ((status.staged_count + status.unstaged_count) > 0 || mergeInProgress);
   const headItem = commits.find((c) => c.commit.oid === headOid);
   const headLane = headItem?.lane ?? 0;
   const headColorIdx = headItem?.color_idx ?? 0;
@@ -65,6 +66,7 @@ export function Timeline({ repoId, commits, selectedOid, headOid, headBranch, on
           graphWidth={graphWidth}
           stagedCount={status!.staged_count}
           unstagedCount={status!.unstaged_count}
+          mergeInProgress={mergeInProgress}
           isSelected={wipSelected}
           onClick={onWipClick}
         />

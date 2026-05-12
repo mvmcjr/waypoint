@@ -298,6 +298,62 @@ export function ResetDialog({ repoId, oid, onClose, onSuccess }: ResetProps) {
   );
 }
 
+// ─── Merge ─────────────────────────────────────────────────────────────────
+
+interface MergeProps extends BaseProps {
+  oid: string;
+  label: string;
+  currentBranch: string | null;
+  onConflicts: () => void;
+}
+
+export function MergeDialog({ repoId, oid, label, currentBranch, onClose, onSuccess, onConflicts }: MergeProps) {
+  const [loading, setLoading] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+
+  async function run() {
+    setLoading(true);
+    setError(null);
+    try {
+      const result = await ipc.mergeCommit(repoId, oid, label);
+      if (result.kind === "conflicts") {
+        onConflicts();
+      } else {
+        onSuccess();
+      }
+    } catch (e) {
+      setError(String(e));
+    } finally {
+      setLoading(false);
+    }
+  }
+
+  const target = label || short(oid);
+
+  return (
+    <Dialog open onOpenChange={(o) => !o && onClose()}>
+      <DialogContent>
+        <DialogHeader>
+          <DialogTitle>Merge</DialogTitle>
+          <DialogDescription>
+            Merge <code className="font-mono">{target}</code> into{" "}
+            {currentBranch
+              ? <code className="font-mono">{currentBranch}</code>
+              : "the current branch"}.
+          </DialogDescription>
+        </DialogHeader>
+        {error && <ErrorNote msg={error} />}
+        <DialogFooter>
+          <Button variant="outline" onClick={onClose} disabled={loading}>Cancel</Button>
+          <Button onClick={run} disabled={loading}>
+            {loading ? "Merging…" : "Merge"}
+          </Button>
+        </DialogFooter>
+      </DialogContent>
+    </Dialog>
+  );
+}
+
 // ─── Rebase Onto ───────────────────────────────────────────────────────────
 
 interface RebaseProps extends BaseProps {

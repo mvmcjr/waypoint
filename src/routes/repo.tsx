@@ -1,11 +1,12 @@
 import { useEffect, useMemo, useState } from "react";
 import { getCurrentWindow } from "@tauri-apps/api/window";
 import { useStore } from "@/lib/store";
-import { useCommits, useHeadInfo, useRefreshRepo } from "@/lib/queries";
+import { useCommits, useHeadInfo, useRefreshRepo, useRepoStatus } from "@/lib/queries";
 import { Timeline } from "@/components/timeline/Timeline";
 import { Sidebar } from "@/components/sidebar/Sidebar";
 import { CommitDetail } from "@/components/detail/CommitDetail";
 import { StagingPanel } from "@/components/staging/StagingPanel";
+import { ConflictPanel } from "@/components/staging/ConflictPanel";
 import { Input } from "@/components/ui/input";
 import {
   CheckoutCommitDialog,
@@ -13,6 +14,7 @@ import {
   CreateBranchDialog,
   ResetDialog,
   RebaseDialog,
+  MergeDialog,
 } from "@/components/actions/Dialogs";
 import type { CommitAction } from "@/components/timeline/CommitContextMenu";
 
@@ -24,7 +26,8 @@ type DialogState =
   | { kind: "checkout-branch"; branchName: string }
   | { kind: "create-branch"; oid: string }
   | { kind: "reset"; oid: string }
-  | { kind: "rebase"; oid: string };
+  | { kind: "rebase"; oid: string }
+  | { kind: "merge"; oid: string; label: string };
 
 // ─── Main view ─────────────────────────────────────────────────────────────
 
@@ -34,6 +37,7 @@ export function RepoView() {
 
   const { data, isLoading, error } = useCommits(repoId);
   const { data: head } = useHeadInfo(repoId);
+  const { data: status } = useRepoStatus(repoId);
   const refresh = useRefreshRepo(repoId);
 
   const [dialog, setDialog] = useState<DialogState>({ kind: "none" });
@@ -55,7 +59,14 @@ export function RepoView() {
     return () => { unlisten?.(); };
   }, [refresh]);
 
-  // Deselect WIP if a commit is selected, and vice-versa.
+  // Auto-open WIP panel when a merge with conflicts starts.
+  useEffect(() => {
+    if (status?.merge_in_progress) {
+      setWipSelected(true);
+      selectCommit(null);
+    }
+  }, [status?.merge_in_progress, selectCommit]);
+
   function handleSelectCommit(oid: string) {
     setWipSelected(false);
     selectCommit(oid);
@@ -89,11 +100,20 @@ export function RepoView() {
       setDialog({ kind: "reset", oid: action.oid });
     } else if (action.kind === "rebase") {
       setDialog({ kind: "rebase", oid: action.oid });
+    } else if (action.kind === "merge") {
+      setDialog({ kind: "merge", oid: action.oid, label: action.label });
     }
   }
 
   function handleSuccess() {
     setDialog({ kind: "none" });
+    refresh();
+  }
+
+  function handleMergeConflicts() {
+    setDialog({ kind: "none" });
+    setWipSelected(true);
+    selectCommit(null);
     refresh();
   }
 
@@ -103,6 +123,7 @@ export function RepoView() {
   }
 
   const searchActive = searchFilter.trim().length > 0;
+  const mergeInProgress = !!status?.merge_in_progress;
 
   return (
     <div className="flex h-full overflow-hidden">
@@ -161,10 +182,13 @@ export function RepoView() {
             searchActive={searchActive}
           />
 
-          {/* Right panel: staging view or commit detail */}
+          {/* Right panel: conflict resolver, staging view, or commit detail */}
           {wipSelected && repoId && (
             <div className="w-80 shrink-0">
-              <StagingPanel repoId={repoId} onCommitSuccess={handleCommitSuccess} />
+              {mergeInProgress
+                ? <ConflictPanel repoId={repoId} onDone={handleCommitSuccess} />
+                : <StagingPanel repoId={repoId} onCommitSuccess={handleCommitSuccess} />
+              }
             </div>
           )}
           {!wipSelected && selectedItem && repoId && (
@@ -213,6 +237,17 @@ export function RepoView() {
           currentBranch={head?.branch ?? null}
           onClose={() => setDialog({ kind: "none" })}
           onSuccess={handleSuccess}
+        />
+      )}
+      {repoId && dialog.kind === "merge" && (
+        <MergeDialog
+          repoId={repoId}
+          oid={dialog.oid}
+          label={dialog.label}
+          currentBranch={head?.branch ?? null}
+          onClose={() => setDialog({ kind: "none" })}
+          onSuccess={handleSuccess}
+          onConflicts={handleMergeConflicts}
         />
       )}
     </div>
