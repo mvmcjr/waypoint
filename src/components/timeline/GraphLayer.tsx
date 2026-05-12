@@ -91,12 +91,12 @@ export function GraphLayer({ commits, startRow, visibleRows, width, onSelectOid,
           );
         }
 
-        // Lane change: go straight down on the branch's own lane, then make a
-        // tight rounded corner just before arriving at the parent.
-        // This matches the GitKraken style where all branches visibly originate
-        // from the same parent commit rather than from each other.
+        // Lane change: make a tight rounded corner just after leaving the
+        // from-commit, then go straight down to the parent on the to-lane.
+        // Elbow is at the top so every branch arrives at its parent going
+        // straight down — matching GitKraken's visual convention.
         const r = Math.min(CURVE_R, (e.toY - e.fromY) / 2);
-        const d = `M ${e.fromX} ${e.fromY} L ${e.fromX} ${e.toY - 2 * r} Q ${e.fromX} ${e.toY} ${e.toX} ${e.toY}`;
+        const d = `M ${e.fromX} ${e.fromY} Q ${e.fromX} ${e.fromY + 2 * r} ${e.toX} ${e.fromY + 2 * r} L ${e.toX} ${e.toY}`;
         return (
           <path
             key={i}
