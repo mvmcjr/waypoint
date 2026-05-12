@@ -1,7 +1,7 @@
 import { useRef } from "react";
 import { useVirtualizer } from "@tanstack/react-virtual";
 import type { PositionedCommit } from "@/lib/ipc";
-import { useRepoStatus } from "@/lib/queries";
+import { useRepoStatus, useStashes } from "@/lib/queries";
 import { GraphLayer, LANE_WIDTH, ROW_HEIGHT, REFS_COL_WIDTH } from "./GraphLayer";
 import { CommitRow } from "./CommitRow";
 import { WipRow } from "./WipRow";
@@ -23,6 +23,8 @@ interface Props {
 export function Timeline({ repoId, commits, selectedOid, headOid, headBranch, onSelectOid, onCommitAction, onWipClick, wipSelected, searchActive }: Props) {
   const parentRef = useRef<HTMLDivElement>(null);
   const { data: status } = useRepoStatus(repoId);
+  const { data: stashes = [] } = useStashes(repoId);
+  const stashOids = new Set(stashes.map((s) => s.oid));
 
   const rowVirtualizer = useVirtualizer({
     count: commits.length,
@@ -109,6 +111,9 @@ export function Timeline({ repoId, commits, selectedOid, headOid, headBranch, on
           >
             {virtualItems.map((virtualItem) => {
               const item = commits[virtualItem.index];
+              const isStash =
+                stashOids.has(item.commit.oid) ||
+                /^(WIP on |index on |untracked files on )/.test(item.commit.summary);
               return (
                 <CommitContextMenu
                   key={item.commit.oid}
@@ -121,6 +126,7 @@ export function Timeline({ repoId, commits, selectedOid, headOid, headBranch, on
                     isSelected={item.commit.oid === selectedOid}
                     isHead={item.commit.oid === headOid}
                     headBranch={headBranch}
+                    isStash={isStash}
                     onClick={() => onSelectOid(item.commit.oid)}
                   />
                 </CommitContextMenu>

@@ -3,6 +3,7 @@ import { useState } from "react";
 
 interface Props {
   files: FileDiff[];
+  onFileClick?: (file: FileDiff) => void;
 }
 
 function HunkView({ hunk }: { hunk: FileDiff["hunks"][number] }) {
@@ -28,7 +29,7 @@ function HunkView({ hunk }: { hunk: FileDiff["hunks"][number] }) {
   );
 }
 
-function FileDiffView({ file }: { file: FileDiff }) {
+function FileDiffView({ file, onFileClick }: { file: FileDiff; onFileClick?: (file: FileDiff) => void }) {
   const [open, setOpen] = useState(true);
 
   const statusColor: Record<FileDiff["status"], string> = {
@@ -44,7 +45,7 @@ function FileDiffView({ file }: { file: FileDiff }) {
     <div className="border border-border rounded mb-2">
       <button
         className="w-full flex items-center gap-2 px-3 py-1.5 text-sm hover:bg-white/5"
-        onClick={() => setOpen((o) => !o)}
+        onClick={() => onFileClick ? onFileClick(file) : setOpen((o) => !o)}
       >
         <span>{open ? "▾" : "▸"}</span>
         <span className={`text-xs font-mono uppercase font-bold ${statusColor[file.status]}`}>
@@ -69,7 +70,7 @@ function FileDiffView({ file }: { file: FileDiff }) {
   );
 }
 
-export function DiffViewer({ files }: Props) {
+export function DiffViewer({ files, onFileClick }: Props) {
   if (files.length === 0) {
     return <div className="text-xs text-muted-foreground px-3 py-2">No changes in this commit.</div>;
   }
@@ -77,7 +78,7 @@ export function DiffViewer({ files }: Props) {
   return (
     <div className="overflow-auto flex-1 p-2">
       {files.map((file) => (
-        <FileDiffView key={file.path} file={file} />
+        <FileDiffView key={file.path} file={file} onFileClick={onFileClick} />
       ))}
     </div>
   );

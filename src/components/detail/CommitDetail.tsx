@@ -1,15 +1,16 @@
 import { format } from "date-fns";
 import { useCommitDiff } from "@/lib/queries";
-import type { PositionedCommit } from "@/lib/ipc";
+import type { FileDiff, PositionedCommit } from "@/lib/ipc";
 import { DiffViewer } from "./DiffViewer";
 import { Separator } from "@/components/ui/separator";
 
 interface Props {
   repoId: string;
   item: PositionedCommit;
+  onFileClick?: (file: FileDiff) => void;
 }
 
-export function CommitDetail({ repoId, item }: Props) {
+export function CommitDetail({ repoId, item, onFileClick }: Props) {
   const { commit } = item;
   const { data: diff, isLoading } = useCommitDiff(repoId, commit.oid);
 
@@ -62,7 +63,7 @@ export function CommitDetail({ repoId, item }: Props) {
           Loading diff…
         </div>
       ) : (
-        diff && <DiffViewer files={diff} />
+        diff && <DiffViewer files={diff} onFileClick={onFileClick} />
       )}
     </aside>
   );

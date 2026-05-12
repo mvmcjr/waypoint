@@ -29,6 +29,19 @@ export function useCommitDiff(repoId: string | null, oid: string | null) {
   });
 }
 
+export function useWorkdirFileDiff(
+  repoId: string | null,
+  path: string | null,
+  staged: boolean,
+) {
+  return useQuery({
+    queryKey: ["workdir-diff", repoId, path, staged],
+    queryFn: () => ipc.getWorkdirDiff(repoId!, path!, staged),
+    enabled: !!repoId && !!path,
+    staleTime: 0,
+  });
+}
+
 export function useHeadInfo(repoId: string | null) {
   return useQuery({
     queryKey: ["head", repoId],

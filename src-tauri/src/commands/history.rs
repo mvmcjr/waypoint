@@ -33,6 +33,12 @@ pub fn walk_commits(
             let _ = walk.push(oid);
         }
     }
+    // Push every stash reflog entry so all stash commits appear in the timeline.
+    if let Ok(reflog) = repo.reflog("refs/stash") {
+        for entry in reflog.iter() {
+            let _ = walk.push(entry.id_new());
+        }
+    }
 
     // Build a map of oid -> refs for labelling.
     let mut ref_map: std::collections::HashMap<String, Vec<String>> = std::collections::HashMap::new();

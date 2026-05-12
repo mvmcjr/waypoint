@@ -102,6 +102,9 @@ export const ipc = {
   getCommitDiff: (repoId: string, oid: string) =>
     invoke<FileDiff[]>("get_commit_diff", { repoId, oid }),
 
+  getWorkdirDiff: (repoId: string, path: string, staged: boolean) =>
+    invoke<FileDiff>("get_workdir_diff", { repoId, path, staged }),
+
   getHeadInfo: (repoId: string) =>
     invoke<HeadInfo>("get_head_info", { repoId }),
 

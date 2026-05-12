@@ -9,16 +9,18 @@ interface Props {
   isSelected: boolean;
   isHead: boolean;
   headBranch: string | null;
+  isStash?: boolean;
   onClick: () => void;
 }
 
-export function CommitRow({ item, graphWidth, isSelected, isHead, headBranch, onClick }: Props) {
+export function CommitRow({ item, graphWidth, isSelected, isHead, headBranch, isStash, onClick }: Props) {
   const { commit } = item;
   const relative = formatDistanceToNow(new Date(commit.timestamp * 1000), { addSuffix: true });
   const refGroups = groupRefs(commit.refs, headBranch);
 
   const rowClass = [
     "flex items-center cursor-pointer select-none text-sm border-l-2",
+    isStash ? "opacity-40 italic" : "",
     isHead ? "border-l-green-400" : "border-l-transparent",
     isHead && !isSelected ? "bg-green-500/5" : "",
     isSelected ? "bg-white/10" : "hover:bg-white/5",

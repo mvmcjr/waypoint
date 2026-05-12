@@ -12,6 +12,7 @@ import { useFileStatus } from "@/lib/queries";
 interface Props {
   repoId: string;
   onCommitSuccess: () => void;
+  onFileClick?: (path: string, section: "staged" | "unstaged") => void;
 }
 
 // ── Tree data model ──────────────────────────────────────────────────────────
@@ -80,12 +81,13 @@ const FALLBACK_STYLE = { label: "?", color: "text-muted-foreground" };
 // ── FileRow ──────────────────────────────────────────────────────────────────
 
 function FileRow({
-  file, statusKind, actionIcon, onAction, disabled, indent = 0, treeMode,
+  file, statusKind, actionIcon, onAction, onRowClick, disabled, indent = 0, treeMode,
 }: {
   file: FileStatus;
   statusKind: string | null;
   actionIcon: React.ReactNode;
   onAction: () => void;
+  onRowClick?: () => void;
   disabled: boolean;
   indent?: number;
   treeMode: boolean;
@@ -97,8 +99,9 @@ function FileRow({
 
   return (
     <div
-      className="group flex items-center gap-2 py-0.5 pr-3 hover:bg-white/5 rounded text-xs"
+      className="group flex items-center gap-2 py-0.5 pr-3 hover:bg-white/5 rounded text-xs cursor-pointer"
       style={{ paddingLeft: `${12 + indent * 16}px` }}
+      onClick={onRowClick}
     >
       <span className={`font-mono font-bold w-3 shrink-0 ${color}`}>{label}</span>
       <span className="flex-1 min-w-0 truncate">
@@ -112,7 +115,7 @@ function FileRow({
         )}
       </span>
       <button
-        onClick={onAction}
+        onClick={(e) => { e.stopPropagation(); onAction(); }}
         disabled={disabled}
         className="opacity-0 group-hover:opacity-100 text-muted-foreground hover:text-foreground transition-opacity disabled:opacity-30"
       >
@@ -167,7 +170,7 @@ function DirRow({
 // ── TreeNodes (recursive) ────────────────────────────────────────────────────
 
 function TreeNodes({
-  nodes, section, expandedDirs, toggleDir, onBatch, onSingleFile, disabled, indent = 0,
+  nodes, section, expandedDirs, toggleDir, onBatch, onSingleFile, onFileClick, disabled, indent = 0,
 }: {
   nodes: TreeNode[];
   section: "staged" | "unstaged";
@@ -175,6 +178,7 @@ function TreeNodes({
   toggleDir: (p: string) => void;
   onBatch: (paths: string[]) => void;
   onSingleFile: (path: string) => void;
+  onFileClick?: (path: string) => void;
   disabled: boolean;
   indent?: number;
 }) {
@@ -190,6 +194,7 @@ function TreeNodes({
               statusKind={statusKind}
               actionIcon={section === "staged" ? <MinusCircle size={13} /> : <PlusCircle size={13} />}
               onAction={() => onSingleFile(node.file.path)}
+              onRowClick={() => onFileClick?.(node.file.path)}
               disabled={disabled}
               indent={indent}
               treeMode
@@ -215,6 +220,7 @@ function TreeNodes({
               toggleDir={toggleDir}
               onBatch={onBatch}
               onSingleFile={onSingleFile}
+              onFileClick={onFileClick}
               disabled={disabled}
               indent={indent + 1}
             />
@@ -227,7 +233,7 @@ function TreeNodes({
 
 // ── Main panel ────────────────────────────────────────────────────────────────
 
-export function StagingPanel({ repoId, onCommitSuccess }: Props) {
+export function StagingPanel({ repoId, onCommitSuccess, onFileClick }: Props) {
   const qc = useQueryClient();
   const { data: files = [], isLoading } = useFileStatus(repoId);
   const [summary, setSummary] = useState("");
@@ -404,6 +410,7 @@ export function StagingPanel({ repoId, onCommitSuccess }: Props) {
                 file={f} statusKind={f.staged}
                 actionIcon={<MinusCircle size={13} />}
                 onAction={() => unstageFile(f.path)}
+                onRowClick={() => onFileClick?.(f.path, "staged")}
                 disabled={disabled} treeMode={false}
               />
             )) : (
@@ -411,6 +418,7 @@ export function StagingPanel({ repoId, onCommitSuccess }: Props) {
                 nodes={stagedTree} section="staged"
                 expandedDirs={expandedDirs} toggleDir={toggleDir}
                 onBatch={unstagePaths} onSingleFile={unstageFile}
+                onFileClick={(p) => onFileClick?.(p, "staged")}
                 disabled={disabled}
               />
             )}
@@ -428,6 +436,7 @@ export function StagingPanel({ repoId, onCommitSuccess }: Props) {
                 file={f} statusKind={f.unstaged}
                 actionIcon={<PlusCircle size={13} />}
                 onAction={() => stageFile(f.path)}
+                onRowClick={() => onFileClick?.(f.path, "unstaged")}
                 disabled={disabled} treeMode={false}
               />
             )) : (
@@ -435,6 +444,7 @@ export function StagingPanel({ repoId, onCommitSuccess }: Props) {
                 nodes={unstagedTree} section="unstaged"
                 expandedDirs={expandedDirs} toggleDir={toggleDir}
                 onBatch={stagePaths} onSingleFile={stageFile}
+                onFileClick={(p) => onFileClick?.(p, "unstaged")}
                 disabled={disabled}
               />
             )}

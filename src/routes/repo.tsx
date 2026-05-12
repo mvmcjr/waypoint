@@ -5,6 +5,8 @@ import { useCommits, useHeadInfo, useRefreshRepo, useRepoStatus } from "@/lib/qu
 import { Timeline } from "@/components/timeline/Timeline";
 import { Sidebar } from "@/components/sidebar/Sidebar";
 import { CommitDetail } from "@/components/detail/CommitDetail";
+import { FileDiffPanel } from "@/components/detail/FileDiffPanel";
+import { StagingFileDiffPanel } from "@/components/detail/StagingFileDiffPanel";
 import { StagingPanel } from "@/components/staging/StagingPanel";
 import { ConflictPanel } from "@/components/staging/ConflictPanel";
 import { Input } from "@/components/ui/input";
@@ -17,6 +19,7 @@ import {
   MergeDialog,
 } from "@/components/actions/Dialogs";
 import type { CommitAction } from "@/components/timeline/CommitContextMenu";
+import type { FileDiff } from "@/lib/ipc";
 
 // ─── Dialog state ──────────────────────────────────────────────────────────
 
@@ -42,6 +45,8 @@ export function RepoView() {
 
   const [dialog, setDialog] = useState<DialogState>({ kind: "none" });
   const [wipSelected, setWipSelected] = useState(false);
+  const [focusedFile, setFocusedFile] = useState<FileDiff | null>(null);
+  const [focusedStagingFile, setFocusedStagingFile] = useState<{ path: string; section: "staged" | "unstaged" } | null>(null);
 
   useEffect(() => {
     if (data) setCommits(data);
@@ -69,11 +74,15 @@ export function RepoView() {
 
   function handleSelectCommit(oid: string) {
     setWipSelected(false);
+    setFocusedFile(null);
+    setFocusedStagingFile(null);
     selectCommit(oid);
   }
 
   function handleWipClick() {
     setWipSelected(true);
+    setFocusedFile(null);
+    setFocusedStagingFile(null);
     selectCommit(null);
   }
 
@@ -169,30 +178,53 @@ export function RepoView() {
         </header>
 
         <div className="flex flex-1 overflow-hidden">
-          <Timeline
-            repoId={repoId}
-            commits={filteredCommits}
-            selectedOid={selectedOid}
-            headOid={head?.oid ?? null}
-            headBranch={head?.branch ?? null}
-            onSelectOid={handleSelectCommit}
-            onCommitAction={handleCommitAction}
-            onWipClick={handleWipClick}
-            wipSelected={wipSelected}
-            searchActive={searchActive}
-          />
+          {focusedFile && selectedItem ? (
+            <FileDiffPanel
+              file={focusedFile}
+              commitSummary={selectedItem.commit.summary}
+              onClose={() => setFocusedFile(null)}
+            />
+          ) : focusedStagingFile && repoId ? (
+            <StagingFileDiffPanel
+              repoId={repoId}
+              path={focusedStagingFile.path}
+              section={focusedStagingFile.section}
+              onClose={() => setFocusedStagingFile(null)}
+            />
+          ) : (
+            <Timeline
+              repoId={repoId}
+              commits={filteredCommits}
+              selectedOid={selectedOid}
+              headOid={head?.oid ?? null}
+              headBranch={head?.branch ?? null}
+              onSelectOid={handleSelectCommit}
+              onCommitAction={handleCommitAction}
+              onWipClick={handleWipClick}
+              wipSelected={wipSelected}
+              searchActive={searchActive}
+            />
+          )}
 
           {/* Right panel: conflict resolver, staging view, or commit detail */}
           {wipSelected && repoId && (
             <div className="w-80 shrink-0">
               {mergeInProgress
                 ? <ConflictPanel repoId={repoId} onDone={handleCommitSuccess} />
-                : <StagingPanel repoId={repoId} onCommitSuccess={handleCommitSuccess} />
+                : <StagingPanel
+                    repoId={repoId}
+                    onCommitSuccess={handleCommitSuccess}
+                    onFileClick={(path, section) => setFocusedStagingFile({ path, section })}
+                  />
               }
             </div>
           )}
           {!wipSelected && selectedItem && repoId && (
-            <CommitDetail repoId={repoId} item={selectedItem} />
+            <CommitDetail
+              repoId={repoId}
+              item={selectedItem}
+              onFileClick={(file) => setFocusedFile(file)}
+            />
           )}
         </div>
       </div>
