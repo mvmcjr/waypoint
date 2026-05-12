@@ -1,4 +1,5 @@
-import { useQuery } from "@tanstack/react-query";
+import { useQuery, useQueryClient } from "@tanstack/react-query";
+import { useCallback } from "react";
 import { ipc } from "./ipc";
 
 export function useCommits(repoId: string | null) {
@@ -26,4 +27,43 @@ export function useCommitDiff(repoId: string | null, oid: string | null) {
     enabled: !!repoId && !!oid,
     staleTime: Infinity,
   });
+}
+
+export function useHeadInfo(repoId: string | null) {
+  return useQuery({
+    queryKey: ["head", repoId],
+    queryFn: () => ipc.getHeadInfo(repoId!),
+    enabled: !!repoId,
+    staleTime: Infinity,
+  });
+}
+
+export function useFileStatus(repoId: string | null) {
+  return useQuery({
+    queryKey: ["staging", repoId],
+    queryFn: () => ipc.listStatus(repoId!),
+    enabled: !!repoId,
+    refetchInterval: 2000,
+  });
+}
+
+export function useRepoStatus(repoId: string | null) {
+  return useQuery({
+    queryKey: ["status", repoId],
+    queryFn: () => ipc.getRepoStatus(repoId!),
+    enabled: !!repoId,
+    refetchInterval: 3000,
+  });
+}
+
+/** Invalidates commits, refs, head, and status after a mutating action. */
+export function useRefreshRepo(repoId: string | null) {
+  const qc = useQueryClient();
+  return useCallback(() => {
+    qc.invalidateQueries({ queryKey: ["commits", repoId] });
+    qc.invalidateQueries({ queryKey: ["refs", repoId] });
+    qc.invalidateQueries({ queryKey: ["head", repoId] });
+    qc.invalidateQueries({ queryKey: ["status", repoId] });
+    qc.invalidateQueries({ queryKey: ["staging", repoId] });
+  }, [qc, repoId]);
 }

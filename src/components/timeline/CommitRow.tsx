@@ -1,53 +1,55 @@
 import { formatDistanceToNow } from "date-fns";
 import type { PositionedCommit } from "@/lib/ipc";
-import { RefBadge } from "./RefBadge";
-import { ROW_HEIGHT, LANE_WIDTH } from "./GraphLayer";
+import { RefBadge, groupRefs } from "./RefBadge";
+import { ROW_HEIGHT, REFS_COL_WIDTH } from "./GraphLayer";
 
 interface Props {
   item: PositionedCommit;
   graphWidth: number;
   isSelected: boolean;
+  isHead: boolean;
+  headBranch: string | null;
   onClick: () => void;
 }
 
-export function CommitRow({ item, graphWidth, isSelected, onClick }: Props) {
+export function CommitRow({ item, graphWidth, isSelected, isHead, headBranch, onClick }: Props) {
   const { commit } = item;
-  const date = new Date(commit.timestamp * 1000);
-  const relative = formatDistanceToNow(date, { addSuffix: true });
+  const relative = formatDistanceToNow(new Date(commit.timestamp * 1000), { addSuffix: true });
+  const refGroups = groupRefs(commit.refs, headBranch);
 
-  // The graph SVG sits to the left; we indent text to not overlap the dot.
-  const dotX = item.lane * LANE_WIDTH + LANE_WIDTH / 2;
-  const textIndent = Math.max(graphWidth, dotX + 20);
+  const rowClass = [
+    "flex items-center cursor-pointer select-none text-sm border-l-2",
+    isHead ? "border-l-green-400" : "border-l-transparent",
+    isHead && !isSelected ? "bg-green-500/5" : "",
+    isSelected ? "bg-white/10" : "hover:bg-white/5",
+  ].join(" ");
 
   return (
-    <div
-      onClick={onClick}
-      style={{ height: ROW_HEIGHT, paddingLeft: textIndent }}
-      className={`flex items-center gap-2 px-3 cursor-pointer select-none text-sm
-        ${isSelected ? "bg-white/10" : "hover:bg-white/5"}`}
-    >
-      {/* Ref badges */}
-      {commit.refs.length > 0 && (
-        <span className="flex items-center shrink-0">
-          {commit.refs.slice(0, 3).map((ref) => (
-            <RefBadge key={ref} name={ref} />
-          ))}
-        </span>
-      )}
+    <div onClick={onClick} style={{ height: ROW_HEIGHT }} className={rowClass}>
 
-      {/* Commit summary */}
-      <span className="truncate text-foreground/90">{commit.summary}</span>
+      {/* ── Left: refs column (fixed width, left of graph) ──────────── */}
+      <div
+        style={{ width: REFS_COL_WIDTH, flexShrink: 0 }}
+        className="flex items-center gap-0.5 px-2 overflow-hidden"
+      >
+        {refGroups.slice(0, 3).map((g) => (
+          <RefBadge key={g.name} {...g} />
+        ))}
+      </div>
 
-      {/* Spacer */}
-      <span className="flex-1" />
+      {/* ── Middle: transparent spacer for the graph SVG ────────────── */}
+      <div style={{ width: graphWidth, flexShrink: 0 }} />
 
-      {/* Author */}
-      <span className="text-muted-foreground text-xs shrink-0 hidden md:block">
+      {/* ── Right: commit message + metadata ────────────────────────── */}
+      <span className="flex-1 min-w-0 truncate text-foreground/90 pl-2">
+        {commit.summary}
+      </span>
+
+      <span className="text-muted-foreground text-xs shrink-0 hidden md:block px-3">
         {commit.author_name}
       </span>
 
-      {/* Relative time */}
-      <span className="text-muted-foreground text-xs shrink-0 w-28 text-right">
+      <span className="text-muted-foreground text-xs shrink-0 w-28 text-right pr-3">
         {relative}
       </span>
     </div>

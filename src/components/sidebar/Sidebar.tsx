@@ -3,9 +3,10 @@ import { RefTree } from "./RefTree";
 
 interface Props {
   repoId: string | null;
+  onCheckoutBranch?: (branchName: string) => void;
 }
 
-export function Sidebar({ repoId }: Props) {
+export function Sidebar({ repoId, onCheckoutBranch }: Props) {
   const { data: refs, isLoading } = useRefs(repoId);
 
   return (
@@ -20,7 +21,7 @@ export function Sidebar({ repoId }: Props) {
         </div>
       )}
 
-      {refs && <RefTree refs={refs} />}
+      {refs && <RefTree refs={refs} onCheckoutBranch={onCheckoutBranch} />}
 
       {!repoId && (
         <div className="flex-1 flex items-center justify-center text-xs text-muted-foreground px-3 text-center">

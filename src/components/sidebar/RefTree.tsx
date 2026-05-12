@@ -1,13 +1,21 @@
 import { useState } from "react";
 import type { RefInfo } from "@/lib/ipc";
+import {
+  ContextMenu,
+  ContextMenuContent,
+  ContextMenuItem,
+  ContextMenuTrigger,
+} from "@/components/ui/context-menu";
 
 interface GroupProps {
   label: string;
   refs: RefInfo[];
   onSelect?: (ref: RefInfo) => void;
+  onCheckout?: (ref: RefInfo) => void;
+  showContextMenu?: boolean;
 }
 
-function RefGroup({ label, refs, onSelect }: GroupProps) {
+function RefGroup({ label, refs, onSelect, onCheckout, showContextMenu }: GroupProps) {
   const [open, setOpen] = useState(true);
 
   if (refs.length === 0) return null;
@@ -25,8 +33,8 @@ function RefGroup({ label, refs, onSelect }: GroupProps) {
 
       {open && (
         <ul>
-          {refs.map((ref) => (
-            <li key={ref.name}>
+          {refs.map((ref) => {
+            const btn = (
               <button
                 className={`w-full text-left px-4 py-0.5 text-sm truncate hover:bg-white/5 rounded
                   ${ref.is_head ? "text-green-400 font-semibold" : "text-foreground/80"}`}
@@ -35,8 +43,32 @@ function RefGroup({ label, refs, onSelect }: GroupProps) {
                 {ref.is_head && <span className="mr-1">●</span>}
                 {ref.shorthand}
               </button>
-            </li>
-          ))}
+            );
+
+            if (!showContextMenu || !onCheckout) {
+              return <li key={ref.name}>{btn}</li>;
+            }
+
+            return (
+              <li key={ref.name}>
+                <ContextMenu>
+                  <ContextMenuTrigger>{btn}</ContextMenuTrigger>
+                  <ContextMenuContent>
+                    {!ref.is_head && (
+                      <ContextMenuItem onClick={() => onCheckout(ref)}>
+                        Checkout {ref.shorthand}
+                      </ContextMenuItem>
+                    )}
+                    {ref.is_head && (
+                      <ContextMenuItem disabled className="text-muted-foreground">
+                        Current branch
+                      </ContextMenuItem>
+                    )}
+                  </ContextMenuContent>
+                </ContextMenu>
+              </li>
+            );
+          })}
         </ul>
       )}
     </div>
@@ -46,16 +78,23 @@ function RefGroup({ label, refs, onSelect }: GroupProps) {
 interface Props {
   refs: RefInfo[];
   onSelectRef?: (ref: RefInfo) => void;
+  onCheckoutBranch?: (branchName: string) => void;
 }
 
-export function RefTree({ refs, onSelectRef }: Props) {
+export function RefTree({ refs, onSelectRef, onCheckoutBranch }: Props) {
   const local = refs.filter((r) => r.kind === "local_branch");
   const remote = refs.filter((r) => r.kind === "remote_branch");
   const tags = refs.filter((r) => r.kind === "tag");
 
   return (
     <div className="overflow-auto flex-1">
-      <RefGroup label="Branches" refs={local} onSelect={onSelectRef} />
+      <RefGroup
+        label="Branches"
+        refs={local}
+        onSelect={onSelectRef}
+        onCheckout={onCheckoutBranch ? (ref) => onCheckoutBranch(ref.shorthand) : undefined}
+        showContextMenu
+      />
       <RefGroup label="Remotes" refs={remote} onSelect={onSelectRef} />
       <RefGroup label="Tags" refs={tags} onSelect={onSelectRef} />
     </div>

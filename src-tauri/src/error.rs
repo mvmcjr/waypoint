@@ -11,6 +11,10 @@ pub enum Error {
     NotARepo(String),
     #[error("commit not found: {0}")]
     CommitNotFound(String),
+    #[error("{0}")]
+    InvalidArg(String),
+    #[error("rebase conflict: {0}")]
+    RebaseConflict(String),
 }
 
 impl Serialize for Error {

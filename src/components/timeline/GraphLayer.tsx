@@ -1,13 +1,12 @@
 import type { PositionedCommit } from "@/lib/ipc";
 
-// One lane column is this many pixels wide.
-export const LANE_WIDTH = 16;
-// Height of each commit row in pixels — must match CommitRow.
+export const LANE_WIDTH = 20;
 export const ROW_HEIGHT = 32;
-// Radius of the dot drawn for each commit.
+export const REFS_COL_WIDTH = 180;
 const DOT_R = 5;
+// Corner radius for lane-change curves (GitKraken "elbow" style).
+const CURVE_R = 6;
 
-// 8 distinct lane colors cycling.
 const LANE_COLORS = [
   "#7c83fd",
   "#fd7c7c",
@@ -19,117 +18,130 @@ const LANE_COLORS = [
   "#c3fd7c",
 ];
 
-function laneColor(idx: number) {
+export function laneColor(idx: number) {
   return LANE_COLORS[idx % LANE_COLORS.length];
+}
+
+function cx(lane: number) {
+  return lane * LANE_WIDTH + LANE_WIDTH / 2;
+}
+function cy(row: number, startRow: number) {
+  return (row - startRow) * ROW_HEIGHT + ROW_HEIGHT / 2;
 }
 
 interface Props {
   commits: PositionedCommit[];
-  // Virtualized offset: first visible row index.
   startRow: number;
-  // Number of visible rows.
   visibleRows: number;
-  // Width of the SVG (determined by max lane count).
   width: number;
   onSelectOid: (oid: string) => void;
   selectedOid: string | null;
+  headOid: string | null;
+  /** When true, draw a short line from the top of the SVG to the HEAD dot
+   *  so it visually connects to the WIP row rendered above. */
+  hasWip?: boolean;
 }
 
-export function GraphLayer({ commits, startRow, visibleRows, width, onSelectOid, selectedOid }: Props) {
+export function GraphLayer({ commits, startRow, visibleRows, width, onSelectOid, selectedOid, headOid, hasWip }: Props) {
   const endRow = startRow + visibleRows;
-  const visible = commits.slice(startRow, endRow);
-
   const svgHeight = visibleRows * ROW_HEIGHT;
+
+  // Collect all edges from every commit whose row-range intersects the viewport.
+  // This ensures edges that start above or end below the viewport are still drawn
+  // as they pass through visible rows.
+  const edges: { fromX: number; fromY: number; toX: number; toY: number; color: string }[] = [];
+
+  for (const item of commits) {
+    for (const e of item.edges) {
+      // Skip edges entirely outside the viewport.
+      if (e.from_row >= endRow || e.to_row < startRow) continue;
+
+      const fX = cx(e.from_lane);
+      const fY = cy(e.from_row, startRow);
+      const tX = cx(e.to_lane);
+      const tY = cy(e.to_row, startRow);
+
+      edges.push({ fromX: fX, fromY: fY, toX: tX, toY: tY, color: laneColor(e.color_idx) });
+    }
+  }
+
+  const visible = commits.slice(startRow, Math.min(endRow, commits.length));
 
   return (
     <svg
       width={width}
       height={svgHeight}
-      style={{ display: "block", flexShrink: 0 }}
+      style={{ display: "block", flexShrink: 0, overflow: "hidden" }}
       aria-hidden
     >
-      {/* Pass-through lines for lanes that continue across visible rows */}
-      {visible.map((item) => {
-        const y = (item.row - startRow) * ROW_HEIGHT + ROW_HEIGHT / 2;
-        return item.active_lanes.map((occupant, laneIdx) => {
-          if (!occupant) return null;
-          const x = laneIdx * LANE_WIDTH + LANE_WIDTH / 2;
-          const color = laneColor(laneIdx);
+      {/* Edges */}
+      {edges.map((e, i) => {
+        if (e.fromX === e.toX) {
+          // Straight vertical line — same lane.
           return (
             <line
-              key={`cont-${item.row}-${laneIdx}`}
-              x1={x}
-              y1={y - ROW_HEIGHT / 2}
-              x2={x}
-              y2={y + ROW_HEIGHT / 2}
-              stroke={color}
+              key={i}
+              x1={e.fromX}
+              y1={e.fromY}
+              x2={e.toX}
+              y2={e.toY}
+              stroke={e.color}
               strokeWidth={2}
-              opacity={0.6}
             />
           );
-        });
+        }
+
+        // Lane change: go straight down on the branch's own lane, then make a
+        // tight rounded corner just before arriving at the parent.
+        // This matches the GitKraken style where all branches visibly originate
+        // from the same parent commit rather than from each other.
+        const r = Math.min(CURVE_R, (e.toY - e.fromY) / 2);
+        const d = `M ${e.fromX} ${e.fromY} L ${e.fromX} ${e.toY - 2 * r} Q ${e.fromX} ${e.toY} ${e.toX} ${e.toY}`;
+        return (
+          <path
+            key={i}
+            d={d}
+            fill="none"
+            stroke={e.color}
+            strokeWidth={2}
+          />
+        );
       })}
 
-      {/* Edges — curves between commit dot and parent dot */}
-      {visible.flatMap((item) =>
-        item.edges.map((edge, ei) => {
-          const fromY = (item.row - startRow) * ROW_HEIGHT + ROW_HEIGHT / 2;
-          const toY = (edge.to_row - startRow) * ROW_HEIGHT + ROW_HEIGHT / 2;
-          const fromX = edge.from_lane * LANE_WIDTH + LANE_WIDTH / 2;
-          const toX = edge.to_lane * LANE_WIDTH + LANE_WIDTH / 2;
-          const color = laneColor(item.color_idx);
+      {/* Extension line from top of SVG to HEAD dot when a WIP row sits above */}
+      {hasWip && startRow === 0 && (() => {
+        const h = commits.find((c) => c.commit.oid === headOid);
+        if (!h) return null;
+        const x = cx(h.lane);
+        return <line key="wip-ext" x1={x} y1={0} x2={x} y2={ROW_HEIGHT / 2} stroke={laneColor(h.color_idx)} strokeWidth={2} />;
+      })()}
 
-          if (fromX === toX) {
-            // Straight vertical line
-            return (
-              <line
-                key={`edge-${item.row}-${ei}`}
-                x1={fromX}
-                y1={fromY}
-                x2={toX}
-                y2={toY}
-                stroke={color}
-                strokeWidth={2}
-              />
-            );
-          }
-
-          // Cubic bezier for merges/branches
-          const cp1x = fromX;
-          const cp1y = fromY + ROW_HEIGHT;
-          const cp2x = toX;
-          const cp2y = toY - ROW_HEIGHT;
-          return (
-            <path
-              key={`edge-${item.row}-${ei}`}
-              d={`M ${fromX} ${fromY} C ${cp1x} ${cp1y}, ${cp2x} ${cp2y}, ${toX} ${toY}`}
-              fill="none"
-              stroke={color}
-              strokeWidth={2}
-            />
-          );
-        })
-      )}
-
-      {/* Commit dots */}
+      {/* Commit dots — drawn on top of edges */}
       {visible.map((item) => {
-        const x = item.lane * LANE_WIDTH + LANE_WIDTH / 2;
-        const y = (item.row - startRow) * ROW_HEIGHT + ROW_HEIGHT / 2;
+        const x = cx(item.lane);
+        const y = cy(item.row, startRow);
         const color = laneColor(item.color_idx);
         const isSelected = item.commit.oid === selectedOid;
+        const isHead = item.commit.oid === headOid;
 
         return (
-          <circle
-            key={`dot-${item.row}`}
-            cx={x}
-            cy={y}
-            r={isSelected ? DOT_R + 2 : DOT_R}
-            fill={isSelected ? "#fff" : color}
-            stroke={color}
-            strokeWidth={2}
+          <g
+            key={item.row}
             style={{ cursor: "pointer" }}
             onClick={() => onSelectOid(item.commit.oid)}
-          />
+          >
+            {isHead && (
+              <circle cx={x} cy={y} r={DOT_R + 4} fill="none" stroke="#4ade80" strokeWidth={1.5} opacity={0.5} />
+            )}
+            <circle
+              cx={x}
+              cy={y}
+              r={isSelected ? DOT_R + 2 : DOT_R}
+              fill={isSelected || isHead ? "#fff" : color}
+              stroke={isHead ? "#4ade80" : color}
+              strokeWidth={isHead ? 2.5 : 2}
+            />
+          </g>
         );
       })}
     </svg>

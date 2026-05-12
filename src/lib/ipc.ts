@@ -13,6 +13,7 @@ export interface CommitNode {
 export interface GraphEdge {
   from_lane: number;
   to_lane: number;
+  color_idx: number;
   from_row: number;
   to_row: number;
 }
@@ -22,7 +23,6 @@ export interface PositionedCommit {
   lane: number;
   row: number;
   color_idx: number;
-  active_lanes: (string | null)[];
   edges: GraphEdge[];
 }
 
@@ -51,6 +51,22 @@ export interface DiffLine {
   content: string;
 }
 
+export interface HeadInfo {
+  oid: string;
+  branch: string | null;
+}
+
+export interface StatusInfo {
+  staged_count: number;
+  unstaged_count: number;
+}
+
+export interface FileStatus {
+  path: string;
+  staged: "added" | "modified" | "deleted" | "renamed" | null;
+  unstaged: "modified" | "deleted" | "untracked" | "renamed" | null;
+}
+
 export const ipc = {
   openRepo: (path: string) =>
     invoke<string>("open_repo", { path }),
@@ -66,4 +82,46 @@ export const ipc = {
 
   getCommitDiff: (repoId: string, oid: string) =>
     invoke<FileDiff[]>("get_commit_diff", { repoId, oid }),
+
+  getHeadInfo: (repoId: string) =>
+    invoke<HeadInfo>("get_head_info", { repoId }),
+
+  checkoutBranch: (repoId: string, branchName: string, force: boolean) =>
+    invoke<void>("checkout_branch", { repoId, branchName, force }),
+
+  checkoutCommit: (repoId: string, oid: string, force: boolean) =>
+    invoke<void>("checkout_commit", { repoId, oid, force }),
+
+  createBranchAt: (repoId: string, name: string, oid: string, checkout: boolean) =>
+    invoke<void>("create_branch_at", { repoId, name, oid, checkout }),
+
+  resetHead: (repoId: string, oid: string, kind: "soft" | "mixed" | "hard") =>
+    invoke<void>("reset_head", { repoId, oid, kind }),
+
+  rebaseOnto: (repoId: string, ontoOid: string) =>
+    invoke<void>("rebase_onto", { repoId, ontoOid }),
+
+  getRepoStatus: (repoId: string) =>
+    invoke<StatusInfo>("get_repo_status", { repoId }),
+
+  listStatus: (repoId: string) =>
+    invoke<FileStatus[]>("list_status", { repoId }),
+
+  stageFile: (repoId: string, path: string) =>
+    invoke<void>("stage_file", { repoId, path }),
+
+  unstageFile: (repoId: string, path: string) =>
+    invoke<void>("unstage_file", { repoId, path }),
+
+  stageAll: (repoId: string) =>
+    invoke<void>("stage_all", { repoId }),
+
+  stagePaths: (repoId: string, paths: string[]) =>
+    invoke<void>("stage_paths", { repoId, paths }),
+
+  unstagePaths: (repoId: string, paths: string[]) =>
+    invoke<void>("unstage_paths", { repoId, paths }),
+
+  doCommit: (repoId: string, message: string) =>
+    invoke<void>("do_commit", { repoId, message }),
 };

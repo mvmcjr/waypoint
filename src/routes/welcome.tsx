@@ -13,7 +13,7 @@ async function getStore() {
 }
 
 export function WelcomeScreen() {
-  const { setRepo } = useStore();
+  const { openTab } = useStore();
   const [recent, setRecent] = useState<string[]>([]);
   const [error, setError] = useState<string | null>(null);
 
@@ -32,7 +32,7 @@ export function WelcomeScreen() {
       const store = await getStore();
       await store.set(STORE_KEY, updated);
       setRecent(updated);
-      setRepo(id, path);
+      openTab(id, path);
     } catch (e) {
       setError(String(e));
     }
