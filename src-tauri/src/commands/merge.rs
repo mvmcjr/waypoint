@@ -15,10 +15,19 @@ pub struct MergeResult {
 #[derive(Debug, Serialize)]
 pub struct MergeStatus {
     pub in_progress: bool,
+    /// "merge" | "cherry_pick" | ""
+    pub kind: String,
     pub conflicted_paths: Vec<String>,
     pub merge_head_oid: Option<String>,
-    /// Default commit message pre-filled in the UI (from MERGE_MSG).
+    /// Default commit message pre-filled in the UI.
     pub default_message: String,
+}
+
+#[derive(Debug, Serialize)]
+pub struct CherryPickResult {
+    /// "applied" | "conflicts"
+    pub kind: String,
+    pub conflicted: Vec<String>,
 }
 
 fn io_err(e: std::io::Error) -> Error {
@@ -27,7 +36,8 @@ fn io_err(e: std::io::Error) -> Error {
 
 fn cleanup_merge_state(repo: &git2::Repository) {
     let git_dir = repo.path();
-    for name in &["MERGE_HEAD", "MERGE_MSG", "MERGE_MODE"] {
+    for name in &["MERGE_HEAD", "MERGE_MSG", "MERGE_MODE",
+                  "CHERRY_PICK_HEAD", "CHERRY_PICK_MSG"] {
         let _ = std::fs::remove_file(git_dir.join(name));
     }
 }
@@ -115,43 +125,49 @@ pub fn merge_commit(
     Ok(MergeResult { kind: "merged".into(), conflicted: vec![] })
 }
 
-/// Return the current merge state including any remaining conflicted paths.
+/// Return the current merge/cherry-pick state including any remaining conflicted paths.
 #[tauri::command]
 pub fn get_merge_status(repo_id: String, state: State<RepoState>) -> Result<MergeStatus> {
     let repos = state.0.lock().unwrap();
     let repo = repos.get(&repo_id).ok_or_else(|| Error::RepoNotFound(repo_id.clone()))?;
 
-    let merge_head_path = repo.path().join("MERGE_HEAD");
-    if !merge_head_path.exists() {
+    let git_dir = repo.path();
+    let merge_head_path = git_dir.join("MERGE_HEAD");
+    let cherry_pick_head_path = git_dir.join("CHERRY_PICK_HEAD");
+
+    let (kind, head_path, msg_file) = if merge_head_path.exists() {
+        ("merge", merge_head_path, "MERGE_MSG")
+    } else if cherry_pick_head_path.exists() {
+        ("cherry_pick", cherry_pick_head_path, "CHERRY_PICK_MSG")
+    } else {
         return Ok(MergeStatus {
             in_progress: false,
+            kind: String::new(),
             conflicted_paths: vec![],
             merge_head_oid: None,
             default_message: String::new(),
         });
-    }
+    };
 
-    let merge_head_oid = std::fs::read_to_string(&merge_head_path)
+    let head_oid = std::fs::read_to_string(&head_path)
         .map(|s| s.trim().to_string())
         .unwrap_or_default();
 
     let index = repo.index()?;
     let conflicted_paths = collect_conflict_paths(&index)?;
 
-    let default_message = {
-        let p = repo.path().join("MERGE_MSG");
-        std::fs::read_to_string(p)
-            .unwrap_or_default()
-            .lines()
-            .next()
-            .unwrap_or("")
-            .to_string()
-    };
+    let default_message = std::fs::read_to_string(git_dir.join(msg_file))
+        .unwrap_or_default()
+        .lines()
+        .next()
+        .unwrap_or("")
+        .to_string();
 
     Ok(MergeStatus {
         in_progress: true,
+        kind: kind.to_string(),
         conflicted_paths,
-        merge_head_oid: Some(merge_head_oid),
+        merge_head_oid: Some(head_oid),
         default_message,
     })
 }
@@ -250,7 +266,7 @@ pub fn finish_merge(repo_id: String, message: String, state: State<RepoState>) -
     Ok(())
 }
 
-/// Abort the in-progress merge: hard-reset to HEAD and clean up state files.
+/// Abort the in-progress merge or cherry-pick: hard-reset to HEAD and clean up state files.
 #[tauri::command]
 pub fn abort_merge(repo_id: String, state: State<RepoState>) -> Result<()> {
     let repos = state.0.lock().unwrap();
@@ -258,6 +274,62 @@ pub fn abort_merge(repo_id: String, state: State<RepoState>) -> Result<()> {
 
     let head_commit = repo.head()?.peel_to_commit()?;
     repo.reset(head_commit.as_object(), git2::ResetType::Hard, None)?;
+    cleanup_merge_state(repo);
+    Ok(())
+}
+
+/// Apply the given commit onto HEAD (cherry-pick).
+/// Returns `kind = "applied"` on success or `kind = "conflicts"` with the conflicted paths.
+#[tauri::command]
+pub fn cherry_pick(repo_id: String, oid: String, state: State<RepoState>) -> Result<CherryPickResult> {
+    let repos = state.0.lock().unwrap();
+    let repo = repos.get(&repo_id).ok_or_else(|| Error::RepoNotFound(repo_id.clone()))?;
+
+    let git_oid = git2::Oid::from_str(&oid).map_err(|_| Error::CommitNotFound(oid.clone()))?;
+    let commit = repo.find_commit(git_oid).map_err(|_| Error::CommitNotFound(oid.clone()))?;
+
+    repo.cherrypick(&commit, None)?;
+
+    let mut index = repo.index()?;
+    index.write()?;
+
+    if index.has_conflicts() {
+        let conflicted = collect_conflict_paths(&index)?;
+        let git_dir = repo.path();
+        std::fs::write(git_dir.join("CHERRY_PICK_HEAD"), format!("{}\n", git_oid)).map_err(io_err)?;
+        let msg = commit.message().unwrap_or("").to_string();
+        std::fs::write(git_dir.join("CHERRY_PICK_MSG"), &msg).map_err(io_err)?;
+        return Ok(CherryPickResult { kind: "conflicts".into(), conflicted });
+    }
+
+    // No conflicts — commit with the original message (single parent).
+    let sig = repo.signature()?;
+    let head_commit = repo.head()?.peel_to_commit()?;
+    let tree_oid = index.write_tree()?;
+    let tree = repo.find_tree(tree_oid)?;
+    let message = commit.message().unwrap_or("cherry-picked commit");
+    repo.commit(Some("HEAD"), &sig, &sig, message, &tree, &[&head_commit])?;
+
+    Ok(CherryPickResult { kind: "applied".into(), conflicted: vec![] })
+}
+
+/// Create the cherry-pick commit after all conflicts are resolved (single-parent).
+#[tauri::command]
+pub fn finish_cherry_pick(repo_id: String, message: String, state: State<RepoState>) -> Result<()> {
+    let repos = state.0.lock().unwrap();
+    let repo = repos.get(&repo_id).ok_or_else(|| Error::RepoNotFound(repo_id.clone()))?;
+
+    let mut index = repo.index()?;
+    if index.has_conflicts() {
+        return Err(Error::InvalidArg("Cannot commit: there are unresolved conflicts.".into()));
+    }
+
+    let sig = repo.signature()?;
+    let head_commit = repo.head()?.peel_to_commit()?;
+    let tree_oid = index.write_tree()?;
+    let tree = repo.find_tree(tree_oid)?;
+
+    repo.commit(Some("HEAD"), &sig, &sig, message.trim(), &tree, &[&head_commit])?;
     cleanup_merge_state(repo);
     Ok(())
 }

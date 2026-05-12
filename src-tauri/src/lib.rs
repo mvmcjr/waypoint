@@ -39,6 +39,8 @@ pub fn run() {
             commands::merge::resolve_theirs,
             commands::merge::finish_merge,
             commands::merge::abort_merge,
+            commands::merge::cherry_pick,
+            commands::merge::finish_cherry_pick,
             commands::staging::discard_all,
             commands::stash::stash_push,
             commands::stash::list_stashes,

@@ -42,7 +42,9 @@ pub fn get_repo_status(repo_id: String, state: State<RepoState>) -> Result<Statu
         )
     }).count();
 
-    let merge_in_progress = repo.path().join("MERGE_HEAD").exists();
+    let git_dir = repo.path();
+    let merge_in_progress = git_dir.join("MERGE_HEAD").exists()
+        || git_dir.join("CHERRY_PICK_HEAD").exists();
     Ok(StatusInfo { staged_count, unstaged_count, merge_in_progress })
 }
 

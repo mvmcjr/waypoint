@@ -354,6 +354,63 @@ export function MergeDialog({ repoId, oid, label, currentBranch, onClose, onSucc
   );
 }
 
+// ─── Cherry-pick ───────────────────────────────────────────────────────────
+
+interface CherryPickProps extends BaseProps {
+  oid: string;
+  summary: string;
+  onConflicts: () => void;
+}
+
+export function CherryPickDialog({ repoId, oid, summary, onClose, onSuccess, onConflicts }: CherryPickProps) {
+  const [loading, setLoading] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+
+  async function run() {
+    setLoading(true);
+    setError(null);
+    try {
+      const result = await ipc.cherryPick(repoId, oid);
+      if (result.kind === "conflicts") {
+        onConflicts();
+      } else {
+        onSuccess();
+      }
+    } catch (e) {
+      setError(String(e));
+    } finally {
+      setLoading(false);
+    }
+  }
+
+  return (
+    <Dialog open onOpenChange={(o) => !o && onClose()}>
+      <DialogContent>
+        <DialogHeader>
+          <DialogTitle>Cherry-pick commit</DialogTitle>
+          <DialogDescription>
+            Apply the changes from{" "}
+            <code className="font-mono">{short(oid)}</code> onto the current branch.
+          </DialogDescription>
+        </DialogHeader>
+
+        <p className="text-sm text-foreground/80 border border-border rounded px-3 py-2 bg-muted/30 italic">
+          "{summary}"
+        </p>
+
+        {error && <ErrorNote msg={error} />}
+
+        <DialogFooter>
+          <Button variant="outline" onClick={onClose} disabled={loading}>Cancel</Button>
+          <Button onClick={run} disabled={loading}>
+            {loading ? "Applying…" : "Cherry-pick"}
+          </Button>
+        </DialogFooter>
+      </DialogContent>
+    </Dialog>
+  );
+}
+
 // ─── Rebase Onto ───────────────────────────────────────────────────────────
 
 interface RebaseProps extends BaseProps {

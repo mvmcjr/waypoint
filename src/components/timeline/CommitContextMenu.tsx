@@ -12,7 +12,8 @@ export type CommitAction =
   | { kind: "create-branch"; oid: string }
   | { kind: "reset"; oid: string }
   | { kind: "rebase"; oid: string }
-  | { kind: "merge"; oid: string; label: string };
+  | { kind: "merge"; oid: string; label: string }
+  | { kind: "cherry-pick"; oid: string; summary: string };
 
 interface Props {
   item: PositionedCommit;
@@ -44,6 +45,10 @@ export function CommitContextMenu({ item, onAction, children }: Props) {
 
         <ContextMenuItem onClick={() => onAction({ kind: "merge", oid, label: localBranch })}>
           Merge into current branch
+        </ContextMenuItem>
+
+        <ContextMenuItem onClick={() => onAction({ kind: "cherry-pick", oid, summary: item.commit.summary })}>
+          Cherry-pick onto current branch
         </ContextMenuItem>
 
         <ContextMenuItem onClick={() => onAction({ kind: "rebase", oid })}>

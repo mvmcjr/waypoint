@@ -26,7 +26,9 @@ export function ConflictPanel({ repoId, onDone }: Props) {
   // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [merge?.default_message]);
 
-  if (!merge?.in_progress) return null;
+  if (!merge || !merge.in_progress) return null;
+
+  const isCherryPick = merge.kind === "cherry_pick";
 
   function invalidate() {
     qc.invalidateQueries({ queryKey: ["staging", repoId] });
@@ -61,7 +63,14 @@ export function ConflictPanel({ repoId, onDone }: Props) {
     if (!msg) return;
     setCommitting(true);
     setError(null);
-    try { await ipc.finishMerge(repoId, msg); onDone(); }
+    try {
+      if (isCherryPick) {
+        await ipc.finishCherryPick(repoId, msg);
+      } else {
+        await ipc.finishMerge(repoId, msg);
+      }
+      onDone();
+    }
     catch (e) { setError(String(e)); }
     finally { setCommitting(false); }
   }
@@ -78,7 +87,7 @@ export function ConflictPanel({ repoId, onDone }: Props) {
         <div className="flex items-center gap-1.5">
           <GitMerge size={13} className="text-orange-400 shrink-0" />
           <span className="font-semibold text-orange-300 text-xs uppercase tracking-wide">
-            Merge in Progress
+            {isCherryPick ? "Cherry-pick in Progress" : "Merge in Progress"}
           </span>
         </div>
         <Button
@@ -154,7 +163,7 @@ export function ConflictPanel({ repoId, onDone }: Props) {
           rows={2}
           disabled={disabled}
           className="w-full resize-none rounded border border-border bg-background px-2 py-1.5 text-xs text-foreground placeholder:text-muted-foreground focus:outline-none focus:ring-1 focus:ring-ring disabled:opacity-50"
-          placeholder="Merge commit message…"
+          placeholder={isCherryPick ? "Cherry-pick commit message…" : "Merge commit message…"}
         />
         {error && <p className="text-xs text-destructive break-words">{error}</p>}
         <Button
@@ -166,7 +175,7 @@ export function ConflictPanel({ repoId, onDone }: Props) {
           <GitMerge size={13} />
           {hasConflicts
             ? `Resolve ${conflicts.length} conflict${conflicts.length !== 1 ? "s" : ""} first`
-            : "Commit Merge"}
+            : isCherryPick ? "Commit Cherry-pick" : "Commit Merge"}
         </Button>
       </div>
     </div>

@@ -17,6 +17,7 @@ import {
   ResetDialog,
   RebaseDialog,
   MergeDialog,
+  CherryPickDialog,
 } from "@/components/actions/Dialogs";
 import type { CommitAction } from "@/components/timeline/CommitContextMenu";
 import type { FileDiff } from "@/lib/ipc";
@@ -30,7 +31,8 @@ type DialogState =
   | { kind: "create-branch"; oid: string }
   | { kind: "reset"; oid: string }
   | { kind: "rebase"; oid: string }
-  | { kind: "merge"; oid: string; label: string };
+  | { kind: "merge"; oid: string; label: string }
+  | { kind: "cherry-pick"; oid: string; summary: string };
 
 // ─── Main view ─────────────────────────────────────────────────────────────
 
@@ -111,6 +113,8 @@ export function RepoView() {
       setDialog({ kind: "rebase", oid: action.oid });
     } else if (action.kind === "merge") {
       setDialog({ kind: "merge", oid: action.oid, label: action.label });
+    } else if (action.kind === "cherry-pick") {
+      setDialog({ kind: "cherry-pick", oid: action.oid, summary: action.summary });
     }
   }
 
@@ -277,6 +281,16 @@ export function RepoView() {
           oid={dialog.oid}
           label={dialog.label}
           currentBranch={head?.branch ?? null}
+          onClose={() => setDialog({ kind: "none" })}
+          onSuccess={handleSuccess}
+          onConflicts={handleMergeConflicts}
+        />
+      )}
+      {repoId && dialog.kind === "cherry-pick" && (
+        <CherryPickDialog
+          repoId={repoId}
+          oid={dialog.oid}
+          summary={dialog.summary}
           onClose={() => setDialog({ kind: "none" })}
           onSuccess={handleSuccess}
           onConflicts={handleMergeConflicts}

@@ -75,9 +75,15 @@ export interface MergeResult {
 
 export interface MergeStatus {
   in_progress: boolean;
+  kind: "merge" | "cherry_pick" | "";
   conflicted_paths: string[];
   merge_head_oid: string | null;
   default_message: string;
+}
+
+export interface CherryPickResult {
+  kind: "applied" | "conflicts";
+  conflicted: string[];
 }
 
 export interface FileStatus {
@@ -164,6 +170,12 @@ export const ipc = {
 
   abortMerge: (repoId: string) =>
     invoke<void>("abort_merge", { repoId }),
+
+  cherryPick: (repoId: string, oid: string) =>
+    invoke<CherryPickResult>("cherry_pick", { repoId, oid }),
+
+  finishCherryPick: (repoId: string, message: string) =>
+    invoke<void>("finish_cherry_pick", { repoId, message }),
 
   discardAll: (repoId: string) =>
     invoke<void>("discard_all", { repoId }),
