@@ -1,5 +1,6 @@
 import { useRefs } from "@/lib/queries";
 import { RefTree } from "./RefTree";
+import { StashList } from "./StashList";
 
 interface Props {
   repoId: string | null;
@@ -22,6 +23,7 @@ export function Sidebar({ repoId, onCheckoutBranch }: Props) {
       )}
 
       {refs && <RefTree refs={refs} onCheckoutBranch={onCheckoutBranch} />}
+      {repoId && <StashList repoId={repoId} />}
 
       {!repoId && (
         <div className="flex-1 flex items-center justify-center text-xs text-muted-foreground px-3 text-center">

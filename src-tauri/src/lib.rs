@@ -38,6 +38,12 @@ pub fn run() {
             commands::merge::resolve_theirs,
             commands::merge::finish_merge,
             commands::merge::abort_merge,
+            commands::staging::discard_all,
+            commands::stash::stash_push,
+            commands::stash::list_stashes,
+            commands::stash::pop_stash,
+            commands::stash::apply_stash,
+            commands::stash::drop_stash,
         ])
         .run(tauri::generate_context!())
         .expect("error while running waypoint");

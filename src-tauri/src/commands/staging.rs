@@ -220,6 +220,18 @@ pub fn unstage_paths(repo_id: String, paths: Vec<String>, state: State<RepoState
     Ok(())
 }
 
+/// Discard all staged and unstaged changes to tracked files (hard reset to HEAD).
+/// Untracked files are left untouched.
+#[tauri::command]
+pub fn discard_all(repo_id: String, state: State<RepoState>) -> Result<()> {
+    let repos = state.0.lock().unwrap();
+    let repo = repos.get(&repo_id).ok_or_else(|| Error::RepoNotFound(repo_id.clone()))?;
+
+    let head = repo.head()?.peel_to_commit()?;
+    repo.reset(head.as_object(), git2::ResetType::Hard, None)?;
+    Ok(())
+}
+
 /// Create a commit from the current index with the given message.
 #[tauri::command]
 pub fn do_commit(repo_id: String, message: String, state: State<RepoState>) -> Result<()> {

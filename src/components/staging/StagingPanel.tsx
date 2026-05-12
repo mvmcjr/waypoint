@@ -1,8 +1,9 @@
-import { useState, useMemo } from "react";
+import { useState, useMemo, useEffect } from "react";
 import { useQueryClient } from "@tanstack/react-query";
 import {
   PlusCircle, MinusCircle, ChevronsUp, GitCommitHorizontal,
   ChevronRight, ChevronDown, Folder, FolderOpen,
+  Archive, Trash2,
 } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { ipc, type FileStatus } from "@/lib/ipc";
@@ -236,6 +237,14 @@ export function StagingPanel({ repoId, onCommitSuccess }: Props) {
   const [error, setError] = useState<string | null>(null);
   const [view, setView] = useState<"path" | "tree">("path");
   const [expandedDirs, setExpandedDirs] = useState<Set<string>>(new Set());
+  const [discardArmed, setDiscardArmed] = useState(false);
+
+  // Auto-disarm the discard button after 3 s if not confirmed.
+  useEffect(() => {
+    if (!discardArmed) return;
+    const t = setTimeout(() => setDiscardArmed(false), 3000);
+    return () => clearTimeout(t);
+  }, [discardArmed]);
 
   const staged   = files.filter((f) => f.staged !== null);
   const unstaged = files.filter((f) => f.unstaged !== null);
@@ -270,6 +279,27 @@ export function StagingPanel({ repoId, onCommitSuccess }: Props) {
   }
 
   async function handleStageAll() { await ipc.stageAll(repoId); invalidate(); }
+
+  async function handleStash() {
+    setWorking(true);
+    setError(null);
+    try {
+      await ipc.stashPush(repoId, "");
+      qc.invalidateQueries({ queryKey: ["stashes", repoId] });
+      invalidate();
+    } catch (e) { setError(String(e)); }
+    finally { setWorking(false); }
+  }
+
+  async function handleDiscard() {
+    if (!discardArmed) { setDiscardArmed(true); return; }
+    setDiscardArmed(false);
+    setWorking(true);
+    setError(null);
+    try { await ipc.discardAll(repoId); invalidate(); }
+    catch (e) { setError(String(e)); }
+    finally { setWorking(false); }
+  }
 
   async function handleCommit() {
     const msg = summary.trim();
@@ -315,16 +345,46 @@ export function StagingPanel({ repoId, onCommitSuccess }: Props) {
           ))}
         </div>
 
-        <Button
-          size="sm"
-          variant="ghost"
-          className="h-6 px-2 text-xs gap-1 shrink-0"
-          onClick={handleStageAll}
-          disabled={unstaged.length === 0 || disabled}
-        >
-          <ChevronsUp size={12} />
-          Stage All
-        </Button>
+        <div className="flex items-center gap-0.5 ml-auto">
+          {/* Stash */}
+          <Button
+            size="sm"
+            variant="ghost"
+            className="h-6 px-2 text-xs gap-1 shrink-0"
+            onClick={handleStash}
+            disabled={staged.length === 0 && unstaged.length === 0 || disabled}
+            title="Stash all changes"
+          >
+            <Archive size={12} />
+          </Button>
+
+          {/* Discard — two-step armed confirmation */}
+          <Button
+            size="sm"
+            variant="ghost"
+            onClick={handleDiscard}
+            disabled={staged.length === 0 && unstaged.length === 0 || disabled}
+            title={discardArmed ? "Click again to confirm discard" : "Discard all changes"}
+            className={[
+              "h-6 px-2 text-xs gap-1 shrink-0 transition-colors",
+              discardArmed ? "text-destructive hover:text-destructive" : "",
+            ].join(" ")}
+          >
+            {discardArmed ? <span className="text-[10px]">Discard?</span> : <Trash2 size={12} />}
+          </Button>
+
+          {/* Stage All */}
+          <Button
+            size="sm"
+            variant="ghost"
+            className="h-6 px-2 text-xs gap-1 shrink-0"
+            onClick={handleStageAll}
+            disabled={unstaged.length === 0 || disabled}
+          >
+            <ChevronsUp size={12} />
+            Stage All
+          </Button>
+        </div>
       </div>
 
       {/* File lists */}

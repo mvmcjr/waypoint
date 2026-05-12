@@ -62,6 +62,12 @@ export interface StatusInfo {
   merge_in_progress: boolean;
 }
 
+export interface StashEntry {
+  index: number;
+  message: string;
+  oid: string;
+}
+
 export interface MergeResult {
   kind: "fast_forward" | "merged" | "up_to_date" | "conflicts";
   conflicted: string[];
@@ -155,4 +161,22 @@ export const ipc = {
 
   abortMerge: (repoId: string) =>
     invoke<void>("abort_merge", { repoId }),
+
+  discardAll: (repoId: string) =>
+    invoke<void>("discard_all", { repoId }),
+
+  stashPush: (repoId: string, message: string) =>
+    invoke<void>("stash_push", { repoId, message }),
+
+  listStashes: (repoId: string) =>
+    invoke<StashEntry[]>("list_stashes", { repoId }),
+
+  popStash: (repoId: string, index: number) =>
+    invoke<void>("pop_stash", { repoId, index }),
+
+  applyStash: (repoId: string, index: number) =>
+    invoke<void>("apply_stash", { repoId, index }),
+
+  dropStash: (repoId: string, index: number) =>
+    invoke<void>("drop_stash", { repoId, index }),
 };

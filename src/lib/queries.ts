@@ -56,6 +56,16 @@ export function useRepoStatus(repoId: string | null) {
   });
 }
 
+export function useStashes(repoId: string | null) {
+  return useQuery({
+    queryKey: ["stashes", repoId],
+    queryFn: () => ipc.listStashes(repoId!),
+    enabled: !!repoId,
+    staleTime: Infinity,
+    refetchOnWindowFocus: "always",
+  });
+}
+
 export function useMergeStatus(repoId: string | null) {
   return useQuery({
     queryKey: ["merge-status", repoId],
@@ -75,5 +85,6 @@ export function useRefreshRepo(repoId: string | null) {
     qc.invalidateQueries({ queryKey: ["status", repoId] });
     qc.invalidateQueries({ queryKey: ["staging", repoId] });
     qc.invalidateQueries({ queryKey: ["merge-status", repoId] });
+    qc.invalidateQueries({ queryKey: ["stashes", repoId] });
   }, [qc, repoId]);
 }
