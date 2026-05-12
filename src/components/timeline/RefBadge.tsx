@@ -38,6 +38,9 @@ export function groupRefs(refs: string[], headBranch: string | null): RefGroup[]
     groups.push({ name, hasLocal: false, hasRemote: true, isHead: false });
   }
 
+  // Current branch always leftmost.
+  groups.sort((a, b) => (b.isHead ? 1 : 0) - (a.isHead ? 1 : 0));
+
   return groups;
 }
 
