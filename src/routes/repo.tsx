@@ -1,4 +1,5 @@
 import { useEffect, useMemo, useState } from "react";
+import { getCurrentWindow } from "@tauri-apps/api/window";
 import { useStore } from "@/lib/store";
 import { useCommits, useHeadInfo, useRefreshRepo } from "@/lib/queries";
 import { Timeline } from "@/components/timeline/Timeline";
@@ -41,6 +42,18 @@ export function RepoView() {
   useEffect(() => {
     if (data) setCommits(data);
   }, [data, setCommits]);
+
+  // Tauri's WebView doesn't fire browser focus/visibilitychange events, so
+  // refetchOnWindowFocus won't work. Use the native Tauri focus event instead.
+  useEffect(() => {
+    let unlisten: (() => void) | undefined;
+    getCurrentWindow()
+      .onFocusChanged(({ payload: focused }) => {
+        if (focused) refresh();
+      })
+      .then((fn) => { unlisten = fn; });
+    return () => { unlisten?.(); };
+  }, [refresh]);
 
   // Deselect WIP if a commit is selected, and vice-versa.
   function handleSelectCommit(oid: string) {

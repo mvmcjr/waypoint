@@ -8,7 +8,6 @@ export function useCommits(repoId: string | null) {
     queryFn: () => ipc.walkCommits(repoId!, 2000),
     enabled: !!repoId,
     staleTime: Infinity,
-    refetchOnWindowFocus: "always",
   });
 }
 
@@ -18,7 +17,6 @@ export function useRefs(repoId: string | null) {
     queryFn: () => ipc.listRefs(repoId!),
     enabled: !!repoId,
     staleTime: Infinity,
-    refetchOnWindowFocus: "always",
   });
 }
 
@@ -37,7 +35,6 @@ export function useHeadInfo(repoId: string | null) {
     queryFn: () => ipc.getHeadInfo(repoId!),
     enabled: !!repoId,
     staleTime: Infinity,
-    refetchOnWindowFocus: "always",
   });
 }
 
