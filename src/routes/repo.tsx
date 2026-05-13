@@ -1,7 +1,7 @@
 import { useEffect, useMemo, useState } from "react";
 import { getCurrentWindow } from "@tauri-apps/api/window";
 import { useStore } from "@/lib/store";
-import { useCommits, useHeadInfo, useRefreshRepo, useRepoStatus } from "@/lib/queries";
+import { useCommits, useHeadInfo, useRefreshRepo, useRemotes, useRepoStatus } from "@/lib/queries";
 import { Timeline } from "@/components/timeline/Timeline";
 import { Sidebar } from "@/components/sidebar/Sidebar";
 import { CommitDetail } from "@/components/detail/CommitDetail";
@@ -18,9 +18,14 @@ import {
   RebaseDialog,
   MergeDialog,
   CherryPickDialog,
+  FetchDialog,
+  PullDialog,
+  PushDialog,
 } from "@/components/actions/Dialogs";
 import type { CommitAction } from "@/components/timeline/CommitContextMenu";
-import type { FileDiff } from "@/lib/ipc";
+import type { FileDiff, PullResult } from "@/lib/ipc";
+import { RefreshCw, ArrowDown, ArrowUp } from "lucide-react";
+import { Button } from "@/components/ui/button";
 
 // ─── Dialog state ──────────────────────────────────────────────────────────
 
@@ -32,7 +37,10 @@ type DialogState =
   | { kind: "reset"; oid: string }
   | { kind: "rebase"; oid: string }
   | { kind: "merge"; oid: string; label: string }
-  | { kind: "cherry-pick"; oid: string; summary: string };
+  | { kind: "cherry-pick"; oid: string; summary: string }
+  | { kind: "fetch" }
+  | { kind: "pull" }
+  | { kind: "push" };
 
 // ─── Main view ─────────────────────────────────────────────────────────────
 
@@ -43,6 +51,7 @@ export function RepoView() {
   const { data, isLoading, error } = useCommits(repoId);
   const { data: head } = useHeadInfo(repoId);
   const { data: status } = useRepoStatus(repoId);
+  const { data: remotes } = useRemotes(repoId);
   const refresh = useRefreshRepo(repoId);
 
   const [dialog, setDialog] = useState<DialogState>({ kind: "none" });
@@ -135,8 +144,18 @@ export function RepoView() {
     refresh();
   }
 
+  function handlePullResult(result: PullResult) {
+    setDialog({ kind: "none" });
+    if (result.kind === "conflicts") {
+      setWipSelected(true);
+      selectCommit(null);
+    }
+    refresh();
+  }
+
   const searchActive = searchFilter.trim().length > 0;
   const mergeInProgress = !!status?.merge_in_progress;
+  const hasRemotes = (remotes?.length ?? 0) > 0;
 
   return (
     <div className="flex h-full overflow-hidden">
@@ -172,13 +191,49 @@ export function RepoView() {
             <span className="text-xs text-destructive shrink-0">Error: {String(error)}</span>
           )}
 
-          <span className="ml-auto text-xs text-muted-foreground shrink-0">
-            {searchActive
-              ? `${filteredCommits.length} / ${commits.length} commits`
-              : commits.length > 0
-              ? `${commits.length} commits`
-              : null}
-          </span>
+          <div className="ml-auto flex items-center gap-1 shrink-0">
+            {hasRemotes && (
+              <>
+                <Button
+                  variant="ghost"
+                  size="sm"
+                  className="h-6 px-2 text-xs gap-1"
+                  onClick={() => setDialog({ kind: "fetch" })}
+                >
+                  <RefreshCw size={11} />
+                  Fetch
+                </Button>
+                <Button
+                  variant="ghost"
+                  size="sm"
+                  className="h-6 px-2 text-xs gap-1"
+                  disabled={!head?.branch}
+                  onClick={() => setDialog({ kind: "pull" })}
+                >
+                  <ArrowDown size={11} />
+                  Pull
+                </Button>
+                <Button
+                  variant="ghost"
+                  size="sm"
+                  className="h-6 px-2 text-xs gap-1"
+                  disabled={!head?.branch}
+                  onClick={() => setDialog({ kind: "push" })}
+                >
+                  <ArrowUp size={11} />
+                  Push
+                </Button>
+                <div className="w-px h-3.5 bg-border mx-0.5" />
+              </>
+            )}
+            <span className="text-xs text-muted-foreground">
+              {searchActive
+                ? `${filteredCommits.length} / ${commits.length} commits`
+                : commits.length > 0
+                ? `${commits.length} commits`
+                : null}
+            </span>
+          </div>
         </header>
 
         <div className="flex flex-1 overflow-hidden">
@@ -294,6 +349,32 @@ export function RepoView() {
           onClose={() => setDialog({ kind: "none" })}
           onSuccess={handleSuccess}
           onConflicts={handleMergeConflicts}
+        />
+      )}
+      {repoId && remotes && dialog.kind === "fetch" && (
+        <FetchDialog
+          repoId={repoId}
+          remotes={remotes}
+          onClose={() => setDialog({ kind: "none" })}
+          onSuccess={handleSuccess}
+        />
+      )}
+      {repoId && remotes && head?.branch && dialog.kind === "pull" && (
+        <PullDialog
+          repoId={repoId}
+          remotes={remotes}
+          currentBranch={head.branch}
+          onClose={() => setDialog({ kind: "none" })}
+          onSuccess={handlePullResult}
+        />
+      )}
+      {repoId && remotes && head?.branch && dialog.kind === "push" && (
+        <PushDialog
+          repoId={repoId}
+          remotes={remotes}
+          currentBranch={head.branch}
+          onClose={() => setDialog({ kind: "none" })}
+          onSuccess={handleSuccess}
         />
       )}
     </div>

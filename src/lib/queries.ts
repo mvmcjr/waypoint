@@ -88,6 +88,15 @@ export function useMergeStatus(repoId: string | null) {
   });
 }
 
+export function useRemotes(repoId: string | null) {
+  return useQuery({
+    queryKey: ["remotes", repoId],
+    queryFn: () => ipc.listRemotes(repoId!),
+    enabled: !!repoId,
+    staleTime: Infinity,
+  });
+}
+
 /** Invalidates commits, refs, head, and status after a mutating action. */
 export function useRefreshRepo(repoId: string | null) {
   const qc = useQueryClient();

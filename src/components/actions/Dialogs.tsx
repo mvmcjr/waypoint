@@ -9,7 +9,14 @@ import {
   DialogHeader,
   DialogTitle,
 } from "@/components/ui/dialog";
-import { ipc } from "@/lib/ipc";
+import {
+  Select,
+  SelectContent,
+  SelectItem,
+  SelectTrigger,
+  SelectValue,
+} from "@/components/ui/select";
+import { ipc, type RemoteInfo, type PullResult } from "@/lib/ipc";
 
 // ─── Shared helpers ────────────────────────────────────────────────────────
 
@@ -25,6 +32,231 @@ interface BaseProps {
 
 function ErrorNote({ msg }: { msg: string }) {
   return <p className="text-xs text-destructive mt-2 break-words">{msg}</p>;
+}
+
+// ─── Remote operation helpers ──────────────────────────────────────────────
+
+function RemoteSelect({
+  remotes,
+  value,
+  onChange,
+}: {
+  remotes: RemoteInfo[];
+  value: string;
+  onChange: (v: string) => void;
+}) {
+  if (remotes.length <= 1) {
+    return (
+      <p className="text-sm text-muted-foreground">
+        Remote: <code className="font-mono text-foreground">{value}</code>
+      </p>
+    );
+  }
+  return (
+    <div className="flex flex-col gap-1">
+      <label className="text-xs text-muted-foreground">Remote</label>
+      <Select value={value} onValueChange={(v) => v !== null && onChange(v)}>
+        <SelectTrigger className="w-full">
+          <SelectValue />
+        </SelectTrigger>
+        <SelectContent>
+          {remotes.map((r) => (
+            <SelectItem key={r.name} value={r.name}>
+              {r.name} — {r.url}
+            </SelectItem>
+          ))}
+        </SelectContent>
+      </Select>
+    </div>
+  );
+}
+
+// ─── Fetch ─────────────────────────────────────────────────────────────────
+
+interface FetchProps {
+  repoId: string;
+  remotes: RemoteInfo[];
+  onClose: () => void;
+  onSuccess: () => void;
+}
+
+export function FetchDialog({ repoId, remotes, onClose, onSuccess }: FetchProps) {
+  const [remoteName, setRemoteName] = useState(
+    remotes.find((r) => r.name === "origin")?.name ?? remotes[0]?.name ?? ""
+  );
+  const [loading, setLoading] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+
+  async function run() {
+    setLoading(true);
+    setError(null);
+    try {
+      await ipc.fetchRemote(repoId, remoteName);
+      onSuccess();
+    } catch (e) {
+      setError(String(e));
+    } finally {
+      setLoading(false);
+    }
+  }
+
+  return (
+    <Dialog open onOpenChange={(o) => !o && onClose()}>
+      <DialogContent>
+        <DialogHeader>
+          <DialogTitle>Fetch</DialogTitle>
+          <DialogDescription>
+            Download objects and refs from remote without merging.
+          </DialogDescription>
+        </DialogHeader>
+
+        <RemoteSelect remotes={remotes} value={remoteName} onChange={setRemoteName} />
+
+        {error && <ErrorNote msg={error} />}
+
+        <DialogFooter>
+          <Button variant="outline" onClick={onClose} disabled={loading}>Cancel</Button>
+          <Button onClick={run} disabled={loading || !remoteName}>
+            {loading ? "Fetching…" : "Fetch"}
+          </Button>
+        </DialogFooter>
+      </DialogContent>
+    </Dialog>
+  );
+}
+
+// ─── Pull ──────────────────────────────────────────────────────────────────
+
+interface PullProps {
+  repoId: string;
+  remotes: RemoteInfo[];
+  currentBranch: string;
+  onClose: () => void;
+  onSuccess: (result: PullResult) => void;
+}
+
+export function PullDialog({ repoId, remotes, currentBranch, onClose, onSuccess }: PullProps) {
+  const [remoteName, setRemoteName] = useState(
+    remotes.find((r) => r.name === "origin")?.name ?? remotes[0]?.name ?? ""
+  );
+  const [loading, setLoading] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+
+  async function run() {
+    setLoading(true);
+    setError(null);
+    try {
+      const result = await ipc.pullBranch(repoId, remoteName);
+      onSuccess(result);
+    } catch (e) {
+      setError(String(e));
+    } finally {
+      setLoading(false);
+    }
+  }
+
+  return (
+    <Dialog open onOpenChange={(o) => !o && onClose()}>
+      <DialogContent>
+        <DialogHeader>
+          <DialogTitle>Pull</DialogTitle>
+          <DialogDescription>
+            Fetch and merge{" "}
+            <code className="font-mono">{remoteName}/{currentBranch}</code>{" "}
+            into <code className="font-mono">{currentBranch}</code>.
+          </DialogDescription>
+        </DialogHeader>
+
+        <RemoteSelect remotes={remotes} value={remoteName} onChange={setRemoteName} />
+
+        {error && <ErrorNote msg={error} />}
+
+        <DialogFooter>
+          <Button variant="outline" onClick={onClose} disabled={loading}>Cancel</Button>
+          <Button onClick={run} disabled={loading || !remoteName}>
+            {loading ? "Pulling…" : "Pull"}
+          </Button>
+        </DialogFooter>
+      </DialogContent>
+    </Dialog>
+  );
+}
+
+// ─── Push ──────────────────────────────────────────────────────────────────
+
+interface PushProps {
+  repoId: string;
+  remotes: RemoteInfo[];
+  currentBranch: string;
+  onClose: () => void;
+  onSuccess: () => void;
+}
+
+export function PushDialog({ repoId, remotes, currentBranch, onClose, onSuccess }: PushProps) {
+  const [remoteName, setRemoteName] = useState(
+    remotes.find((r) => r.name === "origin")?.name ?? remotes[0]?.name ?? ""
+  );
+  const [force, setForce] = useState(false);
+  const [loading, setLoading] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+
+  async function run() {
+    setLoading(true);
+    setError(null);
+    try {
+      await ipc.pushBranch(repoId, remoteName, currentBranch, force);
+      onSuccess();
+    } catch (e) {
+      setError(String(e));
+    } finally {
+      setLoading(false);
+    }
+  }
+
+  return (
+    <Dialog open onOpenChange={(o) => !o && onClose()}>
+      <DialogContent>
+        <DialogHeader>
+          <DialogTitle>Push</DialogTitle>
+          <DialogDescription>
+            Push <code className="font-mono">{currentBranch}</code>{" "}
+            to <code className="font-mono">{remoteName}</code>.
+          </DialogDescription>
+        </DialogHeader>
+
+        <RemoteSelect remotes={remotes} value={remoteName} onChange={setRemoteName} />
+
+        <label className="flex items-center gap-2 text-sm cursor-pointer select-none">
+          <input
+            type="checkbox"
+            checked={force}
+            onChange={(e) => setForce(e.target.checked)}
+            className="accent-primary"
+          />
+          Force push (overwrites remote history)
+        </label>
+
+        {force && (
+          <p className="text-xs text-destructive font-semibold">
+            ⚠ Force push will overwrite the remote branch and may cause data loss for collaborators.
+          </p>
+        )}
+
+        {error && <ErrorNote msg={error} />}
+
+        <DialogFooter>
+          <Button variant="outline" onClick={onClose} disabled={loading}>Cancel</Button>
+          <Button
+            variant={force ? "destructive" : "default"}
+            onClick={run}
+            disabled={loading || !remoteName}
+          >
+            {loading ? "Pushing…" : force ? "Force Push" : "Push"}
+          </Button>
+        </DialogFooter>
+      </DialogContent>
+    </Dialog>
+  );
 }
 
 // ─── Checkout Commit (detached HEAD) ───────────────────────────────────────

@@ -92,6 +92,16 @@ export interface FileStatus {
   unstaged: "modified" | "deleted" | "untracked" | "renamed" | null;
 }
 
+export interface RemoteInfo {
+  name: string;
+  url: string;
+}
+
+export interface PullResult {
+  kind: "up_to_date" | "fast_forward" | "merged" | "conflicts";
+  conflicted: string[];
+}
+
 export const ipc = {
   openRepo: (path: string) =>
     invoke<string>("open_repo", { path }),
@@ -194,4 +204,16 @@ export const ipc = {
 
   dropStash: (repoId: string, index: number) =>
     invoke<void>("drop_stash", { repoId, index }),
+
+  listRemotes: (repoId: string) =>
+    invoke<RemoteInfo[]>("list_remotes", { repoId }),
+
+  fetchRemote: (repoId: string, remoteName: string) =>
+    invoke<void>("fetch_remote", { repoId, remoteName }),
+
+  pushBranch: (repoId: string, remoteName: string, branchName: string, force: boolean) =>
+    invoke<void>("push_branch", { repoId, remoteName, branchName, force }),
+
+  pullBranch: (repoId: string, remoteName: string) =>
+    invoke<PullResult>("pull_branch", { repoId, remoteName }),
 };

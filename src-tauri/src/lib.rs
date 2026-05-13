@@ -47,6 +47,10 @@ pub fn run() {
             commands::stash::pop_stash,
             commands::stash::apply_stash,
             commands::stash::drop_stash,
+            commands::remote::list_remotes,
+            commands::remote::fetch_remote,
+            commands::remote::push_branch,
+            commands::remote::pull_branch,
         ])
         .run(tauri::generate_context!())
         .expect("error while running waypoint");
