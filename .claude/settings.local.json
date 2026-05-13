@@ -2,7 +2,11 @@
   "permissions": {
     "allow": [
       "Bash(pnpm add *)",
-      "Bash(cargo check *)"
+      "Bash(cargo check *)",
+      "Bash(Get-ChildItem -Path \"E:\\\\waypoint\" -Recurse -Force -ErrorAction SilentlyContinue)",
+      "Bash(Select-Object -First 50)",
+      "Bash(git add *)",
+      "Bash(git commit -m ' *)"
     ]
   }
 }
