@@ -68,7 +68,6 @@ describe("Timeline", () => {
       author_email: "test@test.com",
       timestamp: 0,
       summary: "First commit",
-      body: "",
       refs: [],
     },
   };
@@ -144,7 +143,7 @@ describe("Timeline", () => {
       ...dummyCommit,
       lane: 0,
       edges: [
-        { from_lane: 0, to_lane: 3, from_row: 0, to_row: 5, color_idx: 0, parent_idx: 0 }
+        { from_lane: 0, to_lane: 3, from_row: 0, to_row: 5, color_idx: 0 }
       ],
     };
 

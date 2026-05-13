@@ -22,7 +22,7 @@ describe("Dialogs", () => {
   describe("PullDialog", () => {
     it("renders and calls ipc.pullBranch on pull", async () => {
       const remotes = [{ name: "origin", url: "https://github.com/test/test.git" }];
-      vi.mocked(ipc.pullBranch).mockResolvedValue({ kind: "success" });
+      vi.mocked(ipc.pullBranch).mockResolvedValue({ kind: "merged", conflicted: [] });
 
       render(
         <PullDialog
@@ -43,7 +43,7 @@ describe("Dialogs", () => {
       expect(ipc.pullBranch).toHaveBeenCalledWith("repo1", "origin");
       
       await waitFor(() => {
-        expect(mockOnSuccess).toHaveBeenCalledWith({ kind: "success" });
+        expect(mockOnSuccess).toHaveBeenCalledWith({ kind: "merged", conflicted: [] });
       });
     });
   });
