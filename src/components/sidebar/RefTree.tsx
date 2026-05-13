@@ -1,4 +1,5 @@
 import { useState } from "react";
+import { GitBranch, Globe, Tag, ChevronRight } from "lucide-react";
 import type { RefInfo } from "@/lib/ipc";
 import {
   ContextMenu,
@@ -7,8 +8,14 @@ import {
   ContextMenuTrigger,
 } from "@/components/ui/context-menu";
 
+const GROUP_META = {
+  Branches: { icon: GitBranch },
+  Remotes:  { icon: Globe },
+  Tags:     { icon: Tag },
+} as const;
+
 interface GroupProps {
-  label: string;
+  label: keyof typeof GROUP_META;
   refs: RefInfo[];
   onSelect?: (ref: RefInfo) => void;
   onCheckout?: (ref: RefInfo) => void;
@@ -17,31 +24,45 @@ interface GroupProps {
 
 function RefGroup({ label, refs, onSelect, onCheckout, showContextMenu }: GroupProps) {
   const [open, setOpen] = useState(true);
+  const { icon: Icon } = GROUP_META[label];
 
   if (refs.length === 0) return null;
 
   return (
-    <div className="mb-1">
+    <div>
       <button
-        className="w-full flex items-center gap-1 px-2 py-1 text-xs text-muted-foreground uppercase tracking-wider hover:text-foreground"
+        className="w-full flex items-center gap-1.5 px-2.5 py-1.5 text-[10px] font-semibold text-muted-foreground/55 uppercase tracking-[0.12em] hover:text-muted-foreground/80 transition-colors"
         onClick={() => setOpen((o) => !o)}
       >
-        <span>{open ? "▾" : "▸"}</span>
+        <Icon size={10} className="opacity-70 shrink-0" />
         <span>{label}</span>
-        <span className="ml-auto text-[10px] opacity-60">{refs.length}</span>
+        <span className="ml-auto flex items-center gap-1">
+          <span className="text-[9px] opacity-40 tabular-nums">{refs.length}</span>
+          <ChevronRight
+            size={10}
+            className={`opacity-35 transition-transform duration-150 ${open ? "rotate-90" : ""}`}
+          />
+        </span>
       </button>
 
       {open && (
-        <ul>
+        <ul className="pb-0.5">
           {refs.map((ref) => {
             const btn = (
               <button
-                className={`w-full text-left px-4 py-0.5 text-sm truncate hover:bg-white/5 rounded
-                  ${ref.is_head ? "text-green-400 font-semibold" : "text-foreground/80"}`}
+                className={[
+                  "w-full text-left px-3 py-[3px] text-[12px] truncate rounded-sm flex items-center gap-2 transition-colors duration-75",
+                  ref.is_head
+                    ? "text-teal-300/90 font-medium hover:bg-teal-500/8"
+                    : "text-foreground/55 hover:text-foreground/80 hover:bg-white/[0.05]",
+                ].join(" ")}
                 onClick={() => onSelect?.(ref)}
               >
-                {ref.is_head && <span className="mr-1">●</span>}
-                {ref.shorthand}
+                <span className={[
+                  "w-1.5 h-1.5 rounded-full shrink-0 transition-colors",
+                  ref.is_head ? "bg-teal-400 shadow-[0_0_4px_rgba(45,212,191,0.5)]" : "bg-transparent",
+                ].join(" ")} />
+                <span className="truncate">{ref.shorthand}</span>
               </button>
             );
 
@@ -82,12 +103,12 @@ interface Props {
 }
 
 export function RefTree({ refs, onSelectRef, onCheckoutBranch }: Props) {
-  const local = refs.filter((r) => r.kind === "local_branch");
+  const local  = refs.filter((r) => r.kind === "local_branch");
   const remote = refs.filter((r) => r.kind === "remote_branch");
-  const tags = refs.filter((r) => r.kind === "tag");
+  const tags   = refs.filter((r) => r.kind === "tag");
 
   return (
-    <div className="overflow-auto flex-1">
+    <div className="overflow-auto flex-1 py-1">
       <RefGroup
         label="Branches"
         refs={local}
@@ -96,7 +117,7 @@ export function RefTree({ refs, onSelectRef, onCheckoutBranch }: Props) {
         showContextMenu
       />
       <RefGroup label="Remotes" refs={remote} onSelect={onSelectRef} />
-      <RefGroup label="Tags" refs={tags} onSelect={onSelectRef} />
+      <RefGroup label="Tags"    refs={tags}   onSelect={onSelectRef} />
     </div>
   );
 }

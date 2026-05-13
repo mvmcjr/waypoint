@@ -11,13 +11,15 @@ export function Sidebar({ repoId, onCheckoutBranch }: Props) {
   const { data: refs, isLoading } = useRefs(repoId);
 
   return (
-    <aside className="w-52 shrink-0 border-r border-border flex flex-col bg-sidebar text-sidebar-foreground overflow-hidden">
-      <div className="px-3 py-2 border-b border-border text-xs font-semibold text-muted-foreground uppercase tracking-wider">
-        Repository
+    <aside className="w-56 shrink-0 border-r border-border flex flex-col bg-sidebar text-sidebar-foreground overflow-hidden">
+      <div className="px-3 py-2.5 border-b border-border">
+        <span className="text-[10px] font-semibold text-muted-foreground/60 uppercase tracking-[0.14em]">
+          Repository
+        </span>
       </div>
 
       {isLoading && (
-        <div className="flex-1 flex items-center justify-center text-xs text-muted-foreground">
+        <div className="flex-1 flex items-center justify-center text-xs text-muted-foreground/60">
           Loading…
         </div>
       )}
@@ -26,7 +28,7 @@ export function Sidebar({ repoId, onCheckoutBranch }: Props) {
       {repoId && <StashList repoId={repoId} />}
 
       {!repoId && (
-        <div className="flex-1 flex items-center justify-center text-xs text-muted-foreground px-3 text-center">
+        <div className="flex-1 flex items-center justify-center text-[11px] text-muted-foreground/50 px-4 text-center leading-relaxed">
           Open a repository to see branches
         </div>
       )}

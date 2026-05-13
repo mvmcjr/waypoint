@@ -150,9 +150,9 @@ export function RepoView() {
         <header className="shrink-0 border-b border-border px-3 py-1.5 flex items-center gap-3">
           <span className="text-sm font-semibold text-foreground shrink-0">
             {head?.branch ? (
-              <span className="text-green-400">⎇ {head.branch}</span>
+              <span className="text-teal-400">⎇ {head.branch}</span>
             ) : head ? (
-              <span className="text-yellow-400">⎇ detached {head.oid.slice(0, 8)}</span>
+              <span className="text-amber-400/90">⎇ detached {head.oid.slice(0, 8)}</span>
             ) : (
               "Timeline"
             )}

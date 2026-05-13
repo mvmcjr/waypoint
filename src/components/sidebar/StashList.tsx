@@ -1,5 +1,6 @@
 import { useState } from "react";
 import { useQueryClient } from "@tanstack/react-query";
+import { Archive, ChevronRight } from "lucide-react";
 import {
   ContextMenu,
   ContextMenuContent,
@@ -51,42 +52,51 @@ export function StashList({ repoId, onApplied }: Props) {
   }
 
   return (
-    <div className="mb-1">
+    <div className="border-t border-border/50">
       <button
-        className="w-full flex items-center gap-1 px-2 py-1 text-xs text-muted-foreground uppercase tracking-wider hover:text-foreground"
+        className="w-full flex items-center gap-1.5 px-2.5 py-1.5 text-[10px] font-semibold text-muted-foreground/55 uppercase tracking-[0.12em] hover:text-muted-foreground/80 transition-colors"
         onClick={() => setOpen((o) => !o)}
       >
-        <span>{open ? "▾" : "▸"}</span>
+        <Archive size={10} className="opacity-70 shrink-0" />
         <span>Stashes</span>
-        <span className="ml-auto text-[10px] opacity-60">{stashes.length}</span>
+        <span className="ml-auto flex items-center gap-1">
+          <span className="text-[9px] opacity-40 tabular-nums">{stashes.length}</span>
+          <ChevronRight
+            size={10}
+            className={`opacity-35 transition-transform duration-150 ${open ? "rotate-90" : ""}`}
+          />
+        </span>
       </button>
 
       {open && (
-        <ul>
+        <ul className="pb-1">
           {stashes.map((s) => {
-            // Strip the git-generated prefix "On <branch>: " if present
-            const label = s.message.replace(/^(WIP on [^:]+: [a-f0-9]+ )/, "").replace(/^On [^:]+: /, "");
+            const label = s.message
+              .replace(/^(WIP on [^:]+: [a-f0-9]+ )/, "")
+              .replace(/^On [^:]+: /, "");
             return (
               <li key={s.index}>
                 <ContextMenu>
                   <ContextMenuTrigger>
                     <button
                       disabled={busy}
-                      className="w-full text-left px-4 py-0.5 text-sm truncate hover:bg-white/5 rounded text-foreground/70 disabled:opacity-40"
+                      className="w-full text-left px-3 py-[3px] text-[12px] truncate rounded-sm flex items-center gap-2 text-foreground/50 hover:text-foreground/75 hover:bg-white/[0.05] transition-colors disabled:opacity-30"
                       title={s.message}
                     >
-                      <span className="text-[10px] font-mono text-muted-foreground mr-1.5">
+                      <span className="font-mono text-[9px] text-muted-foreground/30 shrink-0 w-3.5 text-right tabular-nums">
                         {s.index}
                       </span>
-                      {label}
+                      <span className="truncate">{label}</span>
                     </button>
                   </ContextMenuTrigger>
                   <ContextMenuContent className="w-44">
                     <ContextMenuItem onClick={() => handlePop(s.index)}>
-                      Pop  <span className="ml-auto text-xs text-muted-foreground">apply + drop</span>
+                      Pop
+                      <span className="ml-auto text-xs text-muted-foreground">apply + drop</span>
                     </ContextMenuItem>
                     <ContextMenuItem onClick={() => handleApply(s.index)}>
-                      Apply  <span className="ml-auto text-xs text-muted-foreground">keep stash</span>
+                      Apply
+                      <span className="ml-auto text-xs text-muted-foreground">keep stash</span>
                     </ContextMenuItem>
                     <ContextMenuSeparator />
                     <ContextMenuItem

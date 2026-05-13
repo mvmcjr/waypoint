@@ -1,26 +1,21 @@
 import { Monitor, Globe } from "lucide-react";
 
 export interface RefGroup {
-  /** Display name (branch name without remote prefix). */
   name: string;
   hasLocal: boolean;
   hasRemote: boolean;
   isHead: boolean;
 }
 
-/** Parse a commit's raw ref shorthand strings into display groups. */
 export function groupRefs(refs: string[], headBranch: string | null): RefGroup[] {
-  // Drop bare HEAD pointers — they're implicit from headBranch.
   const visible = refs.filter((r) => r !== "HEAD" && r !== "origin/HEAD");
 
-  // Local branches have no slash; remote tracking branches start with "<remote>/".
   const locals = visible.filter((r) => !r.includes("/"));
   const remotes = visible.filter((r) => r.includes("/"));
 
   const usedRemotes = new Set<string>();
   const groups: RefGroup[] = [];
 
-  // Pair each local branch with its remote counterpart (any "<remote>/name" suffix).
   for (const local of locals) {
     const matched = remotes.filter((r) => {
       const slash = r.indexOf("/");
@@ -30,7 +25,6 @@ export function groupRefs(refs: string[], headBranch: string | null): RefGroup[]
     groups.push({ name: local, hasLocal: true, hasRemote: matched.length > 0, isHead: local === headBranch });
   }
 
-  // Remote-only refs (no matching local branch).
   for (const remote of remotes) {
     if (usedRemotes.has(remote)) continue;
     const slash = remote.indexOf("/");
@@ -38,7 +32,6 @@ export function groupRefs(refs: string[], headBranch: string | null): RefGroup[]
     groups.push({ name, hasLocal: false, hasRemote: true, isHead: false });
   }
 
-  // Current branch always leftmost.
   groups.sort((a, b) => (b.isHead ? 1 : 0) - (a.isHead ? 1 : 0));
 
   return groups;
@@ -47,25 +40,29 @@ export function groupRefs(refs: string[], headBranch: string | null): RefGroup[]
 interface Props extends RefGroup {}
 
 export function RefBadge({ name, hasLocal, hasRemote, isHead }: Props) {
-  const base =
-    "inline-flex items-center gap-1 px-1.5 py-0.5 rounded text-[10px] font-mono font-semibold shrink-0 max-w-full";
+  const base = "inline-flex items-center gap-0.5 px-1.5 py-px rounded text-[10px] font-mono shrink-0 max-w-[124px]";
 
   if (isHead) {
     return (
-      <span className={`${base} bg-green-500/25 text-green-300 border border-green-400/60 ring-1 ring-green-400/20`}>
-        <span className="text-[9px]">✓</span>
+      <span className={`${base} bg-teal-500/20 text-teal-300 border border-teal-500/40 font-medium`}>
+        <span className="text-[8px] mr-0.5 opacity-80">✓</span>
         <span className="truncate">{name}</span>
-        {hasLocal && <Monitor size={9} className="shrink-0 opacity-80" />}
-        {hasRemote && <Globe size={9} className="shrink-0 opacity-80" />}
       </span>
     );
   }
 
+  const colorClass =
+    hasLocal && hasRemote
+      ? "bg-indigo-500/15 text-indigo-300/90 border border-indigo-500/25"
+      : hasLocal
+      ? "bg-slate-500/12 text-slate-300/80 border border-slate-500/20"
+      : "bg-slate-600/10 text-slate-400/70 border border-slate-500/15";
+
   return (
-    <span className={`${base} bg-blue-500/15 text-blue-300 border border-blue-500/30`}>
+    <span className={`${base} ${colorClass}`}>
       <span className="truncate">{name}</span>
-      {hasLocal && <Monitor size={9} className="shrink-0 opacity-60" />}
-      {hasRemote && <Globe size={9} className="shrink-0 opacity-60" />}
+      {hasLocal && <Monitor size={8} className="shrink-0 opacity-40 ml-0.5" />}
+      {hasRemote && <Globe size={8} className="shrink-0 opacity-40" />}
     </span>
   );
 }

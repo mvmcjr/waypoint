@@ -17,19 +17,24 @@ export function CommitRow({ item, graphWidth, isSelected, isHead, headBranch, is
   const { commit } = item;
   const relative = formatDistanceToNow(new Date(commit.timestamp * 1000), { addSuffix: true });
   const refGroups = groupRefs(commit.refs, headBranch);
+  const shortHash = commit.oid.slice(0, 7);
 
   const rowClass = [
-    "flex items-center cursor-pointer select-none text-sm border-l-2",
-    isStash ? "opacity-40 italic" : "",
-    isHead ? "border-l-green-400" : "border-l-transparent",
-    isHead && !isSelected ? "bg-green-500/5" : "",
-    isSelected ? "bg-white/10" : "hover:bg-white/5",
+    "flex items-center cursor-pointer select-none text-sm border-l-2 transition-colors duration-75",
+    isStash ? "opacity-35 italic" : "",
+    isHead && isSelected
+      ? "border-l-teal-400 bg-teal-500/10"
+      : isHead
+      ? "border-l-teal-500/70 bg-teal-500/[0.04]"
+      : isSelected
+      ? "border-l-teal-400/50 bg-white/[0.07]"
+      : "border-l-transparent hover:bg-white/[0.04]",
   ].join(" ");
 
   return (
     <div onClick={onClick} style={{ height: ROW_HEIGHT }} className={rowClass}>
 
-      {/* ── Left: refs column (fixed width, left of graph) ──────────── */}
+      {/* Left: refs column */}
       <div
         style={{ width: REFS_COL_WIDTH, flexShrink: 0 }}
         className="flex items-center gap-0.5 px-2 overflow-hidden"
@@ -39,21 +44,30 @@ export function CommitRow({ item, graphWidth, isSelected, isHead, headBranch, is
         ))}
       </div>
 
-      {/* ── Middle: transparent spacer for the graph SVG ────────────── */}
+      {/* Graph spacer */}
       <div style={{ width: graphWidth, flexShrink: 0 }} />
 
-      {/* ── Right: commit message + metadata ────────────────────────── */}
-      <span className="flex-1 min-w-0 truncate text-foreground/90 pl-2">
+      {/* Message */}
+      <span className={[
+        "flex-1 min-w-0 truncate pl-2 text-[13px]",
+        isHead ? "text-foreground/95" : "text-foreground/75",
+        isStash ? "" : "",
+      ].join(" ")}>
         {commit.summary}
       </span>
 
-      <span className="text-muted-foreground text-xs shrink-0 hidden md:block px-3">
-        {commit.author_name}
-      </span>
-
-      <span className="text-muted-foreground text-xs shrink-0 w-28 text-right pr-3">
-        {relative}
-      </span>
+      {/* Right metadata cluster */}
+      <div className="shrink-0 flex items-center gap-2.5 pr-3">
+        <span className="text-muted-foreground/50 text-[11px] shrink-0 hidden md:block max-w-[88px] truncate">
+          {commit.author_name}
+        </span>
+        <span className="font-mono text-[10px] text-muted-foreground/30 shrink-0 hidden lg:block tracking-tight">
+          {shortHash}
+        </span>
+        <span className="text-muted-foreground/60 text-[11px] shrink-0 w-[90px] text-right tabular-nums">
+          {relative}
+        </span>
+      </div>
     </div>
   );
 }
