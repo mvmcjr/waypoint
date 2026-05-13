@@ -71,59 +71,6 @@ function RemoteSelect({
   );
 }
 
-// ─── Fetch ─────────────────────────────────────────────────────────────────
-
-interface FetchProps {
-  repoId: string;
-  remotes: RemoteInfo[];
-  onClose: () => void;
-  onSuccess: () => void;
-}
-
-export function FetchDialog({ repoId, remotes, onClose, onSuccess }: FetchProps) {
-  const [remoteName, setRemoteName] = useState(
-    remotes.find((r) => r.name === "origin")?.name ?? remotes[0]?.name ?? ""
-  );
-  const [loading, setLoading] = useState(false);
-  const [error, setError] = useState<string | null>(null);
-
-  async function run() {
-    setLoading(true);
-    setError(null);
-    try {
-      await ipc.fetchRemote(repoId, remoteName);
-      onSuccess();
-    } catch (e) {
-      setError(String(e));
-    } finally {
-      setLoading(false);
-    }
-  }
-
-  return (
-    <Dialog open onOpenChange={(o) => !o && onClose()}>
-      <DialogContent>
-        <DialogHeader>
-          <DialogTitle>Fetch</DialogTitle>
-          <DialogDescription>
-            Download objects and refs from remote without merging.
-          </DialogDescription>
-        </DialogHeader>
-
-        <RemoteSelect remotes={remotes} value={remoteName} onChange={setRemoteName} />
-
-        {error && <ErrorNote msg={error} />}
-
-        <DialogFooter>
-          <Button variant="outline" onClick={onClose} disabled={loading}>Cancel</Button>
-          <Button onClick={run} disabled={loading || !remoteName}>
-            {loading ? "Fetching…" : "Fetch"}
-          </Button>
-        </DialogFooter>
-      </DialogContent>
-    </Dialog>
-  );
-}
 
 // ─── Pull ──────────────────────────────────────────────────────────────────
 

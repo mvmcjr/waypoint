@@ -18,12 +18,11 @@ import {
   RebaseDialog,
   MergeDialog,
   CherryPickDialog,
-  FetchDialog,
   PullDialog,
   PushDialog,
 } from "@/components/actions/Dialogs";
 import type { CommitAction } from "@/components/timeline/CommitContextMenu";
-import type { FileDiff, PullResult, RefInfo } from "@/lib/ipc";
+import { ipc, type FileDiff, type PullResult, type RefInfo } from "@/lib/ipc";
 import { RefreshCw, ArrowDown, ArrowUp } from "lucide-react";
 import { Button } from "@/components/ui/button";
 
@@ -38,7 +37,6 @@ type DialogState =
   | { kind: "rebase"; oid: string }
   | { kind: "merge"; oid: string; label: string }
   | { kind: "cherry-pick"; oid: string; summary: string }
-  | { kind: "fetch" }
   | { kind: "pull" }
   | { kind: "push" };
 
@@ -60,6 +58,23 @@ export function RepoView() {
   const [wipSelected, setWipSelected] = useState(false);
   const [focusedFile, setFocusedFile] = useState<FileDiff | null>(null);
   const [focusedStagingFile, setFocusedStagingFile] = useState<{ path: string; section: "staged" | "unstaged" } | null>(null);
+  const [isFetching, setIsFetching] = useState(false);
+
+  async function handleFetch() {
+    if (!remotes || remotes.length === 0 || !repoId) return;
+    const remoteName = remotes.find((r) => r.name === "origin")?.name ?? remotes[0]?.name ?? "";
+    if (!remoteName) return;
+
+    setIsFetching(true);
+    try {
+      await ipc.fetchRemote(repoId, remoteName);
+      refresh();
+    } catch (e) {
+      console.error("Fetch failed", e);
+    } finally {
+      setIsFetching(false);
+    }
+  }
 
   useEffect(() => {
     if (data) setCommits(data);
@@ -208,9 +223,10 @@ export function RepoView() {
                   variant="ghost"
                   size="sm"
                   className="h-6 px-2 text-xs gap-1"
-                  onClick={() => setDialog({ kind: "fetch" })}
+                  disabled={isFetching}
+                  onClick={handleFetch}
                 >
-                  <RefreshCw size={11} />
+                  <RefreshCw size={11} className={isFetching ? "animate-spin" : ""} />
                   Fetch
                 </Button>
                 <Button
@@ -360,14 +376,6 @@ export function RepoView() {
           onClose={() => setDialog({ kind: "none" })}
           onSuccess={handleSuccess}
           onConflicts={handleMergeConflicts}
-        />
-      )}
-      {repoId && remotes && dialog.kind === "fetch" && (
-        <FetchDialog
-          repoId={repoId}
-          remotes={remotes}
-          onClose={() => setDialog({ kind: "none" })}
-          onSuccess={handleSuccess}
         />
       )}
       {repoId && remotes && head?.branch && dialog.kind === "pull" && (
