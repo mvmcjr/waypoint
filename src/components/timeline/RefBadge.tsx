@@ -40,7 +40,7 @@ export function groupRefs(refs: string[], headBranch: string | null): RefGroup[]
 interface Props extends RefGroup {}
 
 export function RefBadge({ name, hasLocal, hasRemote, isHead }: Props) {
-  const base = "inline-flex items-center gap-0.5 px-1.5 py-px rounded text-[10px] font-mono shrink-0 max-w-[124px]";
+  const base = "inline-flex items-center gap-0.5 px-1.5 py-px rounded text-[10px] font-mono min-w-0 max-w-[124px]";
 
   if (isHead) {
     return (

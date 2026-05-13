@@ -1,3 +1,4 @@
+import type { RefInfo } from "@/lib/ipc";
 import { useRefs } from "@/lib/queries";
 import { RefTree } from "./RefTree";
 import { StashList } from "./StashList";
@@ -5,9 +6,10 @@ import { StashList } from "./StashList";
 interface Props {
   repoId: string | null;
   onCheckoutBranch?: (branchName: string) => void;
+  onSelectRef?: (ref: RefInfo) => void;
 }
 
-export function Sidebar({ repoId, onCheckoutBranch }: Props) {
+export function Sidebar({ repoId, onCheckoutBranch, onSelectRef }: Props) {
   const { data: refs, isLoading } = useRefs(repoId);
 
   return (
@@ -24,7 +26,7 @@ export function Sidebar({ repoId, onCheckoutBranch }: Props) {
         </div>
       )}
 
-      {refs && <RefTree refs={refs} onCheckoutBranch={onCheckoutBranch} />}
+      {refs && <RefTree refs={refs} onSelectRef={onSelectRef} onCheckoutBranch={onCheckoutBranch} />}
       {repoId && <StashList repoId={repoId} />}
 
       {!repoId && (

@@ -1,8 +1,8 @@
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import { getCurrentWindow } from "@tauri-apps/api/window";
 import { useStore } from "@/lib/store";
 import { useCommits, useHeadInfo, useRefreshRepo, useRemotes, useRepoStatus } from "@/lib/queries";
-import { Timeline } from "@/components/timeline/Timeline";
+import { Timeline, type TimelineHandle } from "@/components/timeline/Timeline";
 import { Sidebar } from "@/components/sidebar/Sidebar";
 import { CommitDetail } from "@/components/detail/CommitDetail";
 import { FileDiffPanel } from "@/components/detail/FileDiffPanel";
@@ -23,7 +23,7 @@ import {
   PushDialog,
 } from "@/components/actions/Dialogs";
 import type { CommitAction } from "@/components/timeline/CommitContextMenu";
-import type { FileDiff, PullResult } from "@/lib/ipc";
+import type { FileDiff, PullResult, RefInfo } from "@/lib/ipc";
 import { RefreshCw, ArrowDown, ArrowUp } from "lucide-react";
 import { Button } from "@/components/ui/button";
 
@@ -53,6 +53,8 @@ export function RepoView() {
   const { data: status } = useRepoStatus(repoId);
   const { data: remotes } = useRemotes(repoId);
   const refresh = useRefreshRepo(repoId);
+
+  const timelineRef = useRef<TimelineHandle>(null);
 
   const [dialog, setDialog] = useState<DialogState>({ kind: "none" });
   const [wipSelected, setWipSelected] = useState(false);
@@ -111,6 +113,13 @@ export function RepoView() {
 
   const selectedItem = filteredCommits.find((c) => c.commit.oid === selectedOid) ?? null;
 
+  function handleRefSelect(ref: RefInfo) {
+    if (!ref.target_oid) return;
+    handleSelectCommit(ref.target_oid);
+    // Defer scroll until after React re-renders the selection
+    setTimeout(() => timelineRef.current?.scrollToOid(ref.target_oid!), 0);
+  }
+
   function handleCommitAction(action: CommitAction) {
     if (action.kind === "checkout-detached") {
       setDialog({ kind: "checkout-detached", oid: action.oid });
@@ -162,6 +171,7 @@ export function RepoView() {
       <Sidebar
         repoId={repoId}
         onCheckoutBranch={(branchName) => setDialog({ kind: "checkout-branch", branchName })}
+        onSelectRef={handleRefSelect}
       />
 
       <div className="flex flex-col flex-1 overflow-hidden">
@@ -252,6 +262,7 @@ export function RepoView() {
             />
           ) : (
             <Timeline
+              ref={timelineRef}
               repoId={repoId}
               commits={filteredCommits}
               selectedOid={selectedOid}

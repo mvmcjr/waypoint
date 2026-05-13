@@ -17,6 +17,9 @@ export function CommitRow({ item, graphWidth, isSelected, isHead, headBranch, is
   const { commit } = item;
   const relative = formatDistanceToNow(new Date(commit.timestamp * 1000), { addSuffix: true });
   const refGroups = groupRefs(commit.refs, headBranch);
+  const MAX_REFS = 3;
+  const visibleRefs = refGroups.slice(0, MAX_REFS);
+  const hiddenCount = refGroups.length - MAX_REFS;
   const shortHash = commit.oid.slice(0, 7);
 
   const rowClass = [
@@ -39,9 +42,12 @@ export function CommitRow({ item, graphWidth, isSelected, isHead, headBranch, is
         style={{ width: REFS_COL_WIDTH, flexShrink: 0 }}
         className="flex items-center gap-0.5 px-2 overflow-hidden"
       >
-        {refGroups.slice(0, 3).map((g) => (
+        {visibleRefs.map((g) => (
           <RefBadge key={g.name} {...g} />
         ))}
+        {hiddenCount > 0 && (
+          <span className="text-[9px] font-mono text-muted-foreground/40 shrink-0 pl-0.5">+{hiddenCount}</span>
+        )}
       </div>
 
       {/* Graph spacer */}

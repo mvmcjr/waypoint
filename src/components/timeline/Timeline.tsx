@@ -1,4 +1,4 @@
-import { useRef } from "react";
+import { useRef, forwardRef, useImperativeHandle } from "react";
 import { useVirtualizer } from "@tanstack/react-virtual";
 import type { PositionedCommit } from "@/lib/ipc";
 import { useRepoStatus, useStashes } from "@/lib/queries";
@@ -6,6 +6,10 @@ import { GraphLayer, LANE_WIDTH, ROW_HEIGHT, REFS_COL_WIDTH } from "./GraphLayer
 import { CommitRow } from "./CommitRow";
 import { WipRow } from "./WipRow";
 import { CommitContextMenu, type CommitAction } from "./CommitContextMenu";
+
+export interface TimelineHandle {
+  scrollToOid: (oid: string) => void;
+}
 
 interface Props {
   repoId: string | null;
@@ -20,7 +24,10 @@ interface Props {
   searchActive?: boolean;
 }
 
-export function Timeline({ repoId, commits, selectedOid, headOid, headBranch, onSelectOid, onCommitAction, onWipClick, wipSelected, searchActive }: Props) {
+export const Timeline = forwardRef<TimelineHandle, Props>(function Timeline(
+  { repoId, commits, selectedOid, headOid, headBranch, onSelectOid, onCommitAction, onWipClick, wipSelected, searchActive }: Props,
+  ref
+) {
   const parentRef = useRef<HTMLDivElement>(null);
   const { data: status } = useRepoStatus(repoId);
   const { data: stashes = [] } = useStashes(repoId);
@@ -32,6 +39,13 @@ export function Timeline({ repoId, commits, selectedOid, headOid, headBranch, on
     estimateSize: () => ROW_HEIGHT,
     overscan: 20,
   });
+
+  useImperativeHandle(ref, () => ({
+    scrollToOid(oid: string) {
+      const idx = commits.findIndex((c) => c.commit.oid === oid);
+      if (idx !== -1) rowVirtualizer.scrollToIndex(idx, { align: "center" });
+    },
+  }));
 
   if (commits.length === 0) {
     return (
@@ -137,4 +151,4 @@ export function Timeline({ repoId, commits, selectedOid, headOid, headBranch, on
       </div>
     </div>
   );
-}
+});
