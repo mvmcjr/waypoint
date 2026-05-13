@@ -59,6 +59,56 @@ fn collect_conflict_paths(index: &git2::Index) -> Result<Vec<String>> {
     Ok(paths)
 }
 
+/// Stash any tracked uncommitted changes so a merge/cherry-pick starts on a clean tree.
+/// Writes `WAYPOINT_AUTOSTASH` to the git dir to mark that we need to pop on completion.
+/// Returns `true` if a stash was created.
+fn auto_stash(repo: &mut git2::Repository) -> Result<bool> {
+    let is_dirty = {
+        let mut opts = git2::StatusOptions::new();
+        opts.include_untracked(false).include_ignored(false);
+        // Use a block so `statuses` (which borrows repo) is dropped before stash_save.
+        let statuses = repo.statuses(Some(&mut opts))?;
+        statuses.iter().any(|e| {
+            e.status().intersects(
+                git2::Status::INDEX_NEW
+                    | git2::Status::INDEX_MODIFIED
+                    | git2::Status::INDEX_DELETED
+                    | git2::Status::INDEX_RENAMED
+                    | git2::Status::INDEX_TYPECHANGE
+                    | git2::Status::WT_MODIFIED
+                    | git2::Status::WT_DELETED
+                    | git2::Status::WT_RENAMED
+                    | git2::Status::WT_TYPECHANGE,
+            )
+        })
+    };
+
+    if !is_dirty {
+        return Ok(false);
+    }
+
+    let sig = repo.signature()?;
+    repo.stash_save(&sig, "waypoint-autostash", None)?;
+    std::fs::write(repo.path().join("WAYPOINT_AUTOSTASH"), b"1").map_err(io_err)?;
+    Ok(true)
+}
+
+/// Re-apply the autostash created by `auto_stash`, if any.
+/// Best-effort: if the apply fails (e.g. conflicts with the merge result) the
+/// stash is left in place so the user can pop it manually.
+fn auto_pop(repo: &mut git2::Repository) {
+    let autostash_path = repo.path().join("WAYPOINT_AUTOSTASH");
+    if !autostash_path.exists() {
+        return;
+    }
+    let mut opts = git2::StashApplyOptions::new();
+    if repo.stash_apply(0, Some(&mut opts)).is_ok() {
+        let _ = repo.stash_drop(0);
+        let _ = std::fs::remove_file(&autostash_path);
+    }
+    // On failure: leave the stash in place; user will see it in the stash list.
+}
+
 /// Merge the given commit OID into HEAD.
 /// `label` is the branch name shown in the auto-generated commit message;
 /// pass an empty string if the target is not a branch tip.
@@ -69,60 +119,71 @@ pub fn merge_commit(
     label: String,
     state: State<RepoState>,
 ) -> Result<MergeResult> {
-    let repos = state.0.lock().unwrap();
-    let repo = repos.get(&repo_id).ok_or_else(|| Error::RepoNotFound(repo_id.clone()))?;
+    let mut repos = state.0.lock().unwrap();
 
-    let git_oid = git2::Oid::from_str(&oid).map_err(|_| Error::CommitNotFound(oid.clone()))?;
-    let annotated = repo.find_annotated_commit(git_oid)?;
-    let (analysis, _) = repo.merge_analysis(&[&annotated])?;
+    // Phase 1 — auto-stash dirty working tree (needs &mut repo).
+    let autostashed = {
+        let repo = repos.get_mut(&repo_id).ok_or_else(|| Error::RepoNotFound(repo_id.clone()))?;
+        auto_stash(repo)?
+    };
 
-    if analysis.is_up_to_date() {
-        return Ok(MergeResult { kind: "up_to_date".into(), conflicted: vec![] });
-    }
+    // Phase 2 — perform the merge (only needs &repo; annotated must be dropped before phase 3).
+    let result: MergeResult = {
+        let repo = repos.get(&repo_id).ok_or_else(|| Error::RepoNotFound(repo_id.clone()))?;
 
-    if analysis.is_fast_forward() {
-        let head = repo.head()?;
-        if head.is_branch() {
-            let refname = head.name().unwrap_or("HEAD").to_string();
-            repo.find_reference(&refname)?.set_target(git_oid, "merge: Fast-forward")?;
-            repo.set_head(&refname)?;
+        let git_oid = git2::Oid::from_str(&oid).map_err(|_| Error::CommitNotFound(oid.clone()))?;
+        let annotated = repo.find_annotated_commit(git_oid)?;
+        let (analysis, _) = repo.merge_analysis(&[&annotated])?;
+
+        if analysis.is_up_to_date() {
+            MergeResult { kind: "up_to_date".into(), conflicted: vec![] }
+        } else if analysis.is_fast_forward() {
+            let head = repo.head()?;
+            if head.is_branch() {
+                let refname = head.name().unwrap_or("HEAD").to_string();
+                repo.find_reference(&refname)?.set_target(git_oid, "merge: Fast-forward")?;
+                repo.set_head(&refname)?;
+            } else {
+                repo.set_head_detached(git_oid)?;
+            }
+            repo.checkout_head(Some(git2::build::CheckoutBuilder::default().force()))?;
+            MergeResult { kind: "fast_forward".into(), conflicted: vec![] }
         } else {
-            repo.set_head_detached(git_oid)?;
+            // Normal merge.
+            repo.merge(&[&annotated], None, None)?;
+            let mut index = repo.index()?;
+            index.write()?;
+
+            let merge_label = if label.is_empty() { &oid[..8.min(oid.len())] } else { &label };
+            let merge_msg = format!("Merge branch '{}'", merge_label);
+
+            if index.has_conflicts() {
+                let conflicted = collect_conflict_paths(&index)?;
+                let git_dir = repo.path();
+                std::fs::write(git_dir.join("MERGE_HEAD"), format!("{}\n", git_oid)).map_err(io_err)?;
+                std::fs::write(git_dir.join("MERGE_MSG"), &merge_msg).map_err(io_err)?;
+                MergeResult { kind: "conflicts".into(), conflicted }
+            } else {
+                let sig = repo.signature()?;
+                let head_commit = repo.head()?.peel_to_commit()?;
+                let other_commit = repo.find_commit(git_oid)?;
+                let tree_oid = index.write_tree()?;
+                let tree = repo.find_tree(tree_oid)?;
+                repo.commit(Some("HEAD"), &sig, &sig, &merge_msg, &tree, &[&head_commit, &other_commit])?;
+                cleanup_merge_state(repo);
+                MergeResult { kind: "merged".into(), conflicted: vec![] }
+            }
         }
-        repo.checkout_head(Some(git2::build::CheckoutBuilder::default().force()))?;
-        return Ok(MergeResult { kind: "fast_forward".into(), conflicted: vec![] });
+        // `annotated` (and any other repo-lifetime borrows) dropped at end of this block.
+    };
+
+    // Phase 3 — pop autostash if the operation completed without conflicts.
+    if autostashed && result.kind != "conflicts" {
+        let repo = repos.get_mut(&repo_id).ok_or_else(|| Error::RepoNotFound(repo_id.clone()))?;
+        auto_pop(repo);
     }
 
-    // Normal merge.
-    repo.merge(&[&annotated], None, None)?;
-
-    let mut index = repo.index()?;
-    index.write()?;
-
-    let merge_label = if label.is_empty() { &oid[..8.min(oid.len())] } else { &label };
-    let merge_msg = format!("Merge branch '{}'", merge_label);
-
-    if index.has_conflicts() {
-        let conflicted = collect_conflict_paths(&index)?;
-
-        // Write merge state files so get_merge_status can read them.
-        let git_dir = repo.path();
-        std::fs::write(git_dir.join("MERGE_HEAD"), format!("{}\n", git_oid)).map_err(io_err)?;
-        std::fs::write(git_dir.join("MERGE_MSG"), &merge_msg).map_err(io_err)?;
-
-        return Ok(MergeResult { kind: "conflicts".into(), conflicted });
-    }
-
-    // Clean merge — commit immediately.
-    let sig = repo.signature()?;
-    let head_commit = repo.head()?.peel_to_commit()?;
-    let other_commit = repo.find_commit(git_oid)?;
-    let tree_oid = index.write_tree()?;
-    let tree = repo.find_tree(tree_oid)?;
-    repo.commit(Some("HEAD"), &sig, &sig, &merge_msg, &tree, &[&head_commit, &other_commit])?;
-    cleanup_merge_state(repo);
-
-    Ok(MergeResult { kind: "merged".into(), conflicted: vec![] })
+    Ok(result)
 }
 
 /// Return the current merge/cherry-pick state including any remaining conflicted paths.
@@ -208,7 +269,6 @@ fn resolve_with_side(repo: &git2::Repository, path: &str, use_ours: bool) -> Res
     }
     std::fs::write(&full_path, blob.content()).map_err(io_err)?;
 
-    // Staging the file removes the conflict entry.
     index.add_path(Path::new(path))?;
     index.write()?;
     Ok(())
@@ -233,48 +293,54 @@ pub fn resolve_theirs(repo_id: String, path: String, state: State<RepoState>) ->
 /// Create the merge commit after all conflicts are resolved.
 #[tauri::command]
 pub fn finish_merge(repo_id: String, message: String, state: State<RepoState>) -> Result<()> {
-    let repos = state.0.lock().unwrap();
-    let repo = repos.get(&repo_id).ok_or_else(|| Error::RepoNotFound(repo_id.clone()))?;
+    let mut repos = state.0.lock().unwrap();
 
-    let merge_head_path = repo.path().join("MERGE_HEAD");
-    let merge_oid_str = std::fs::read_to_string(&merge_head_path)
-        .map_err(|_| Error::InvalidArg("No merge in progress".into()))?;
-    let merge_oid = git2::Oid::from_str(merge_oid_str.trim())?;
+    // Commit phase (only needs &repo — drop all borrows at end of block).
+    {
+        let repo = repos.get(&repo_id).ok_or_else(|| Error::RepoNotFound(repo_id.clone()))?;
 
-    let mut index = repo.index()?;
-    if index.has_conflicts() {
-        return Err(Error::InvalidArg(
-            "Cannot commit: there are unresolved conflicts.".into(),
-        ));
+        let merge_head_path = repo.path().join("MERGE_HEAD");
+        let merge_oid_str = std::fs::read_to_string(&merge_head_path)
+            .map_err(|_| Error::InvalidArg("No merge in progress".into()))?;
+        let merge_oid = git2::Oid::from_str(merge_oid_str.trim())?;
+
+        let mut index = repo.index()?;
+        if index.has_conflicts() {
+            return Err(Error::InvalidArg("Cannot commit: there are unresolved conflicts.".into()));
+        }
+
+        let sig = repo.signature()?;
+        let head_commit = repo.head()?.peel_to_commit()?;
+        let other_commit = repo.find_commit(merge_oid)?;
+        let tree_oid = index.write_tree()?;
+        let tree = repo.find_tree(tree_oid)?;
+
+        repo.commit(Some("HEAD"), &sig, &sig, message.trim(), &tree, &[&head_commit, &other_commit])?;
+        cleanup_merge_state(repo);
     }
 
-    let sig = repo.signature()?;
-    let head_commit = repo.head()?.peel_to_commit()?;
-    let other_commit = repo.find_commit(merge_oid)?;
-    let tree_oid = index.write_tree()?;
-    let tree = repo.find_tree(tree_oid)?;
-
-    repo.commit(
-        Some("HEAD"),
-        &sig, &sig,
-        message.trim(),
-        &tree,
-        &[&head_commit, &other_commit],
-    )?;
-
-    cleanup_merge_state(repo);
+    // Pop autostash (needs &mut repo).
+    let repo = repos.get_mut(&repo_id).ok_or_else(|| Error::RepoNotFound(repo_id.clone()))?;
+    auto_pop(repo);
     Ok(())
 }
 
 /// Abort the in-progress merge or cherry-pick: hard-reset to HEAD and clean up state files.
 #[tauri::command]
 pub fn abort_merge(repo_id: String, state: State<RepoState>) -> Result<()> {
-    let repos = state.0.lock().unwrap();
-    let repo = repos.get(&repo_id).ok_or_else(|| Error::RepoNotFound(repo_id.clone()))?;
+    let mut repos = state.0.lock().unwrap();
 
-    let head_commit = repo.head()?.peel_to_commit()?;
-    repo.reset(head_commit.as_object(), git2::ResetType::Hard, None)?;
-    cleanup_merge_state(repo);
+    // Reset to HEAD (drop head_commit before auto_pop needs &mut).
+    {
+        let repo = repos.get(&repo_id).ok_or_else(|| Error::RepoNotFound(repo_id.clone()))?;
+        let head_commit = repo.head()?.peel_to_commit()?;
+        repo.reset(head_commit.as_object(), git2::ResetType::Hard, None)?;
+        cleanup_merge_state(repo);
+    }
+
+    // Pop autostash (needs &mut repo).
+    let repo = repos.get_mut(&repo_id).ok_or_else(|| Error::RepoNotFound(repo_id.clone()))?;
+    auto_pop(repo);
     Ok(())
 }
 
@@ -282,54 +348,78 @@ pub fn abort_merge(repo_id: String, state: State<RepoState>) -> Result<()> {
 /// Returns `kind = "applied"` on success or `kind = "conflicts"` with the conflicted paths.
 #[tauri::command]
 pub fn cherry_pick(repo_id: String, oid: String, state: State<RepoState>) -> Result<CherryPickResult> {
-    let repos = state.0.lock().unwrap();
-    let repo = repos.get(&repo_id).ok_or_else(|| Error::RepoNotFound(repo_id.clone()))?;
+    let mut repos = state.0.lock().unwrap();
 
-    let git_oid = git2::Oid::from_str(&oid).map_err(|_| Error::CommitNotFound(oid.clone()))?;
-    let commit = repo.find_commit(git_oid).map_err(|_| Error::CommitNotFound(oid.clone()))?;
+    // Phase 1 — auto-stash (needs &mut repo).
+    let autostashed = {
+        let repo = repos.get_mut(&repo_id).ok_or_else(|| Error::RepoNotFound(repo_id.clone()))?;
+        auto_stash(repo)?
+    };
 
-    repo.cherrypick(&commit, None)?;
+    // Phase 2 — cherry-pick (only needs &repo).
+    let result: CherryPickResult = {
+        let repo = repos.get(&repo_id).ok_or_else(|| Error::RepoNotFound(repo_id.clone()))?;
 
-    let mut index = repo.index()?;
-    index.write()?;
+        let git_oid = git2::Oid::from_str(&oid).map_err(|_| Error::CommitNotFound(oid.clone()))?;
+        let commit = repo.find_commit(git_oid).map_err(|_| Error::CommitNotFound(oid.clone()))?;
 
-    if index.has_conflicts() {
-        let conflicted = collect_conflict_paths(&index)?;
-        let git_dir = repo.path();
-        std::fs::write(git_dir.join("CHERRY_PICK_HEAD"), format!("{}\n", git_oid)).map_err(io_err)?;
-        let msg = commit.message().unwrap_or("").to_string();
-        std::fs::write(git_dir.join("CHERRY_PICK_MSG"), &msg).map_err(io_err)?;
-        return Ok(CherryPickResult { kind: "conflicts".into(), conflicted });
+        repo.cherrypick(&commit, None)?;
+
+        let mut index = repo.index()?;
+        index.write()?;
+
+        if index.has_conflicts() {
+            let conflicted = collect_conflict_paths(&index)?;
+            let git_dir = repo.path();
+            std::fs::write(git_dir.join("CHERRY_PICK_HEAD"), format!("{}\n", git_oid)).map_err(io_err)?;
+            let msg = commit.message().unwrap_or("").to_string();
+            std::fs::write(git_dir.join("CHERRY_PICK_MSG"), &msg).map_err(io_err)?;
+            CherryPickResult { kind: "conflicts".into(), conflicted }
+        } else {
+            let sig = repo.signature()?;
+            let head_commit = repo.head()?.peel_to_commit()?;
+            let tree_oid = index.write_tree()?;
+            let tree = repo.find_tree(tree_oid)?;
+            let message = commit.message().unwrap_or("cherry-picked commit");
+            repo.commit(Some("HEAD"), &sig, &sig, message, &tree, &[&head_commit])?;
+            CherryPickResult { kind: "applied".into(), conflicted: vec![] }
+        }
+    };
+
+    // Phase 3 — pop autostash if applied cleanly.
+    if autostashed && result.kind != "conflicts" {
+        let repo = repos.get_mut(&repo_id).ok_or_else(|| Error::RepoNotFound(repo_id.clone()))?;
+        auto_pop(repo);
     }
 
-    // No conflicts — commit with the original message (single parent).
-    let sig = repo.signature()?;
-    let head_commit = repo.head()?.peel_to_commit()?;
-    let tree_oid = index.write_tree()?;
-    let tree = repo.find_tree(tree_oid)?;
-    let message = commit.message().unwrap_or("cherry-picked commit");
-    repo.commit(Some("HEAD"), &sig, &sig, message, &tree, &[&head_commit])?;
-
-    Ok(CherryPickResult { kind: "applied".into(), conflicted: vec![] })
+    Ok(result)
 }
 
 /// Create the cherry-pick commit after all conflicts are resolved (single-parent).
 #[tauri::command]
 pub fn finish_cherry_pick(repo_id: String, message: String, state: State<RepoState>) -> Result<()> {
-    let repos = state.0.lock().unwrap();
-    let repo = repos.get(&repo_id).ok_or_else(|| Error::RepoNotFound(repo_id.clone()))?;
+    let mut repos = state.0.lock().unwrap();
 
-    let mut index = repo.index()?;
-    if index.has_conflicts() {
-        return Err(Error::InvalidArg("Cannot commit: there are unresolved conflicts.".into()));
+    // Commit phase.
+    {
+        let repo = repos.get(&repo_id).ok_or_else(|| Error::RepoNotFound(repo_id.clone()))?;
+
+        let mut index = repo.index()?;
+        if index.has_conflicts() {
+            return Err(Error::InvalidArg("Cannot commit: there are unresolved conflicts.".into()));
+        }
+
+        let sig = repo.signature()?;
+        let head_commit = repo.head()?.peel_to_commit()?;
+        let tree_oid = index.write_tree()?;
+        let tree = repo.find_tree(tree_oid)?;
+
+        repo.commit(Some("HEAD"), &sig, &sig, message.trim(), &tree, &[&head_commit])?;
+        cleanup_merge_state(repo);
     }
 
-    let sig = repo.signature()?;
-    let head_commit = repo.head()?.peel_to_commit()?;
-    let tree_oid = index.write_tree()?;
-    let tree = repo.find_tree(tree_oid)?;
-
-    repo.commit(Some("HEAD"), &sig, &sig, message.trim(), &tree, &[&head_commit])?;
-    cleanup_merge_state(repo);
+    // Pop autostash.
+    let repo = repos.get_mut(&repo_id).ok_or_else(|| Error::RepoNotFound(repo_id.clone()))?;
+    auto_pop(repo);
     Ok(())
 }
