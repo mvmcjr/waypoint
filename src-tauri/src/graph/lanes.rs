@@ -120,8 +120,17 @@ pub fn assign_lanes(commits: Vec<CommitNode>) -> Vec<PositionedCommit> {
             lanes[target_lane] = Some(parent_oid.clone());
 
             // Color: first parent inherits commit's color; others get a new one.
+            // For the first-parent claim we take MIN(existing, current) so that
+            // a "main-ier" chain (lower color_idx, claimed earlier in the walk)
+            // wins out over a side branch that happened to reach this parent
+            // first. Without this, e.g. a renovate branch processed before the
+            // trunk would stamp the trunk's lane its own color from the
+            // convergence point downward.
             let edge_color = if i == 0 {
-                oid_color.entry(parent_oid.clone()).or_insert(color_idx);
+                let entry = oid_color.entry(parent_oid.clone()).or_insert(color_idx);
+                if color_idx < *entry {
+                    *entry = color_idx;
+                }
                 color_idx
             } else {
                 *oid_color.entry(parent_oid.clone()).or_insert_with(|| {
@@ -166,13 +175,26 @@ pub fn assign_lanes(commits: Vec<CommitNode>) -> Vec<PositionedCommit> {
         });
     }
 
-    // ── Second pass: fill in to_row for every edge ────────────────────────
+    // ── Second pass: fill in to_row + to_lane for every edge ──────────────
     // edges[i] corresponds to commit.parent_oids[i] (same iteration order).
+    //
+    // to_lane is rewritten here because the lane recorded during step 4 was
+    // whichever slot the parent was preallocated in at the time — but step 2,
+    // when the parent itself is processed later, collapses all routing
+    // duplicates back to the parent's first occurrence. The parent dot ends up
+    // at that first-occurrence lane, so the edge endpoint has to match.
+    let oid_to_lane: HashMap<String, usize> = result
+        .iter()
+        .map(|p| (p.commit.oid.clone(), p.lane))
+        .collect();
     for item in result.iter_mut() {
         for (edge_idx, edge) in item.edges.iter_mut().enumerate() {
             if let Some(parent_oid) = item.commit.parent_oids.get(edge_idx) {
                 if let Some(&pr) = oid_to_row.get(parent_oid) {
                     edge.to_row = pr;
+                }
+                if let Some(&pl) = oid_to_lane.get(parent_oid) {
+                    edge.to_lane = pl;
                 }
             }
         }

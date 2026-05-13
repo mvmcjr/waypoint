@@ -1,9 +1,10 @@
 import { Pencil, GitMerge } from "lucide-react";
-import { ROW_HEIGHT, LANE_WIDTH, REFS_COL_WIDTH, laneColor } from "./GraphLayer";
+import { ROW_HEIGHT, LANE_WIDTH, laneColor } from "./GraphLayer";
 
 interface Props {
   lane: number;
   colorIdx: number;
+  refsWidth: number;
   graphWidth: number;
   stagedCount: number;
   unstagedCount: number;
@@ -12,7 +13,7 @@ interface Props {
   onClick: () => void;
 }
 
-export function WipRow({ lane, colorIdx, graphWidth, stagedCount, unstagedCount, mergeInProgress, isSelected, onClick }: Props) {
+export function WipRow({ lane, colorIdx, refsWidth, graphWidth, stagedCount, unstagedCount, mergeInProgress, isSelected, onClick }: Props) {
   const total = stagedCount + unstagedCount;
   const dotX = lane * LANE_WIDTH + LANE_WIDTH / 2;
   const color = laneColor(colorIdx);
@@ -29,7 +30,7 @@ export function WipRow({ lane, colorIdx, graphWidth, stagedCount, unstagedCount,
       ].join(" ")}
     >
       {/* Refs column — empty for WIP */}
-      <div style={{ width: REFS_COL_WIDTH, flexShrink: 0 }} />
+      <div style={{ width: refsWidth, flexShrink: 0 }} />
 
       {/* Graph: dashed dot + connector line */}
       <div style={{ width: graphWidth, flexShrink: 0 }}>

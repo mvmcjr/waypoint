@@ -1,10 +1,11 @@
 import { formatDistanceToNow } from "date-fns";
 import type { PositionedCommit } from "@/lib/ipc";
 import { RefBadge, groupRefs } from "./RefBadge";
-import { ROW_HEIGHT, REFS_COL_WIDTH } from "./GraphLayer";
+import { ROW_HEIGHT } from "./GraphLayer";
 
 interface Props {
   item: PositionedCommit;
+  refsWidth: number;
   graphWidth: number;
   isSelected: boolean;
   isHead: boolean;
@@ -13,7 +14,7 @@ interface Props {
   onClick: () => void;
 }
 
-export function CommitRow({ item, graphWidth, isSelected, isHead, headBranch, isStash, onClick }: Props) {
+export function CommitRow({ item, refsWidth, graphWidth, isSelected, isHead, headBranch, isStash, onClick }: Props) {
   const { commit } = item;
   const relative = formatDistanceToNow(new Date(commit.timestamp * 1000), { addSuffix: true });
   const refGroups = groupRefs(commit.refs, headBranch);
@@ -39,7 +40,7 @@ export function CommitRow({ item, graphWidth, isSelected, isHead, headBranch, is
 
       {/* Left: refs column */}
       <div
-        style={{ width: REFS_COL_WIDTH, flexShrink: 0 }}
+        style={{ width: refsWidth, flexShrink: 0 }}
         className="flex items-center gap-0.5 px-2 overflow-hidden"
       >
         {visibleRefs.map((g) => (

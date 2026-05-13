@@ -28,6 +28,48 @@ function cy(row: number, startRow: number) {
   return (row - startRow) * ROW_HEIGHT + ROW_HEIGHT / 2;
 }
 
+/**
+ * Edge between a child commit (from) and one of its parents (to), drawn as a
+ * smooth-cornered L. The corner sits at one end of the run:
+ *
+ *  - **Fork** (`fromX > toX`, i.e. child is on a side lane to the right of its
+ *    parent's lane): vertical run lives in the *child's* lane, then bends near
+ *    the parent. The dot anchors the visible top of the line.
+ *  - **Merge** (`fromX < toX`, child sits on a lower-index "trunk" lane than
+ *    its non-first parent): mirror image — bend near the merge commit, vertical
+ *    run in the parent's lane down to its dot.
+ *  - **Same lane**: straight vertical line.
+ *
+ * `r` is clamped so the corner never overruns the segment in either axis.
+ */
+function edgePath(fromX: number, fromY: number, toX: number, toY: number): string {
+  if (fromX === toX) {
+    return `M ${fromX} ${fromY} L ${toX} ${toY}`;
+  }
+  const sgn = toX > fromX ? 1 : -1;
+  const r = Math.max(0, Math.min(CURVE_R, (toY - fromY) / 2, Math.abs(toX - fromX) / 2));
+  const cornerAtBottom = fromX > toX; // fork: child right of parent → bend near parent
+
+  if (cornerAtBottom) {
+    // vertical along child's lane, bend then horizontal at toY-r, land on parent dot
+    return [
+      `M ${fromX} ${fromY}`,
+      `V ${toY - 2 * r}`,
+      `Q ${fromX} ${toY - r} ${fromX + sgn * r} ${toY - r}`,
+      `H ${toX - sgn * r}`,
+      `Q ${toX} ${toY - r} ${toX} ${toY}`,
+    ].join(" ");
+  }
+  // merge: bend right below the merge commit, vertical along parent's lane
+  return [
+    `M ${fromX} ${fromY}`,
+    `Q ${fromX} ${fromY + r} ${fromX + sgn * r} ${fromY + r}`,
+    `H ${toX - sgn * r}`,
+    `Q ${toX} ${fromY + r} ${toX} ${fromY + 2 * r}`,
+    `V ${toY}`,
+  ].join(" ");
+}
+
 interface Props {
   commits: PositionedCommit[];
   startRow: number;
@@ -68,33 +110,16 @@ export function GraphLayer({ commits, startRow, visibleRows, width, onSelectOid,
       aria-hidden
     >
       {/* Edges */}
-      {edges.map((e, i) => {
-        if (e.fromX === e.toX) {
-          return (
-            <line
-              key={i}
-              x1={e.fromX} y1={e.fromY}
-              x2={e.toX} y2={e.toY}
-              stroke={e.color}
-              strokeWidth={1.5}
-              opacity={0.75}
-            />
-          );
-        }
-
-        const r = Math.min(CURVE_R, (e.toY - e.fromY) / 2);
-        const d = `M ${e.fromX} ${e.fromY} Q ${e.fromX} ${e.fromY + 2 * r} ${e.toX} ${e.fromY + 2 * r} L ${e.toX} ${e.toY}`;
-        return (
-          <path
-            key={i}
-            d={d}
-            fill="none"
-            stroke={e.color}
-            strokeWidth={1.5}
-            opacity={0.75}
-          />
-        );
-      })}
+      {edges.map((e, i) => (
+        <path
+          key={i}
+          d={edgePath(e.fromX, e.fromY, e.toX, e.toY)}
+          fill="none"
+          stroke={e.color}
+          strokeWidth={1.5}
+          opacity={0.75}
+        />
+      ))}
 
       {/* Extension line from top of SVG to HEAD dot when a WIP row sits above */}
       {hasWip && startRow === 0 && (() => {
