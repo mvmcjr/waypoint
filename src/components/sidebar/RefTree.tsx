@@ -1,4 +1,4 @@
-import { useState } from "react";
+import { useState, useEffect } from "react";
 import { GitBranch, Globe, Tag, ChevronRight } from "lucide-react";
 import type { RefInfo } from "@/lib/ipc";
 import {
@@ -17,16 +17,25 @@ const GROUP_META = {
 interface GroupProps {
   label: keyof typeof GROUP_META;
   refs: RefInfo[];
+  filter?: string;
   onSelect?: (ref: RefInfo) => void;
   onCheckout?: (ref: RefInfo) => void;
   showContextMenu?: boolean;
 }
 
-function RefGroup({ label, refs, onSelect, onCheckout, showContextMenu }: GroupProps) {
+function RefGroup({ label, refs, filter, onSelect, onCheckout, showContextMenu }: GroupProps) {
   const [open, setOpen] = useState(true);
   const { icon: Icon } = GROUP_META[label];
 
-  if (refs.length === 0) return null;
+  useEffect(() => {
+    if (filter) setOpen(true);
+  }, [filter]);
+
+  const visible = filter
+    ? refs.filter((r) => r.shorthand.toLowerCase().includes(filter.toLowerCase()))
+    : refs;
+
+  if (visible.length === 0) return null;
 
   return (
     <div>
@@ -37,7 +46,7 @@ function RefGroup({ label, refs, onSelect, onCheckout, showContextMenu }: GroupP
         <Icon size={10} className="opacity-70 shrink-0" />
         <span>{label}</span>
         <span className="ml-auto flex items-center gap-1">
-          <span className="text-[9px] opacity-40 tabular-nums">{refs.length}</span>
+          <span className="text-[9px] opacity-40 tabular-nums">{visible.length}</span>
           <ChevronRight
             size={10}
             className={`opacity-35 transition-transform duration-150 ${open ? "rotate-90" : ""}`}
@@ -47,7 +56,7 @@ function RefGroup({ label, refs, onSelect, onCheckout, showContextMenu }: GroupP
 
       {open && (
         <ul className="pb-0.5">
-          {refs.map((ref) => {
+          {visible.map((ref) => {
             const btn = (
               <button
                 className={[
@@ -98,11 +107,12 @@ function RefGroup({ label, refs, onSelect, onCheckout, showContextMenu }: GroupP
 
 interface Props {
   refs: RefInfo[];
+  filter?: string;
   onSelectRef?: (ref: RefInfo) => void;
   onCheckoutBranch?: (branchName: string) => void;
 }
 
-export function RefTree({ refs, onSelectRef, onCheckoutBranch }: Props) {
+export function RefTree({ refs, filter, onSelectRef, onCheckoutBranch }: Props) {
   const local  = refs.filter((r) => r.kind === "local_branch");
   const remote = refs.filter((r) => r.kind === "remote_branch");
   const tags   = refs.filter((r) => r.kind === "tag");
@@ -112,12 +122,13 @@ export function RefTree({ refs, onSelectRef, onCheckoutBranch }: Props) {
       <RefGroup
         label="Branches"
         refs={local}
+        filter={filter}
         onSelect={onSelectRef}
         onCheckout={onCheckoutBranch ? (ref) => onCheckoutBranch(ref.shorthand) : undefined}
         showContextMenu
       />
-      <RefGroup label="Remotes" refs={remote} onSelect={onSelectRef} />
-      <RefGroup label="Tags"    refs={tags}   onSelect={onSelectRef} />
+      <RefGroup label="Remotes" refs={remote} filter={filter} onSelect={onSelectRef} />
+      <RefGroup label="Tags"    refs={tags}   filter={filter} onSelect={onSelectRef} />
     </div>
   );
 }
