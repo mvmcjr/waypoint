@@ -2,6 +2,7 @@ import { useRef, useState, useEffect, useCallback, forwardRef, useImperativeHand
 import { useVirtualizer } from "@tanstack/react-virtual";
 import type { PositionedCommit } from "@/lib/ipc";
 import { useRepoStatus, useStashes } from "@/lib/queries";
+import { clamp } from "@/lib/utils";
 import { GraphLayer, LANE_WIDTH, ROW_HEIGHT, REFS_COL_WIDTH } from "./GraphLayer";
 import { CommitRow } from "./CommitRow";
 import { WipRow } from "./WipRow";
@@ -13,10 +14,6 @@ const GRAPH_EXTRA_MIN = 0;
 const GRAPH_EXTRA_MAX = 320;
 const LS_REFS_WIDTH = "waypoint.timeline.refsWidth";
 const LS_GRAPH_EXTRA = "waypoint.timeline.graphExtra";
-
-function clamp(n: number, lo: number, hi: number) {
-  return Math.max(lo, Math.min(hi, n));
-}
 
 function readStored(key: string, fallback: number, lo: number, hi: number): number {
   try {
@@ -62,28 +59,32 @@ export const Timeline = forwardRef<TimelineHandle, Props>(function Timeline(
     readStored(LS_GRAPH_EXTRA, 0, GRAPH_EXTRA_MIN, GRAPH_EXTRA_MAX),
   );
 
-  useEffect(() => {
-    try { localStorage.setItem(LS_REFS_WIDTH, String(refsWidth)); } catch { /* ignore */ }
-  }, [refsWidth]);
-  useEffect(() => {
-    try { localStorage.setItem(LS_GRAPH_EXTRA, String(graphExtra)); } catch { /* ignore */ }
-  }, [graphExtra]);
+  // Tracks the active drag's cleanup so it can be called on unmount.
+  const dragCleanupRef = useRef<(() => void) | null>(null);
+  useEffect(() => () => { dragCleanupRef.current?.(); }, []);
 
   const beginDrag = useCallback(
-    (setter: (n: number) => void, getStart: () => number, lo: number, hi: number) =>
+    (setter: (n: number) => void, startVal: number, lo: number, hi: number, lsKey: string) =>
       (e: React.MouseEvent) => {
         e.preventDefault();
         const startX = e.clientX;
-        const startVal = getStart();
+        let lastVal = startVal;
         function onMove(ev: MouseEvent) {
-          setter(clamp(startVal + (ev.clientX - startX), lo, hi));
+          lastVal = clamp(startVal + (ev.clientX - startX), lo, hi);
+          setter(lastVal);
         }
-        function onUp() {
+        function cleanup() {
           window.removeEventListener("mousemove", onMove);
           window.removeEventListener("mouseup", onUp);
           document.body.style.cursor = "";
           document.body.style.userSelect = "";
+          dragCleanupRef.current = null;
         }
+        function onUp() {
+          cleanup();
+          try { localStorage.setItem(lsKey, String(lastVal)); } catch { /* ignore */ }
+        }
+        dragCleanupRef.current = cleanup;
         document.body.style.cursor = "col-resize";
         document.body.style.userSelect = "none";
         window.addEventListener("mousemove", onMove);
@@ -215,17 +216,19 @@ export const Timeline = forwardRef<TimelineHandle, Props>(function Timeline(
       {/* Column splitters — overlay, do not scroll with content */}
       <ColumnSplitter
         left={refsWidth}
-        onMouseDown={beginDrag(setRefsWidth, () => refsWidth, REFS_WIDTH_MIN, REFS_WIDTH_MAX)}
+        onMouseDown={beginDrag(setRefsWidth, refsWidth, REFS_WIDTH_MIN, REFS_WIDTH_MAX, LS_REFS_WIDTH)}
       />
       {!searchActive && (
         <ColumnSplitter
           left={refsWidth + graphColWidth}
-          onMouseDown={beginDrag(setGraphExtra, () => graphExtra, GRAPH_EXTRA_MIN, GRAPH_EXTRA_MAX)}
+          onMouseDown={beginDrag(setGraphExtra, graphExtra, GRAPH_EXTRA_MIN, GRAPH_EXTRA_MAX, LS_GRAPH_EXTRA)}
         />
       )}
     </div>
   );
 });
+
+const SPLITTER_WIDTH = 6;
 
 function ColumnSplitter({ left, onMouseDown }: { left: number; onMouseDown: (e: React.MouseEvent) => void }) {
   return (
@@ -234,7 +237,7 @@ function ColumnSplitter({ left, onMouseDown }: { left: number; onMouseDown: (e: 
       aria-orientation="vertical"
       onMouseDown={onMouseDown}
       className="group absolute top-0 bottom-0 z-10"
-      style={{ left: left - 3, width: 6, cursor: "col-resize" }}
+      style={{ left: left - SPLITTER_WIDTH / 2, width: SPLITTER_WIDTH, cursor: "col-resize" }}
     >
       <div className="absolute inset-y-0 left-1/2 -translate-x-1/2 w-px bg-border/30 group-hover:bg-teal-400/60 group-active:bg-teal-400/80 transition-colors" />
     </div>
