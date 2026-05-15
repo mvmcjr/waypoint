@@ -39,16 +39,14 @@ export function ConflictPanel({ repoId, onDone }: Props) {
 
   async function handleResolveOurs(path: string) {
     setWorking(true);
-    setExpandedPath(null);
-    try { await ipc.resolveOurs(repoId, path); invalidate(); }
+    try { await ipc.resolveOurs(repoId, path); setExpandedPath(null); invalidate(); }
     catch (e) { setError(String(e)); }
     finally { setWorking(false); }
   }
 
   async function handleResolveTheirs(path: string) {
     setWorking(true);
-    setExpandedPath(null);
-    try { await ipc.resolveTheirs(repoId, path); invalidate(); }
+    try { await ipc.resolveTheirs(repoId, path); setExpandedPath(null); invalidate(); }
     catch (e) { setError(String(e)); }
     finally { setWorking(false); }
   }

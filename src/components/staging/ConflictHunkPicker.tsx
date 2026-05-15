@@ -110,13 +110,15 @@ export function ConflictHunkPicker({ repoId, path, onResolved }: Props) {
   const [error, setError] = useState<string | null>(null);
 
   useEffect(() => {
+    let mounted = true;
     setSegments(null);
     setChoices(new Map());
     setError(null);
     ipc
       .getConflictContent(repoId, path)
-      .then((content) => setSegments(parseConflictFile(content)))
-      .catch((e) => setError(String(e)));
+      .then((content) => { if (mounted) setSegments(parseConflictFile(content)); })
+      .catch((e) => { if (mounted) setError(String(e)); });
+    return () => { mounted = false; };
   }, [repoId, path]);
 
   if (error) {
