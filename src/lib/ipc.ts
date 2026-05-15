@@ -187,6 +187,12 @@ export const ipc = {
   finishCherryPick: (repoId: string, message: string) =>
     invoke<void>("finish_cherry_pick", { repoId, message }),
 
+  getConflictContent: (repoId: string, path: string) =>
+    invoke<string>("get_conflict_content", { repoId, path }),
+
+  resolveWithContent: (repoId: string, path: string, content: string) =>
+    invoke<void>("resolve_with_content", { repoId, path, content }),
+
   discardAll: (repoId: string) =>
     invoke<void>("discard_all", { repoId }),
 

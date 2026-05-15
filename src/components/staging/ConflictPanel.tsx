@@ -1,9 +1,10 @@
 import { useEffect, useState } from "react";
 import { useQueryClient } from "@tanstack/react-query";
-import { GitMerge, Check, X, AlertTriangle } from "lucide-react";
+import { GitMerge, Check, X, AlertTriangle, ChevronRight } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { ipc } from "@/lib/ipc";
 import { useMergeStatus } from "@/lib/queries";
+import { ConflictHunkPicker } from "./ConflictHunkPicker";
 
 interface Props {
   repoId: string;
@@ -17,8 +18,8 @@ export function ConflictPanel({ repoId, onDone }: Props) {
   const [working, setWorking] = useState(false);
   const [committing, setCommitting] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const [expandedPath, setExpandedPath] = useState<string | null>(null);
 
-  // Seed message from the default once on first load.
   useEffect(() => {
     if (merge?.default_message && !message) {
       setMessage(merge.default_message);
@@ -38,6 +39,7 @@ export function ConflictPanel({ repoId, onDone }: Props) {
 
   async function handleResolveOurs(path: string) {
     setWorking(true);
+    setExpandedPath(null);
     try { await ipc.resolveOurs(repoId, path); invalidate(); }
     catch (e) { setError(String(e)); }
     finally { setWorking(false); }
@@ -45,6 +47,7 @@ export function ConflictPanel({ repoId, onDone }: Props) {
 
   async function handleResolveTheirs(path: string) {
     setWorking(true);
+    setExpandedPath(null);
     try { await ipc.resolveTheirs(repoId, path); invalidate(); }
     catch (e) { setError(String(e)); }
     finally { setWorking(false); }
@@ -103,48 +106,74 @@ export function ConflictPanel({ repoId, onDone }: Props) {
       </div>
 
       {/* File list */}
-      <div className="flex-1 overflow-y-auto min-h-0 py-1">
+      <div className="flex-1 overflow-y-auto min-h-0">
         {hasConflicts && (
-          <section>
-            <div className="px-3 py-1 text-[10px] uppercase tracking-wider text-orange-400/80 font-semibold">
+          <>
+            <div className="px-3 py-1.5 text-[10px] uppercase tracking-wider text-orange-400/80 font-semibold border-b border-border/30">
               Conflicts ({conflicts.length})
             </div>
             {conflicts.map((path) => {
               const parts = path.split("/");
               const name = parts[parts.length - 1];
               const dir = parts.length > 1 ? parts.slice(0, -1).join("/") : "";
+              const expanded = expandedPath === path;
+
               return (
-                <div
-                  key={path}
-                  className="group flex items-center gap-2 py-0.5 px-3 hover:bg-white/5 rounded text-xs"
-                >
-                  <AlertTriangle size={11} className="text-orange-400 shrink-0" />
-                  <span className="flex-1 min-w-0 truncate">
-                    <span className="text-foreground/90">{name}</span>
-                    {dir && <span className="text-muted-foreground ml-1.5 text-[10px]">{dir}</span>}
-                  </span>
-                  <div className="flex gap-1 shrink-0 opacity-0 group-hover:opacity-100 transition-opacity">
+                <div key={path} className="border-b border-border/20 last:border-b-0">
+                  {/* File row */}
+                  <div className="flex items-center gap-1 py-1 px-2 hover:bg-white/[0.04]">
+                    {/* Expand toggle + filename */}
                     <button
-                      onClick={() => handleResolveOurs(path)}
+                      className="flex items-center gap-1.5 flex-1 min-w-0 text-left"
+                      onClick={() => setExpandedPath(expanded ? null : path)}
                       disabled={disabled}
-                      className="text-[10px] px-1.5 py-0.5 rounded border border-blue-400/40 text-blue-300 hover:bg-blue-400/10 disabled:opacity-30 transition-colors"
-                      title="Keep our version (before merge)"
                     >
-                      Ours
+                      <ChevronRight
+                        size={10}
+                        className={`text-muted-foreground/45 shrink-0 transition-transform duration-150 ${expanded ? "rotate-90" : ""}`}
+                      />
+                      <AlertTriangle size={10} className="text-orange-400 shrink-0" />
+                      <span className="flex-1 min-w-0 truncate text-xs leading-tight">
+                        <span className="text-foreground/85">{name}</span>
+                        {dir && <span className="text-muted-foreground/50 ml-1.5 text-[10px]">{dir}</span>}
+                      </span>
                     </button>
-                    <button
-                      onClick={() => handleResolveTheirs(path)}
-                      disabled={disabled}
-                      className="text-[10px] px-1.5 py-0.5 rounded border border-purple-400/40 text-purple-300 hover:bg-purple-400/10 disabled:opacity-30 transition-colors"
-                      title="Take their version (from merged commit)"
-                    >
-                      Theirs
-                    </button>
+                    {/* Quick whole-file resolution */}
+                    <div className="flex gap-1 shrink-0">
+                      <button
+                        onClick={() => handleResolveOurs(path)}
+                        disabled={disabled}
+                        className="text-[10px] px-1.5 py-0.5 rounded border border-blue-400/35 text-blue-300/80 hover:text-blue-200 hover:bg-blue-400/10 disabled:opacity-30 transition-colors"
+                        title="Accept our version (pre-merge)"
+                      >
+                        Ours
+                      </button>
+                      <button
+                        onClick={() => handleResolveTheirs(path)}
+                        disabled={disabled}
+                        className="text-[10px] px-1.5 py-0.5 rounded border border-purple-400/35 text-purple-300/80 hover:text-purple-200 hover:bg-purple-400/10 disabled:opacity-30 transition-colors"
+                        title="Accept their version (incoming)"
+                      >
+                        Theirs
+                      </button>
+                    </div>
                   </div>
+
+                  {/* Inline hunk picker */}
+                  {expanded && (
+                    <ConflictHunkPicker
+                      repoId={repoId}
+                      path={path}
+                      onResolved={() => {
+                        setExpandedPath(null);
+                        invalidate();
+                      }}
+                    />
+                  )}
                 </div>
               );
             })}
-          </section>
+          </>
         )}
 
         {!hasConflicts && (

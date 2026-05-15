@@ -395,6 +395,36 @@ pub fn cherry_pick(repo_id: String, oid: String, state: State<RepoState>) -> Res
     Ok(result)
 }
 
+/// Read the raw working-directory content of a conflicted file, including conflict markers.
+#[tauri::command]
+pub fn get_conflict_content(repo_id: String, path: String, state: State<RepoState>) -> Result<String> {
+    let repos = state.0.lock().unwrap();
+    let repo = repos.get(&repo_id).ok_or_else(|| Error::RepoNotFound(repo_id.clone()))?;
+    let workdir = repo.workdir().ok_or_else(|| Error::InvalidArg("Bare repository".into()))?;
+    let full_path = workdir.join(&path);
+    std::fs::read_to_string(&full_path).map_err(io_err)
+}
+
+/// Write per-hunk-resolved content to a conflicted file and stage it.
+/// The caller must supply content with no remaining conflict markers.
+#[tauri::command]
+pub fn resolve_with_content(
+    repo_id: String,
+    path: String,
+    content: String,
+    state: State<RepoState>,
+) -> Result<()> {
+    let repos = state.0.lock().unwrap();
+    let repo = repos.get(&repo_id).ok_or_else(|| Error::RepoNotFound(repo_id.clone()))?;
+    let workdir = repo.workdir().ok_or_else(|| Error::InvalidArg("Bare repository".into()))?;
+    let full_path = workdir.join(&path);
+    std::fs::write(&full_path, content.as_bytes()).map_err(io_err)?;
+    let mut index = repo.index()?;
+    index.add_path(Path::new(&path))?;
+    index.write()?;
+    Ok(())
+}
+
 /// Create the cherry-pick commit after all conflicts are resolved (single-parent).
 #[tauri::command]
 pub fn finish_cherry_pick(repo_id: String, message: String, state: State<RepoState>) -> Result<()> {
