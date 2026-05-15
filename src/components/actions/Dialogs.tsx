@@ -590,6 +590,50 @@ export function CherryPickDialog({ repoId, oid, summary, onClose, onSuccess, onC
   );
 }
 
+// ─── Delete Branch ─────────────────────────────────────────────────────────
+
+interface DeleteBranchProps extends BaseProps {
+  branchName: string;
+}
+
+export function DeleteBranchDialog({ repoId, branchName, onClose, onSuccess }: DeleteBranchProps) {
+  const [loading, setLoading] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+
+  async function run() {
+    setLoading(true);
+    setError(null);
+    try {
+      await ipc.deleteBranch(repoId, branchName);
+      onSuccess();
+    } catch (e) {
+      setError(String(e));
+    } finally {
+      setLoading(false);
+    }
+  }
+
+  return (
+    <Dialog open onOpenChange={(o) => !o && onClose()}>
+      <DialogContent>
+        <DialogHeader>
+          <DialogTitle>Delete branch</DialogTitle>
+          <DialogDescription>
+            Delete local branch <code className="font-mono">{branchName}</code>. This cannot be undone.
+          </DialogDescription>
+        </DialogHeader>
+        {error && <ErrorNote msg={error} />}
+        <DialogFooter>
+          <Button variant="outline" onClick={onClose} disabled={loading}>Cancel</Button>
+          <Button variant="destructive" onClick={run} disabled={loading}>
+            {loading ? "Deleting…" : "Delete"}
+          </Button>
+        </DialogFooter>
+      </DialogContent>
+    </Dialog>
+  );
+}
+
 // ─── Rebase Onto ───────────────────────────────────────────────────────────
 
 interface RebaseProps extends BaseProps {

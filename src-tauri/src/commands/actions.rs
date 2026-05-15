@@ -204,3 +204,25 @@ pub fn rebase_onto(repo_id: String, onto_oid: String, state: State<RepoState>) -
     rebase.finish(None)?;
     Ok(())
 }
+
+/// Delete a local branch by short name.
+/// Refuses to delete the currently checked-out branch.
+#[tauri::command]
+pub fn delete_branch(repo_id: String, name: String, state: State<RepoState>) -> Result<()> {
+    let repos = state.0.lock().unwrap();
+    let repo = repos.get(&repo_id).ok_or_else(|| Error::RepoNotFound(repo_id.clone()))?;
+
+    if let Ok(head) = repo.head() {
+        if head.is_branch() && head.shorthand() == Some(name.as_str()) {
+            return Err(Error::InvalidArg(format!(
+                "Cannot delete '{}': it is the currently checked-out branch", name
+            )));
+        }
+    }
+
+    let mut branch = repo
+        .find_branch(&name, git2::BranchType::Local)
+        .map_err(|_| Error::InvalidArg(format!("Branch '{}' not found", name)))?;
+    branch.delete().map_err(Error::Git)?;
+    Ok(())
+}

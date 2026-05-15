@@ -5,8 +5,17 @@ import {
   ContextMenu,
   ContextMenuContent,
   ContextMenuItem,
+  ContextMenuSeparator,
   ContextMenuTrigger,
 } from "@/components/ui/context-menu";
+
+export type RefAction =
+  | { kind: "checkout-branch"; branchName: string }
+  | { kind: "checkout-tag"; oid: string }
+  | { kind: "merge"; oid: string; label: string }
+  | { kind: "rebase"; oid: string }
+  | { kind: "push"; branchName: string }
+  | { kind: "delete-branch"; branchName: string };
 
 const GROUP_META = {
   Branches: { icon: GitBranch },
@@ -19,11 +28,10 @@ interface GroupProps {
   refs: RefInfo[];
   filter?: string;
   onSelect?: (ref: RefInfo) => void;
-  onCheckout?: (ref: RefInfo) => void;
-  showContextMenu?: boolean;
+  onRefAction?: (action: RefAction) => void;
 }
 
-function RefGroup({ label, refs, filter, onSelect, onCheckout, showContextMenu }: GroupProps) {
+function RefGroup({ label, refs, filter, onSelect, onRefAction }: GroupProps) {
   const [open, setOpen] = useState(true);
   const { icon: Icon } = GROUP_META[label];
 
@@ -75,7 +83,9 @@ function RefGroup({ label, refs, filter, onSelect, onCheckout, showContextMenu }
               </button>
             );
 
-            if (!showContextMenu || !onCheckout) {
+            const menuContent = buildMenu(label, ref, onRefAction);
+
+            if (!menuContent) {
               return <li key={ref.name}>{btn}</li>;
             }
 
@@ -83,18 +93,7 @@ function RefGroup({ label, refs, filter, onSelect, onCheckout, showContextMenu }
               <li key={ref.name}>
                 <ContextMenu>
                   <ContextMenuTrigger>{btn}</ContextMenuTrigger>
-                  <ContextMenuContent>
-                    {!ref.is_head && (
-                      <ContextMenuItem onClick={() => onCheckout(ref)}>
-                        Checkout {ref.shorthand}
-                      </ContextMenuItem>
-                    )}
-                    {ref.is_head && (
-                      <ContextMenuItem disabled className="text-muted-foreground">
-                        Current branch
-                      </ContextMenuItem>
-                    )}
-                  </ContextMenuContent>
+                  <ContextMenuContent>{menuContent}</ContextMenuContent>
                 </ContextMenu>
               </li>
             );
@@ -105,30 +104,99 @@ function RefGroup({ label, refs, filter, onSelect, onCheckout, showContextMenu }
   );
 }
 
+function buildMenu(
+  label: keyof typeof GROUP_META,
+  ref: RefInfo,
+  onRefAction?: (action: RefAction) => void,
+): React.ReactNode | null {
+  if (!onRefAction) return null;
+
+  if (label === "Branches") {
+    if (ref.is_head) {
+      return (
+        <>
+          <ContextMenuItem disabled className="text-muted-foreground">
+            Current branch
+          </ContextMenuItem>
+          <ContextMenuSeparator />
+          <ContextMenuItem onClick={() => onRefAction({ kind: "push", branchName: ref.shorthand })}>
+            Push…
+          </ContextMenuItem>
+        </>
+      );
+    }
+    return (
+      <>
+        <ContextMenuItem onClick={() => onRefAction({ kind: "checkout-branch", branchName: ref.shorthand })}>
+          Checkout {ref.shorthand}
+        </ContextMenuItem>
+        {ref.target_oid && (
+          <>
+            <ContextMenuSeparator />
+            <ContextMenuItem onClick={() => onRefAction({ kind: "merge", oid: ref.target_oid!, label: ref.shorthand })}>
+              Merge into current
+            </ContextMenuItem>
+            <ContextMenuItem onClick={() => onRefAction({ kind: "rebase", oid: ref.target_oid! })}>
+              Rebase current onto {ref.shorthand}
+            </ContextMenuItem>
+          </>
+        )}
+        <ContextMenuSeparator />
+        <ContextMenuItem onClick={() => onRefAction({ kind: "push", branchName: ref.shorthand })}>
+          Push…
+        </ContextMenuItem>
+        <ContextMenuSeparator />
+        <ContextMenuItem
+          onClick={() => onRefAction({ kind: "delete-branch", branchName: ref.shorthand })}
+          className="text-destructive focus:text-destructive"
+        >
+          Delete {ref.shorthand}
+        </ContextMenuItem>
+      </>
+    );
+  }
+
+  if (label === "Remotes" && ref.target_oid) {
+    return (
+      <>
+        <ContextMenuItem onClick={() => onRefAction({ kind: "merge", oid: ref.target_oid!, label: ref.shorthand })}>
+          Merge into current
+        </ContextMenuItem>
+        <ContextMenuItem onClick={() => onRefAction({ kind: "rebase", oid: ref.target_oid! })}>
+          Rebase current onto {ref.shorthand}
+        </ContextMenuItem>
+      </>
+    );
+  }
+
+  if (label === "Tags" && ref.target_oid) {
+    return (
+      <ContextMenuItem onClick={() => onRefAction({ kind: "checkout-tag", oid: ref.target_oid! })}>
+        Checkout (detached)
+      </ContextMenuItem>
+    );
+  }
+
+  return null;
+}
+
 interface Props {
   refs: RefInfo[];
   filter?: string;
   onSelectRef?: (ref: RefInfo) => void;
-  onCheckoutBranch?: (branchName: string) => void;
+  onRefAction?: (action: RefAction) => void;
 }
 
-export function RefTree({ refs, filter, onSelectRef, onCheckoutBranch }: Props) {
+export function RefTree({ refs, filter, onSelectRef, onRefAction }: Props) {
   const local  = refs.filter((r) => r.kind === "local_branch");
   const remote = refs.filter((r) => r.kind === "remote_branch");
   const tags   = refs.filter((r) => r.kind === "tag");
 
   return (
     <div className="overflow-auto flex-1 py-1">
-      <RefGroup
-        label="Branches"
-        refs={local}
-        filter={filter}
-        onSelect={onSelectRef}
-        onCheckout={onCheckoutBranch ? (ref) => onCheckoutBranch(ref.shorthand) : undefined}
-        showContextMenu
-      />
-      <RefGroup label="Remotes" refs={remote} filter={filter} onSelect={onSelectRef} />
-      <RefGroup label="Tags"    refs={tags}   filter={filter} onSelect={onSelectRef} />
+      <RefGroup label="Branches" refs={local}  filter={filter} onSelect={onSelectRef} onRefAction={onRefAction} />
+      <RefGroup label="Remotes"  refs={remote} filter={filter} onSelect={onSelectRef} onRefAction={onRefAction} />
+      <RefGroup label="Tags"     refs={tags}   filter={filter} onSelect={onSelectRef} onRefAction={onRefAction} />
     </div>
   );
 }

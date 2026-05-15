@@ -139,6 +139,9 @@ export const ipc = {
   rebaseOnto: (repoId: string, ontoOid: string) =>
     invoke<void>("rebase_onto", { repoId, ontoOid }),
 
+  deleteBranch: (repoId: string, name: string) =>
+    invoke<void>("delete_branch", { repoId, name }),
+
   getRepoStatus: (repoId: string) =>
     invoke<StatusInfo>("get_repo_status", { repoId }),
 

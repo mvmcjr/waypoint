@@ -14,6 +14,7 @@ import {
   CheckoutCommitDialog,
   CheckoutBranchDialog,
   CreateBranchDialog,
+  DeleteBranchDialog,
   ResetDialog,
   RebaseDialog,
   MergeDialog,
@@ -22,6 +23,7 @@ import {
   PushDialog,
 } from "@/components/actions/Dialogs";
 import type { CommitAction } from "@/components/timeline/CommitContextMenu";
+import type { RefAction } from "@/components/sidebar/RefTree";
 import { ipc, type FileDiff, type PullResult, type RefInfo } from "@/lib/ipc";
 import { RefreshCw, ArrowDown, ArrowUp } from "lucide-react";
 import { Button } from "@/components/ui/button";
@@ -33,12 +35,13 @@ type DialogState =
   | { kind: "checkout-detached"; oid: string }
   | { kind: "checkout-branch"; branchName: string }
   | { kind: "create-branch"; oid: string }
+  | { kind: "delete-branch"; branchName: string }
   | { kind: "reset"; oid: string }
   | { kind: "rebase"; oid: string }
   | { kind: "merge"; oid: string; label: string }
   | { kind: "cherry-pick"; oid: string; summary: string }
   | { kind: "pull" }
-  | { kind: "push" };
+  | { kind: "push"; branchName: string };
 
 // ─── Main view ─────────────────────────────────────────────────────────────
 
@@ -135,6 +138,22 @@ export function RepoView() {
     setTimeout(() => timelineRef.current?.scrollToOid(ref.target_oid!), 0);
   }
 
+  function handleRefAction(action: RefAction) {
+    if (action.kind === "checkout-branch") {
+      setDialog({ kind: "checkout-branch", branchName: action.branchName });
+    } else if (action.kind === "checkout-tag") {
+      setDialog({ kind: "checkout-detached", oid: action.oid });
+    } else if (action.kind === "merge") {
+      setDialog({ kind: "merge", oid: action.oid, label: action.label });
+    } else if (action.kind === "rebase") {
+      setDialog({ kind: "rebase", oid: action.oid });
+    } else if (action.kind === "push") {
+      setDialog({ kind: "push", branchName: action.branchName });
+    } else if (action.kind === "delete-branch") {
+      setDialog({ kind: "delete-branch", branchName: action.branchName });
+    }
+  }
+
   function handleCommitAction(action: CommitAction) {
     if (action.kind === "checkout-detached") {
       setDialog({ kind: "checkout-detached", oid: action.oid });
@@ -185,8 +204,8 @@ export function RepoView() {
     <div className="flex h-full overflow-hidden">
       <Sidebar
         repoId={repoId}
-        onCheckoutBranch={(branchName) => setDialog({ kind: "checkout-branch", branchName })}
         onSelectRef={handleRefSelect}
+        onRefAction={handleRefAction}
       />
 
       <div className="flex flex-col flex-1 overflow-hidden">
@@ -244,7 +263,7 @@ export function RepoView() {
                   size="sm"
                   className="h-6 px-2 text-xs gap-1"
                   disabled={!head?.branch}
-                  onClick={() => setDialog({ kind: "push" })}
+                  onClick={() => head?.branch && setDialog({ kind: "push", branchName: head.branch })}
                 >
                   <ArrowUp size={11} />
                   Push
@@ -378,6 +397,14 @@ export function RepoView() {
           onConflicts={handleMergeConflicts}
         />
       )}
+      {repoId && dialog.kind === "delete-branch" && (
+        <DeleteBranchDialog
+          repoId={repoId}
+          branchName={dialog.branchName}
+          onClose={() => setDialog({ kind: "none" })}
+          onSuccess={handleSuccess}
+        />
+      )}
       {repoId && remotes && head?.branch && dialog.kind === "pull" && (
         <PullDialog
           repoId={repoId}
@@ -387,11 +414,11 @@ export function RepoView() {
           onSuccess={handlePullResult}
         />
       )}
-      {repoId && remotes && head?.branch && dialog.kind === "push" && (
+      {repoId && remotes && dialog.kind === "push" && (
         <PushDialog
           repoId={repoId}
           remotes={remotes}
-          currentBranch={head.branch}
+          currentBranch={dialog.branchName}
           onClose={() => setDialog({ kind: "none" })}
           onSuccess={handleSuccess}
         />

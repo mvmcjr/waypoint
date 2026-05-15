@@ -2,16 +2,16 @@ import { useState } from "react";
 import { Search } from "lucide-react";
 import type { RefInfo } from "@/lib/ipc";
 import { useRefs } from "@/lib/queries";
-import { RefTree } from "./RefTree";
+import { RefTree, type RefAction } from "./RefTree";
 import { StashList } from "./StashList";
 
 interface Props {
   repoId: string | null;
-  onCheckoutBranch?: (branchName: string) => void;
   onSelectRef?: (ref: RefInfo) => void;
+  onRefAction?: (action: RefAction) => void;
 }
 
-export function Sidebar({ repoId, onCheckoutBranch, onSelectRef }: Props) {
+export function Sidebar({ repoId, onSelectRef, onRefAction }: Props) {
   const { data: refs, isLoading } = useRefs(repoId);
   const [filter, setFilter] = useState("");
 
@@ -43,7 +43,7 @@ export function Sidebar({ repoId, onCheckoutBranch, onSelectRef }: Props) {
         </div>
       )}
 
-      {refs && <RefTree refs={refs} filter={filter} onSelectRef={onSelectRef} onCheckoutBranch={onCheckoutBranch} />}
+      {refs && <RefTree refs={refs} filter={filter} onSelectRef={onSelectRef} onRefAction={onRefAction} />}
       {repoId && <StashList repoId={repoId} />}
 
       {!repoId && (
