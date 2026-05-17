@@ -1,12 +1,11 @@
 import { describe, it, expect, vi, beforeEach } from "vitest";
 import { render, screen, fireEvent, waitFor } from "@testing-library/react";
-import { PullDialog, PushDialog } from "./Dialogs";
+import { PullConflictsDialog, PushRejectedDialog } from "./Dialogs";
 import { ipc } from "@/lib/ipc";
 
-// Mock the ipc module
 vi.mock("@/lib/ipc", () => ({
   ipc: {
-    pullBranch: vi.fn(),
+    abortMerge: vi.fn(),
     pushBranch: vi.fn(),
   },
 }));
@@ -14,90 +13,85 @@ vi.mock("@/lib/ipc", () => ({
 describe("Dialogs", () => {
   const mockOnClose = vi.fn();
   const mockOnSuccess = vi.fn();
+  const mockOnAbort = vi.fn();
 
   beforeEach(() => {
     vi.clearAllMocks();
   });
 
-  describe("PullDialog", () => {
-    it("renders and calls ipc.pullBranch on pull", async () => {
-      const remotes = [{ name: "origin", url: "https://github.com/test/test.git" }];
-      vi.mocked(ipc.pullBranch).mockResolvedValue({ kind: "merged", conflicted: [] });
-
+  describe("PullConflictsDialog", () => {
+    it("calls onClose when Resolve conflicts is clicked", () => {
       render(
-        <PullDialog
+        <PullConflictsDialog
           repoId="repo1"
-          remotes={remotes}
-          currentBranch="main"
           onClose={mockOnClose}
-          onSuccess={mockOnSuccess}
+          onAbort={mockOnAbort}
         />
       );
 
-      expect(screen.getByRole("heading", { name: "Pull" })).toBeInTheDocument();
-      expect(screen.getByText("origin")).toBeInTheDocument();
+      expect(screen.getByRole("heading", { name: "Merge conflicts" })).toBeInTheDocument();
 
-      const pullButton = screen.getByRole("button", { name: "Pull" });
-      fireEvent.click(pullButton);
+      fireEvent.click(screen.getByRole("button", { name: "Resolve conflicts" }));
+      expect(mockOnClose).toHaveBeenCalled();
+    });
 
-      expect(ipc.pullBranch).toHaveBeenCalledWith("repo1", "origin");
-      
+    it("calls ipc.abortMerge then onAbort when Abort merge is clicked", async () => {
+      vi.mocked(ipc.abortMerge).mockResolvedValue(undefined);
+
+      render(
+        <PullConflictsDialog
+          repoId="repo1"
+          onClose={mockOnClose}
+          onAbort={mockOnAbort}
+        />
+      );
+
+      fireEvent.click(screen.getByRole("button", { name: "Abort merge" }));
+      expect(ipc.abortMerge).toHaveBeenCalledWith("repo1");
+
       await waitFor(() => {
-        expect(mockOnSuccess).toHaveBeenCalledWith({ kind: "merged", conflicted: [] });
+        expect(mockOnAbort).toHaveBeenCalled();
       });
     });
   });
 
-  describe("PushDialog", () => {
-    it("renders and calls ipc.pushBranch on push", async () => {
-      const remotes = [{ name: "origin", url: "https://github.com/test/test.git" }];
+  describe("PushRejectedDialog", () => {
+    it("renders rejection message and calls ipc.pushBranch with force on confirm", async () => {
       vi.mocked(ipc.pushBranch).mockResolvedValue(undefined);
 
       render(
-        <PushDialog
+        <PushRejectedDialog
           repoId="repo1"
-          remotes={remotes}
-          currentBranch="main"
+          remoteName="origin"
+          branchName="main"
           onClose={mockOnClose}
           onSuccess={mockOnSuccess}
         />
       );
 
-      expect(screen.getByRole("heading", { name: "Push" })).toBeInTheDocument();
+      expect(screen.getByRole("heading", { name: "Push rejected" })).toBeInTheDocument();
 
-      const pushButton = screen.getByRole("button", { name: "Push" });
-      fireEvent.click(pushButton);
+      fireEvent.click(screen.getByRole("button", { name: "Force push" }));
+      expect(ipc.pushBranch).toHaveBeenCalledWith("repo1", "origin", "main", true);
 
-      expect(ipc.pushBranch).toHaveBeenCalledWith("repo1", "origin", "main", false);
-      
       await waitFor(() => {
         expect(mockOnSuccess).toHaveBeenCalled();
       });
     });
 
-    it("handles force push", async () => {
-      const remotes = [{ name: "origin", url: "https://github.com/test/test.git" }];
-      vi.mocked(ipc.pushBranch).mockResolvedValue(undefined);
-
+    it("calls onClose when Cancel is clicked", () => {
       render(
-        <PushDialog
+        <PushRejectedDialog
           repoId="repo1"
-          remotes={remotes}
-          currentBranch="main"
+          remoteName="origin"
+          branchName="main"
           onClose={mockOnClose}
           onSuccess={mockOnSuccess}
         />
       );
 
-      const forceCheckbox = screen.getByRole("checkbox");
-      fireEvent.click(forceCheckbox);
-
-      expect(screen.getByText(/Force push will overwrite/i)).toBeInTheDocument();
-
-      const forcePushButton = screen.getByRole("button", { name: "Force Push" });
-      fireEvent.click(forcePushButton);
-
-      expect(ipc.pushBranch).toHaveBeenCalledWith("repo1", "origin", "main", true);
+      fireEvent.click(screen.getByRole("button", { name: "Cancel" }));
+      expect(mockOnClose).toHaveBeenCalled();
     });
   });
 });

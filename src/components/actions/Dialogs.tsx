@@ -16,7 +16,7 @@ import {
   SelectTrigger,
   SelectValue,
 } from "@/components/ui/select";
-import { ipc, type RemoteInfo, type PullResult } from "@/lib/ipc";
+import { ipc, type RemoteInfo } from "@/lib/ipc";
 
 // ─── Shared helpers ────────────────────────────────────────────────────────
 
@@ -72,29 +72,24 @@ function RemoteSelect({
 }
 
 
-// ─── Pull ──────────────────────────────────────────────────────────────────
+// ─── Pull conflicts ────────────────────────────────────────────────────────
 
-interface PullProps {
+interface PullConflictsProps {
   repoId: string;
-  remotes: RemoteInfo[];
-  currentBranch: string;
   onClose: () => void;
-  onSuccess: (result: PullResult) => void;
+  onAbort: () => void;
 }
 
-export function PullDialog({ repoId, remotes, currentBranch, onClose, onSuccess }: PullProps) {
-  const [remoteName, setRemoteName] = useState(
-    remotes.find((r) => r.name === "origin")?.name ?? remotes[0]?.name ?? ""
-  );
+export function PullConflictsDialog({ repoId, onClose, onAbort }: PullConflictsProps) {
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
-  async function run() {
+  async function handleAbort() {
     setLoading(true);
     setError(null);
     try {
-      const result = await ipc.pullBranch(repoId, remoteName);
-      onSuccess(result);
+      await ipc.abortMerge(repoId);
+      onAbort();
     } catch (e) {
       setError(String(e));
     } finally {
@@ -106,22 +101,18 @@ export function PullDialog({ repoId, remotes, currentBranch, onClose, onSuccess 
     <Dialog open onOpenChange={(o) => !o && onClose()}>
       <DialogContent>
         <DialogHeader>
-          <DialogTitle>Pull</DialogTitle>
+          <DialogTitle>Merge conflicts</DialogTitle>
           <DialogDescription>
-            Fetch and merge{" "}
-            <code className="font-mono">{remoteName}/{currentBranch}</code>{" "}
-            into <code className="font-mono">{currentBranch}</code>.
+            The pull resulted in conflicts. Resolve them now, or abort the merge to keep only the fetched changes.
           </DialogDescription>
         </DialogHeader>
-
-        <RemoteSelect remotes={remotes} value={remoteName} onChange={setRemoteName} />
-
         {error && <ErrorNote msg={error} />}
-
         <DialogFooter>
-          <Button variant="outline" onClick={onClose} disabled={loading}>Cancel</Button>
-          <Button onClick={run} disabled={loading || !remoteName}>
-            {loading ? "Pulling…" : "Pull"}
+          <Button variant="outline" onClick={handleAbort} disabled={loading}>
+            {loading ? "Aborting…" : "Abort merge"}
+          </Button>
+          <Button onClick={onClose} disabled={loading}>
+            Resolve conflicts
           </Button>
         </DialogFooter>
       </DialogContent>
@@ -129,29 +120,25 @@ export function PullDialog({ repoId, remotes, currentBranch, onClose, onSuccess 
   );
 }
 
-// ─── Push ──────────────────────────────────────────────────────────────────
+// ─── Push rejected ─────────────────────────────────────────────────────────
 
-interface PushProps {
+interface PushRejectedProps {
   repoId: string;
-  remotes: RemoteInfo[];
-  currentBranch: string;
+  remoteName: string;
+  branchName: string;
   onClose: () => void;
   onSuccess: () => void;
 }
 
-export function PushDialog({ repoId, remotes, currentBranch, onClose, onSuccess }: PushProps) {
-  const [remoteName, setRemoteName] = useState(
-    remotes.find((r) => r.name === "origin")?.name ?? remotes[0]?.name ?? ""
-  );
-  const [force, setForce] = useState(false);
+export function PushRejectedDialog({ repoId, remoteName, branchName, onClose, onSuccess }: PushRejectedProps) {
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
-  async function run() {
+  async function handleForcePush() {
     setLoading(true);
     setError(null);
     try {
-      await ipc.pushBranch(repoId, remoteName, currentBranch, force);
+      await ipc.pushBranch(repoId, remoteName, branchName, true);
       onSuccess();
     } catch (e) {
       setError(String(e));
@@ -164,42 +151,38 @@ export function PushDialog({ repoId, remotes, currentBranch, onClose, onSuccess 
     <Dialog open onOpenChange={(o) => !o && onClose()}>
       <DialogContent>
         <DialogHeader>
-          <DialogTitle>Push</DialogTitle>
+          <DialogTitle>Push rejected</DialogTitle>
           <DialogDescription>
-            Push <code className="font-mono">{currentBranch}</code>{" "}
-            to <code className="font-mono">{remoteName}</code>.
+            <code className="font-mono">{remoteName}/{branchName}</code> has diverged from your local branch. You can force push to overwrite it.
           </DialogDescription>
         </DialogHeader>
-
-        <RemoteSelect remotes={remotes} value={remoteName} onChange={setRemoteName} />
-
-        <label className="flex items-center gap-2 text-sm cursor-pointer select-none">
-          <input
-            type="checkbox"
-            checked={force}
-            onChange={(e) => setForce(e.target.checked)}
-            className="accent-primary"
-          />
-          Force push (overwrites remote history)
-        </label>
-
-        {force && (
-          <p className="text-xs text-destructive font-semibold">
-            ⚠ Force push will overwrite the remote branch and may cause data loss for collaborators.
-          </p>
-        )}
-
+        <p className="text-xs text-destructive font-semibold">
+          ⚠ Force push will overwrite the remote branch and may cause data loss for collaborators.
+        </p>
         {error && <ErrorNote msg={error} />}
-
         <DialogFooter>
           <Button variant="outline" onClick={onClose} disabled={loading}>Cancel</Button>
-          <Button
-            variant={force ? "destructive" : "default"}
-            onClick={run}
-            disabled={loading || !remoteName}
-          >
-            {loading ? "Pushing…" : force ? "Force Push" : "Push"}
+          <Button variant="destructive" onClick={handleForcePush} disabled={loading}>
+            {loading ? "Pushing…" : "Force push"}
           </Button>
+        </DialogFooter>
+      </DialogContent>
+    </Dialog>
+  );
+}
+
+// ─── Remote error ──────────────────────────────────────────────────────────
+
+export function RemoteErrorDialog({ message, onClose }: { message: string; onClose: () => void }) {
+  return (
+    <Dialog open onOpenChange={(o) => !o && onClose()}>
+      <DialogContent>
+        <DialogHeader>
+          <DialogTitle>Remote operation failed</DialogTitle>
+          <DialogDescription className="break-words">{message}</DialogDescription>
+        </DialogHeader>
+        <DialogFooter>
+          <Button onClick={onClose}>Dismiss</Button>
         </DialogFooter>
       </DialogContent>
     </Dialog>

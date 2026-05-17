@@ -19,17 +19,22 @@ import {
   RebaseDialog,
   MergeDialog,
   CherryPickDialog,
-  PullDialog,
-  PushDialog,
+  PullConflictsDialog,
+  PushRejectedDialog,
+  RemoteErrorDialog,
   CreateTagDialog,
   DeleteTagDialog,
   PushTagDialog,
 } from "@/components/actions/Dialogs";
 import type { CommitAction } from "@/components/timeline/CommitContextMenu";
 import type { RefAction } from "@/components/sidebar/RefTree";
-import { ipc, type FileDiff, type PullResult, type RefInfo } from "@/lib/ipc";
-import { RefreshCw, ArrowDown, ArrowUp } from "lucide-react";
+import { ipc, type FileDiff, type RefInfo, type RemoteInfo } from "@/lib/ipc";
+import { RefreshCw, ArrowDown, ArrowUp, Loader2 } from "lucide-react";
 import { Button } from "@/components/ui/button";
+
+function getDefaultRemote(remotes: RemoteInfo[]): string {
+  return remotes.find((r) => r.name === "origin")?.name ?? remotes[0]?.name ?? "";
+}
 
 // ─── Dialog state ──────────────────────────────────────────────────────────
 
@@ -43,8 +48,9 @@ type DialogState =
   | { kind: "rebase"; oid: string }
   | { kind: "merge"; oid: string; label: string }
   | { kind: "cherry-pick"; oid: string; summary: string }
-  | { kind: "pull" }
-  | { kind: "push"; branchName: string }
+  | { kind: "pull-conflicts" }
+  | { kind: "push-rejected"; branchName: string; remoteName: string }
+  | { kind: "remote-error"; message: string }
   | { kind: "create-tag"; oid: string }
   | { kind: "delete-tag"; tagName: string }
   | { kind: "push-tag"; tagName: string };
@@ -68,10 +74,12 @@ export function RepoView() {
   const [focusedFile, setFocusedFile] = useState<FileDiff | null>(null);
   const [focusedStagingFile, setFocusedStagingFile] = useState<{ path: string; section: "staged" | "unstaged" } | null>(null);
   const [isFetching, setIsFetching] = useState(false);
+  const [isPulling, setIsPulling] = useState(false);
+  const [isPushing, setIsPushing] = useState(false);
 
   async function handleFetch() {
     if (!remotes || remotes.length === 0 || !repoId) return;
-    const remoteName = remotes.find((r) => r.name === "origin")?.name ?? remotes[0]?.name ?? "";
+    const remoteName = getDefaultRemote(remotes);
     if (!remoteName) return;
 
     setIsFetching(true);
@@ -82,6 +90,44 @@ export function RepoView() {
       console.error("Fetch failed", e);
     } finally {
       setIsFetching(false);
+    }
+  }
+
+  async function handlePull() {
+    if (!remotes || remotes.length === 0 || !repoId || !head?.branch) return;
+    const remoteName = getDefaultRemote(remotes);
+    if (!remoteName) return;
+    setIsPulling(true);
+    try {
+      const result = await ipc.pullBranch(repoId, remoteName);
+      if (result.kind === "conflicts") {
+        setDialog({ kind: "pull-conflicts" });
+      }
+      refresh();
+    } catch (e) {
+      setDialog({ kind: "remote-error", message: String(e) });
+    } finally {
+      setIsPulling(false);
+    }
+  }
+
+  async function handlePushBranch(branchName: string) {
+    if (!remotes || remotes.length === 0 || !repoId) return;
+    const remoteName = getDefaultRemote(remotes);
+    if (!remoteName) return;
+    setIsPushing(true);
+    try {
+      await ipc.pushBranch(repoId, remoteName, branchName, false);
+      refresh();
+    } catch (e) {
+      const msg = String(e);
+      if (msg.includes("non-fast-forward") || msg.includes("rejected") || msg.includes("fetch first")) {
+        setDialog({ kind: "push-rejected", branchName, remoteName });
+      } else {
+        setDialog({ kind: "remote-error", message: msg });
+      }
+    } finally {
+      setIsPushing(false);
     }
   }
 
@@ -154,7 +200,7 @@ export function RepoView() {
     } else if (action.kind === "rebase") {
       setDialog({ kind: "rebase", oid: action.oid });
     } else if (action.kind === "push") {
-      setDialog({ kind: "push", branchName: action.branchName });
+      handlePushBranch(action.branchName);
     } else if (action.kind === "delete-branch") {
       setDialog({ kind: "delete-branch", branchName: action.branchName });
     } else if (action.kind === "push-tag") {
@@ -196,15 +242,6 @@ export function RepoView() {
 
   function handleCommitSuccess() {
     setWipSelected(false);
-    refresh();
-  }
-
-  function handlePullResult(result: PullResult) {
-    setDialog({ kind: "none" });
-    if (result.kind === "conflicts") {
-      setWipSelected(true);
-      selectCommit(null);
-    }
     refresh();
   }
 
@@ -264,20 +301,20 @@ export function RepoView() {
                   variant="ghost"
                   size="sm"
                   className="h-6 px-2 text-xs gap-1"
-                  disabled={!head?.branch}
-                  onClick={() => setDialog({ kind: "pull" })}
+                  disabled={isPulling || !head?.branch}
+                  onClick={handlePull}
                 >
-                  <ArrowDown size={11} />
+                  {isPulling ? <Loader2 size={11} className="animate-spin" /> : <ArrowDown size={11} />}
                   Pull
                 </Button>
                 <Button
                   variant="ghost"
                   size="sm"
                   className="h-6 px-2 text-xs gap-1"
-                  disabled={!head?.branch}
-                  onClick={() => head?.branch && setDialog({ kind: "push", branchName: head.branch })}
+                  disabled={isPushing || !head?.branch}
+                  onClick={() => head?.branch && handlePushBranch(head.branch)}
                 >
-                  <ArrowUp size={11} />
+                  {isPushing ? <Loader2 size={11} className="animate-spin" /> : <ArrowUp size={11} />}
                   Push
                 </Button>
                 <div className="w-px h-3.5 bg-border mx-0.5" />
@@ -417,22 +454,26 @@ export function RepoView() {
           onSuccess={handleSuccess}
         />
       )}
-      {repoId && remotes && head?.branch && dialog.kind === "pull" && (
-        <PullDialog
+      {repoId && dialog.kind === "pull-conflicts" && (
+        <PullConflictsDialog
           repoId={repoId}
-          remotes={remotes}
-          currentBranch={head.branch}
           onClose={() => setDialog({ kind: "none" })}
-          onSuccess={handlePullResult}
+          onAbort={() => { setDialog({ kind: "none" }); refresh(); }}
         />
       )}
-      {repoId && remotes && dialog.kind === "push" && (
-        <PushDialog
+      {repoId && dialog.kind === "push-rejected" && (
+        <PushRejectedDialog
           repoId={repoId}
-          remotes={remotes}
-          currentBranch={dialog.branchName}
+          remoteName={dialog.remoteName}
+          branchName={dialog.branchName}
           onClose={() => setDialog({ kind: "none" })}
-          onSuccess={handleSuccess}
+          onSuccess={() => { setDialog({ kind: "none" }); refresh(); }}
+        />
+      )}
+      {dialog.kind === "remote-error" && (
+        <RemoteErrorDialog
+          message={dialog.message}
+          onClose={() => setDialog({ kind: "none" })}
         />
       )}
       {repoId && dialog.kind === "create-tag" && (
