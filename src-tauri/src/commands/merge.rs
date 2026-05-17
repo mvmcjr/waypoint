@@ -154,8 +154,13 @@ pub fn merge_commit(
             let mut index = repo.index()?;
             index.write()?;
 
-            let merge_label = if label.is_empty() { &oid[..8.min(oid.len())] } else { &label };
-            let merge_msg = format!("Merge branch '{}'", merge_label);
+            let merge_msg = if label.is_empty() {
+                format!("Merge commit '{}'", &oid[..8.min(oid.len())])
+            } else if label.contains('/') {
+                format!("Merge remote-tracking branch '{}'", label)
+            } else {
+                format!("Merge branch '{}'", label)
+            };
 
             if index.has_conflicts() {
                 let conflicted = collect_conflict_paths(&index)?;

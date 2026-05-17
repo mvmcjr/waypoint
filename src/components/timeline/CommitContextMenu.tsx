@@ -24,8 +24,11 @@ interface Props {
 export function CommitContextMenu({ item, onAction, children }: Props) {
   const oid = item.commit.oid;
   const short = oid.slice(0, 8);
-  // First local branch ref on this commit (no "/" and not bare "HEAD").
-  const localBranch = item.commit.refs.find((r) => !r.includes("/") && r !== "HEAD") ?? "";
+  // Prefer a local branch; fall back to any ref (remote/tag) for the merge label.
+  const mergeLabel =
+    item.commit.refs.find((r) => !r.includes("/") && r !== "HEAD") ??
+    item.commit.refs.find((r) => r !== "HEAD") ??
+    "";
 
   return (
     <ContextMenu>
@@ -43,7 +46,7 @@ export function CommitContextMenu({ item, onAction, children }: Props) {
 
         <ContextMenuSeparator />
 
-        <ContextMenuItem onClick={() => onAction({ kind: "merge", oid, label: localBranch })}>
+        <ContextMenuItem onClick={() => onAction({ kind: "merge", oid, label: mergeLabel })}>
           Merge into current branch
         </ContextMenuItem>
 
