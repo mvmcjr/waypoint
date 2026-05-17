@@ -6,7 +6,7 @@
 -->
 <Wix xmlns="http://schemas.microsoft.com/wix/2006/wi">
   <Fragment>
-    <ComponentGroup Id="ShellExtensionGroup" Directory="INSTALLDIR">
+    <DirectoryRef Id="INSTALLDIR">
       <Component Id="ShellExtension" Guid="C8D4E6F2-A0B2-4C6E-8A0C-2E4F6A8C0E2A">
 
         <!-- Right-click on a folder (%1 = the folder path) -->
@@ -37,6 +37,6 @@
                        Value="&quot;[INSTALLDIR]waypoint.exe&quot; &quot;%V&quot;" />
 
       </Component>
-    </ComponentGroup>
+    </DirectoryRef>
   </Fragment>
 </Wix>

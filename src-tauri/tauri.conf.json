@@ -35,7 +35,7 @@
     "windows": {
       "wix": {
         "fragmentPaths": ["wix/shell-extension.wxs"],
-        "componentRefs": ["ShellExtensionGroup"]
+        "componentRefs": ["ShellExtension"]
       }
     }
   }
