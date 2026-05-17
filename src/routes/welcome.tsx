@@ -23,10 +23,12 @@ export function WelcomeScreen() {
     });
   }, []);
 
-  // Auto-open a repo when launched from the Explorer context menu (or CLI).
-  // get_startup_path consumes the stored path so this only fires once.
+  // getStartupPath is consumed once; the cancellation guard prevents setError
+  // firing on an unmounted component if the open fails after navigation away.
   useEffect(() => {
-    ipc.getStartupPath().then((path) => { if (path) openRepo(path); });
+    let cancelled = false;
+    ipc.getStartupPath().then((path) => { if (!cancelled && path) openRepo(path); });
+    return () => { cancelled = true; };
   // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
@@ -34,9 +36,9 @@ export function WelcomeScreen() {
     setError(null);
     try {
       const id = await ipc.openRepo(path);
-      // Persist to recent list.
-      const updated = [path, ...recent.filter((p) => p !== path)].slice(0, MAX_RECENT);
       const store = await getStore();
+      const current = await store.get<string[]>(STORE_KEY) ?? [];
+      const updated = [path, ...current.filter((p) => p !== path)].slice(0, MAX_RECENT);
       await store.set(STORE_KEY, updated);
       setRecent(updated);
       openTab(id, path);

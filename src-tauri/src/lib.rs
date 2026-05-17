@@ -6,9 +6,7 @@ mod repo;
 use repo::RepoState;
 use std::sync::Mutex;
 
-/// Holds the directory path passed as a CLI argument (e.g. from the Explorer
-/// context menu). Consumed once by `get_startup_path` so it only fires once.
-pub struct StartupPath(pub Mutex<Option<String>>);
+pub struct StartupPath(Mutex<Option<String>>);
 
 #[tauri::command]
 fn get_startup_path(state: tauri::State<StartupPath>) -> Option<String> {
@@ -17,8 +15,6 @@ fn get_startup_path(state: tauri::State<StartupPath>) -> Option<String> {
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
-    // If a directory path was passed on the command line, store it so the
-    // frontend can open it automatically on startup.
     let startup_path = std::env::args()
         .nth(1)
         .filter(|a| !a.starts_with('-') && std::path::Path::new(a).is_dir());
