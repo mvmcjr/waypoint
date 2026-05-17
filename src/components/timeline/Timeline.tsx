@@ -2,7 +2,7 @@ import { useRef, useState, useEffect, useCallback, forwardRef, useImperativeHand
 import { useVirtualizer } from "@tanstack/react-virtual";
 import type { PositionedCommit } from "@/lib/ipc";
 import { useRepoStatus, useStashes } from "@/lib/queries";
-import { clamp } from "@/lib/utils";
+import { clamp, isStashCommit } from "@/lib/utils";
 import { GraphLayer, LANE_WIDTH, ROW_HEIGHT, REFS_COL_WIDTH } from "./GraphLayer";
 import { CommitRow } from "./CommitRow";
 import { WipRow } from "./WipRow";
@@ -172,6 +172,7 @@ export const Timeline = forwardRef<TimelineHandle, Props>(function Timeline(
                 selectedOid={selectedOid}
                 headOid={headOid}
                 hasWip={hasWip}
+                stashOids={stashOids}
               />
             </div>
           )}
@@ -187,9 +188,7 @@ export const Timeline = forwardRef<TimelineHandle, Props>(function Timeline(
           >
             {virtualItems.map((virtualItem) => {
               const item = commits[virtualItem.index];
-              const isStash =
-                stashOids.has(item.commit.oid) ||
-                /^(WIP on |index on |untracked files on )/.test(item.commit.summary);
+              const isStash = isStashCommit(item.commit.oid, item.commit.summary, stashOids);
               return (
                 <CommitContextMenu
                   key={item.commit.oid}

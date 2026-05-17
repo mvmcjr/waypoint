@@ -1,4 +1,5 @@
 import type { PositionedCommit } from "@/lib/ipc";
+import { isStashCommit } from "@/lib/utils";
 
 export const LANE_WIDTH = 18;
 export const ROW_HEIGHT = 34;
@@ -70,6 +71,8 @@ function edgePath(fromX: number, fromY: number, toX: number, toY: number): strin
   ].join(" ");
 }
 
+const EMPTY_STASH_OIDS: Set<string> = new Set();
+
 interface Props {
   commits: PositionedCommit[];
   startRow: number;
@@ -79,24 +82,27 @@ interface Props {
   selectedOid: string | null;
   headOid: string | null;
   hasWip?: boolean;
+  stashOids?: Set<string>;
 }
 
-export function GraphLayer({ commits, startRow, visibleRows, width, onSelectOid, selectedOid, headOid, hasWip }: Props) {
+export function GraphLayer({ commits, startRow, visibleRows, width, onSelectOid, selectedOid, headOid, hasWip, stashOids = EMPTY_STASH_OIDS }: Props) {
   const endRow = startRow + visibleRows;
   const svgHeight = visibleRows * ROW_HEIGHT;
 
-  const edges: { fromX: number; fromY: number; toX: number; toY: number; color: string }[] = [];
+  const edges: { fromX: number; fromY: number; toX: number; toY: number; color: string; isDashed: boolean }[] = [];
 
   for (const item of commits) {
+    let dashed: boolean | null = null;
     for (const e of item.edges) {
       if (e.from_row >= endRow || e.to_row < startRow) continue;
 
+      if (dashed === null) dashed = isStashCommit(item.commit.oid, item.commit.summary, stashOids);
       const fX = cx(e.from_lane);
       const fY = cy(e.from_row, startRow);
       const tX = cx(e.to_lane);
       const tY = cy(e.to_row, startRow);
 
-      edges.push({ fromX: fX, fromY: fY, toX: tX, toY: tY, color: laneColor(e.color_idx) });
+      edges.push({ fromX: fX, fromY: fY, toX: tX, toY: tY, color: laneColor(e.color_idx), isDashed: dashed });
     }
   }
 
@@ -118,6 +124,7 @@ export function GraphLayer({ commits, startRow, visibleRows, width, onSelectOid,
           stroke={e.color}
           strokeWidth={1.5}
           opacity={0.75}
+          strokeDasharray={e.isDashed ? "4 3" : undefined}
         />
       ))}
 
