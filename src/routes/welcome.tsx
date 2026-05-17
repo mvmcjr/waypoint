@@ -23,6 +23,13 @@ export function WelcomeScreen() {
     });
   }, []);
 
+  // Auto-open a repo when launched from the Explorer context menu (or CLI).
+  // get_startup_path consumes the stored path so this only fires once.
+  useEffect(() => {
+    ipc.getStartupPath().then((path) => { if (path) openRepo(path); });
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+
   async function openRepo(path: string) {
     setError(null);
     try {

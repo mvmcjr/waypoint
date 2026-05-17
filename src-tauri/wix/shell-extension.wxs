@@ -1,0 +1,42 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+  Adds "Open in Waypoint" to the Windows Explorer right-click context menu
+  for folders and the folder background. Installed per-user (HKCU) so no
+  elevation is required. Entries are removed automatically on uninstall.
+-->
+<Wix xmlns="http://schemas.microsoft.com/wix/2006/wi">
+  <Fragment>
+    <ComponentGroup Id="ShellExtensionGroup" Directory="INSTALLDIR">
+      <Component Id="ShellExtension" Guid="C8D4E6F2-A0B2-4C6E-8A0C-2E4F6A8C0E2A">
+
+        <!-- Right-click on a folder (%1 = the folder path) -->
+        <RegistryValue Root="HKCU"
+                       Key="Software\Classes\Directory\shell\Waypoint"
+                       Type="string" Value="Open in Waypoint"
+                       KeyPath="yes" />
+        <RegistryValue Root="HKCU"
+                       Key="Software\Classes\Directory\shell\Waypoint"
+                       Name="Icon" Type="string"
+                       Value="[INSTALLDIR]waypoint.exe,0" />
+        <RegistryValue Root="HKCU"
+                       Key="Software\Classes\Directory\shell\Waypoint\command"
+                       Type="string"
+                       Value="&quot;[INSTALLDIR]waypoint.exe&quot; &quot;%1&quot;" />
+
+        <!-- Right-click on the folder background (%V = current folder path) -->
+        <RegistryValue Root="HKCU"
+                       Key="Software\Classes\Directory\Background\shell\Waypoint"
+                       Type="string" Value="Open in Waypoint" />
+        <RegistryValue Root="HKCU"
+                       Key="Software\Classes\Directory\Background\shell\Waypoint"
+                       Name="Icon" Type="string"
+                       Value="[INSTALLDIR]waypoint.exe,0" />
+        <RegistryValue Root="HKCU"
+                       Key="Software\Classes\Directory\Background\shell\Waypoint\command"
+                       Type="string"
+                       Value="&quot;[INSTALLDIR]waypoint.exe&quot; &quot;%V&quot;" />
+
+      </Component>
+    </ComponentGroup>
+  </Fragment>
+</Wix>

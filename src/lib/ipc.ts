@@ -103,6 +103,9 @@ export interface PullResult {
 }
 
 export const ipc = {
+  getStartupPath: () =>
+    invoke<string | null>("get_startup_path"),
+
   openRepo: (path: string) =>
     invoke<string>("open_repo", { path }),
 
