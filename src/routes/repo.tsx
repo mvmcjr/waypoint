@@ -21,6 +21,9 @@ import {
   CherryPickDialog,
   PullDialog,
   PushDialog,
+  CreateTagDialog,
+  DeleteTagDialog,
+  PushTagDialog,
 } from "@/components/actions/Dialogs";
 import type { CommitAction } from "@/components/timeline/CommitContextMenu";
 import type { RefAction } from "@/components/sidebar/RefTree";
@@ -41,7 +44,10 @@ type DialogState =
   | { kind: "merge"; oid: string; label: string }
   | { kind: "cherry-pick"; oid: string; summary: string }
   | { kind: "pull" }
-  | { kind: "push"; branchName: string };
+  | { kind: "push"; branchName: string }
+  | { kind: "create-tag"; oid: string }
+  | { kind: "delete-tag"; tagName: string }
+  | { kind: "push-tag"; tagName: string };
 
 // ─── Main view ─────────────────────────────────────────────────────────────
 
@@ -151,6 +157,10 @@ export function RepoView() {
       setDialog({ kind: "push", branchName: action.branchName });
     } else if (action.kind === "delete-branch") {
       setDialog({ kind: "delete-branch", branchName: action.branchName });
+    } else if (action.kind === "push-tag") {
+      setDialog({ kind: "push-tag", tagName: action.tagName });
+    } else if (action.kind === "delete-tag") {
+      setDialog({ kind: "delete-tag", tagName: action.tagName });
     }
   }
 
@@ -159,6 +169,8 @@ export function RepoView() {
       setDialog({ kind: "checkout-detached", oid: action.oid });
     } else if (action.kind === "create-branch") {
       setDialog({ kind: "create-branch", oid: action.oid });
+    } else if (action.kind === "create-tag") {
+      setDialog({ kind: "create-tag", oid: action.oid });
     } else if (action.kind === "reset") {
       setDialog({ kind: "reset", oid: action.oid });
     } else if (action.kind === "rebase") {
@@ -419,6 +431,33 @@ export function RepoView() {
           repoId={repoId}
           remotes={remotes}
           currentBranch={dialog.branchName}
+          onClose={() => setDialog({ kind: "none" })}
+          onSuccess={handleSuccess}
+        />
+      )}
+      {repoId && dialog.kind === "create-tag" && (
+        <CreateTagDialog
+          repoId={repoId}
+          oid={dialog.oid}
+          remotes={remotes ?? []}
+          onClose={() => setDialog({ kind: "none" })}
+          onSuccess={handleSuccess}
+        />
+      )}
+      {repoId && dialog.kind === "delete-tag" && (
+        <DeleteTagDialog
+          repoId={repoId}
+          tagName={dialog.tagName}
+          remotes={remotes ?? []}
+          onClose={() => setDialog({ kind: "none" })}
+          onSuccess={handleSuccess}
+        />
+      )}
+      {repoId && remotes && dialog.kind === "push-tag" && (
+        <PushTagDialog
+          repoId={repoId}
+          tagName={dialog.tagName}
+          remotes={remotes}
           onClose={() => setDialog({ kind: "none" })}
           onSuccess={handleSuccess}
         />

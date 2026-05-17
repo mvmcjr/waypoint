@@ -10,6 +10,7 @@ import type { PositionedCommit } from "@/lib/ipc";
 export type CommitAction =
   | { kind: "checkout-detached"; oid: string }
   | { kind: "create-branch"; oid: string }
+  | { kind: "create-tag"; oid: string }
   | { kind: "reset"; oid: string }
   | { kind: "rebase"; oid: string }
   | { kind: "merge"; oid: string; label: string }
@@ -42,6 +43,10 @@ export function CommitContextMenu({ item, onAction, children }: Props) {
 
         <ContextMenuItem onClick={() => onAction({ kind: "create-branch", oid })}>
           New branch here…
+        </ContextMenuItem>
+
+        <ContextMenuItem onClick={() => onAction({ kind: "create-tag", oid })}>
+          New tag here…
         </ContextMenuItem>
 
         <ContextMenuSeparator />

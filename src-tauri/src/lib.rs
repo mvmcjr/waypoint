@@ -68,6 +68,10 @@ pub fn run() {
             commands::remote::fetch_remote,
             commands::remote::push_branch,
             commands::remote::pull_branch,
+            commands::remote::push_tag,
+            commands::remote::delete_remote_tag,
+            commands::tags::create_tag,
+            commands::tags::delete_tag,
         ])
         .run(tauri::generate_context!())
         .expect("error while running waypoint");

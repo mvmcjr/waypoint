@@ -685,3 +685,215 @@ export function RebaseDialog({ repoId, ontoOid, currentBranch, onClose, onSucces
     </Dialog>
   );
 }
+
+// ─── Create Tag ─────────────────────────────────────────────────────────────
+
+interface CreateTagProps extends BaseProps {
+  oid: string;
+  remotes: RemoteInfo[];
+}
+
+export function CreateTagDialog({ repoId, oid, remotes, onClose, onSuccess }: CreateTagProps) {
+  const [name, setName] = useState("");
+  const [message, setMessage] = useState("");
+  const [pushToRemote, setPushToRemote] = useState(false);
+  const [remoteName, setRemoteName] = useState(
+    remotes.find((r) => r.name === "origin")?.name ?? remotes[0]?.name ?? ""
+  );
+  const [loading, setLoading] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+
+  async function run() {
+    const trimmedName = name.trim();
+    if (!trimmedName) return;
+    setLoading(true);
+    setError(null);
+    try {
+      await ipc.createTag(repoId, trimmedName, oid, message.trim());
+      if (pushToRemote && remoteName) {
+        await ipc.pushTag(repoId, remoteName, trimmedName);
+      }
+      onSuccess();
+    } catch (e) {
+      setError(String(e));
+    } finally {
+      setLoading(false);
+    }
+  }
+
+  return (
+    <Dialog open onOpenChange={(o) => !o && onClose()}>
+      <DialogContent>
+        <DialogHeader>
+          <DialogTitle>Create tag</DialogTitle>
+          <DialogDescription>
+            Tag commit <code className="font-mono">{short(oid)}</code>.
+            Leave message blank for a lightweight tag.
+          </DialogDescription>
+        </DialogHeader>
+
+        <div className="flex flex-col gap-3">
+          <Input
+            placeholder="Tag name (e.g. v1.0.0)"
+            value={name}
+            onChange={(e) => setName(e.target.value)}
+            onKeyDown={(e) => e.key === "Enter" && run()}
+            autoFocus
+          />
+          <Input
+            placeholder="Annotation message (optional)"
+            value={message}
+            onChange={(e) => setMessage(e.target.value)}
+          />
+          {remotes.length > 0 && (
+            <label className="flex items-center gap-2 text-sm cursor-pointer select-none">
+              <input
+                type="checkbox"
+                className="h-4 w-4 accent-primary"
+                checked={pushToRemote}
+                onChange={(e) => setPushToRemote(e.target.checked)}
+              />
+              Push to remote
+            </label>
+          )}
+          {pushToRemote && (
+            <RemoteSelect remotes={remotes} value={remoteName} onChange={setRemoteName} />
+          )}
+        </div>
+
+        {error && <ErrorNote msg={error} />}
+
+        <DialogFooter>
+          <Button variant="outline" onClick={onClose} disabled={loading}>Cancel</Button>
+          <Button onClick={run} disabled={loading || !name.trim()}>
+            {loading ? "Creating…" : "Create tag"}
+          </Button>
+        </DialogFooter>
+      </DialogContent>
+    </Dialog>
+  );
+}
+
+// ─── Delete Tag ──────────────────────────────────────────────────────────────
+
+interface DeleteTagProps extends BaseProps {
+  tagName: string;
+  remotes: RemoteInfo[];
+}
+
+export function DeleteTagDialog({ repoId, tagName, remotes, onClose, onSuccess }: DeleteTagProps) {
+  const [alsoDeleteRemote, setAlsoDeleteRemote] = useState(false);
+  const [remoteName, setRemoteName] = useState(
+    remotes.find((r) => r.name === "origin")?.name ?? remotes[0]?.name ?? ""
+  );
+  const [loading, setLoading] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+
+  async function run() {
+    setLoading(true);
+    setError(null);
+    try {
+      await ipc.deleteTag(repoId, tagName);
+      if (alsoDeleteRemote && remoteName) {
+        await ipc.deleteRemoteTag(repoId, remoteName, tagName);
+      }
+      onSuccess();
+    } catch (e) {
+      setError(String(e));
+    } finally {
+      setLoading(false);
+    }
+  }
+
+  return (
+    <Dialog open onOpenChange={(o) => !o && onClose()}>
+      <DialogContent>
+        <DialogHeader>
+          <DialogTitle>Delete tag</DialogTitle>
+          <DialogDescription>
+            Delete local tag <code className="font-mono">{tagName}</code>. This cannot be undone.
+          </DialogDescription>
+        </DialogHeader>
+
+        <div className="flex flex-col gap-3">
+          {remotes.length > 0 && (
+            <label className="flex items-center gap-2 text-sm cursor-pointer select-none">
+              <input
+                type="checkbox"
+                className="h-4 w-4 accent-primary"
+                checked={alsoDeleteRemote}
+                onChange={(e) => setAlsoDeleteRemote(e.target.checked)}
+              />
+              Also delete from remote
+            </label>
+          )}
+          {alsoDeleteRemote && (
+            <RemoteSelect remotes={remotes} value={remoteName} onChange={setRemoteName} />
+          )}
+        </div>
+
+        {error && <ErrorNote msg={error} />}
+
+        <DialogFooter>
+          <Button variant="outline" onClick={onClose} disabled={loading}>Cancel</Button>
+          <Button variant="destructive" onClick={run} disabled={loading}>
+            {loading ? "Deleting…" : "Delete tag"}
+          </Button>
+        </DialogFooter>
+      </DialogContent>
+    </Dialog>
+  );
+}
+
+// ─── Push Tag ────────────────────────────────────────────────────────────────
+
+interface PushTagProps extends BaseProps {
+  tagName: string;
+  remotes: RemoteInfo[];
+}
+
+export function PushTagDialog({ repoId, tagName, remotes, onClose, onSuccess }: PushTagProps) {
+  const [remoteName, setRemoteName] = useState(
+    remotes.find((r) => r.name === "origin")?.name ?? remotes[0]?.name ?? ""
+  );
+  const [loading, setLoading] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+
+  async function run() {
+    if (!remoteName) return;
+    setLoading(true);
+    setError(null);
+    try {
+      await ipc.pushTag(repoId, remoteName, tagName);
+      onSuccess();
+    } catch (e) {
+      setError(String(e));
+    } finally {
+      setLoading(false);
+    }
+  }
+
+  return (
+    <Dialog open onOpenChange={(o) => !o && onClose()}>
+      <DialogContent>
+        <DialogHeader>
+          <DialogTitle>Push tag</DialogTitle>
+          <DialogDescription>
+            Push tag <code className="font-mono">{tagName}</code> to a remote.
+          </DialogDescription>
+        </DialogHeader>
+
+        <RemoteSelect remotes={remotes} value={remoteName} onChange={setRemoteName} />
+
+        {error && <ErrorNote msg={error} />}
+
+        <DialogFooter>
+          <Button variant="outline" onClick={onClose} disabled={loading}>Cancel</Button>
+          <Button onClick={run} disabled={loading || !remoteName}>
+            {loading ? "Pushing…" : "Push tag"}
+          </Button>
+        </DialogFooter>
+      </DialogContent>
+    </Dialog>
+  );
+}

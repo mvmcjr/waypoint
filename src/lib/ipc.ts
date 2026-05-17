@@ -228,4 +228,16 @@ export const ipc = {
 
   pullBranch: (repoId: string, remoteName: string) =>
     invoke<PullResult>("pull_branch", { repoId, remoteName }),
+
+  createTag: (repoId: string, name: string, oid: string, message: string) =>
+    invoke<void>("create_tag", { repoId, name, oid, message }),
+
+  deleteTag: (repoId: string, name: string) =>
+    invoke<void>("delete_tag", { repoId, name }),
+
+  pushTag: (repoId: string, remoteName: string, tagName: string) =>
+    invoke<void>("push_tag", { repoId, remoteName, tagName }),
+
+  deleteRemoteTag: (repoId: string, remoteName: string, tagName: string) =>
+    invoke<void>("delete_remote_tag", { repoId, remoteName, tagName }),
 };

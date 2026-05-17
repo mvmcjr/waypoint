@@ -15,7 +15,9 @@ export type RefAction =
   | { kind: "merge"; oid: string; label: string }
   | { kind: "rebase"; oid: string }
   | { kind: "push"; branchName: string }
-  | { kind: "delete-branch"; branchName: string };
+  | { kind: "delete-branch"; branchName: string }
+  | { kind: "push-tag"; tagName: string }
+  | { kind: "delete-tag"; tagName: string };
 
 const GROUP_META = {
   Branches: { icon: GitBranch },
@@ -169,11 +171,25 @@ function buildMenu(
     );
   }
 
-  if (label === "Tags" && ref.target_oid) {
+  if (label === "Tags") {
     return (
-      <ContextMenuItem onClick={() => onRefAction({ kind: "checkout-tag", oid: ref.target_oid! })}>
-        Checkout (detached)
-      </ContextMenuItem>
+      <>
+        {ref.target_oid && (
+          <ContextMenuItem onClick={() => onRefAction({ kind: "checkout-tag", oid: ref.target_oid! })}>
+            Checkout (detached)
+          </ContextMenuItem>
+        )}
+        <ContextMenuItem onClick={() => onRefAction({ kind: "push-tag", tagName: ref.shorthand })}>
+          Push tag…
+        </ContextMenuItem>
+        <ContextMenuSeparator />
+        <ContextMenuItem
+          onClick={() => onRefAction({ kind: "delete-tag", tagName: ref.shorthand })}
+          className="text-destructive focus:text-destructive"
+        >
+          Delete {ref.shorthand}
+        </ContextMenuItem>
+      </>
     );
   }
 

@@ -146,6 +146,68 @@ pub fn push_branch(
     Ok(())
 }
 
+/// Push a local tag to a remote.
+#[tauri::command]
+pub fn push_tag(
+    repo_id: String,
+    remote_name: String,
+    tag_name: String,
+    state: State<RepoState>,
+) -> Result<()> {
+    let repos = state.0.lock().unwrap();
+    let repo = repos.get(&repo_id).ok_or_else(|| Error::RepoNotFound(repo_id.clone()))?;
+
+    let mut remote = repo
+        .find_remote(&remote_name)
+        .map_err(|_| Error::InvalidArg(format!("remote '{}' not found", remote_name)))?;
+
+    let refspec = format!("refs/tags/{}:refs/tags/{}", tag_name, tag_name);
+
+    let mut callbacks = make_callbacks();
+    callbacks.push_update_reference(|_refname, status| {
+        if let Some(msg) = status {
+            return Err(git2::Error::from_str(msg));
+        }
+        Ok(())
+    });
+
+    let mut opts = git2::PushOptions::new();
+    opts.remote_callbacks(callbacks);
+    remote.push(&[refspec.as_str()], Some(&mut opts))?;
+    Ok(())
+}
+
+/// Delete a tag from a remote (empty-source refspec).
+#[tauri::command]
+pub fn delete_remote_tag(
+    repo_id: String,
+    remote_name: String,
+    tag_name: String,
+    state: State<RepoState>,
+) -> Result<()> {
+    let repos = state.0.lock().unwrap();
+    let repo = repos.get(&repo_id).ok_or_else(|| Error::RepoNotFound(repo_id.clone()))?;
+
+    let mut remote = repo
+        .find_remote(&remote_name)
+        .map_err(|_| Error::InvalidArg(format!("remote '{}' not found", remote_name)))?;
+
+    let refspec = format!(":refs/tags/{}", tag_name);
+
+    let mut callbacks = make_callbacks();
+    callbacks.push_update_reference(|_refname, status| {
+        if let Some(msg) = status {
+            return Err(git2::Error::from_str(msg));
+        }
+        Ok(())
+    });
+
+    let mut opts = git2::PushOptions::new();
+    opts.remote_callbacks(callbacks);
+    remote.push(&[refspec.as_str()], Some(&mut opts))?;
+    Ok(())
+}
+
 #[tauri::command]
 pub fn pull_branch(
     repo_id: String,
