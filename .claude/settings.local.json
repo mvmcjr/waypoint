@@ -6,7 +6,9 @@
       "Bash(Get-ChildItem -Path \"E:\\\\waypoint\" -Recurse -Force -ErrorAction SilentlyContinue)",
       "Bash(Select-Object -First 50)",
       "Bash(git add *)",
-      "Bash(git commit -m ' *)"
+      "Bash(git commit -m ' *)",
+      "Bash(Get-ChildItem -Path \"E:\\\\waypoint\\\\src\" -Recurse -Filter \"*.tsx\" -o)",
+      "Bash(Select-Object -ExpandProperty FullName)"
     ]
   }
 }
