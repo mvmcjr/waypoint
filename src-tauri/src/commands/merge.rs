@@ -34,7 +34,7 @@ fn io_err(e: std::io::Error) -> Error {
     Error::InvalidArg(e.to_string())
 }
 
-fn cleanup_merge_state(repo: &git2::Repository) {
+pub(crate) fn cleanup_merge_state(repo: &git2::Repository) {
     let git_dir = repo.path();
     for name in &["MERGE_HEAD", "MERGE_MSG", "MERGE_MODE",
                   "CHERRY_PICK_HEAD", "CHERRY_PICK_MSG"] {
@@ -42,7 +42,7 @@ fn cleanup_merge_state(repo: &git2::Repository) {
     }
 }
 
-fn collect_conflict_paths(index: &git2::Index) -> Result<Vec<String>> {
+pub(crate) fn collect_conflict_paths(index: &git2::Index) -> Result<Vec<String>> {
     let mut paths = Vec::new();
     for entry in index.conflicts()? {
         let c = entry?;
@@ -266,7 +266,7 @@ fn resolve_with_side(repo: &git2::Repository, path: &str, use_ours: bool) -> Res
     })?;
 
     let blob = repo.find_blob(entry.id)?;
-    let workdir = repo.workdir().ok_or_else(|| Error::InvalidArg("Bare repository".into()))?;
+    let workdir = crate::repo::workdir(repo)?;
     let full_path = workdir.join(path);
 
     if let Some(parent) = full_path.parent() {
@@ -405,8 +405,7 @@ pub fn cherry_pick(repo_id: String, oid: String, state: State<RepoState>) -> Res
 pub fn get_conflict_content(repo_id: String, path: String, state: State<RepoState>) -> Result<String> {
     let repos = state.0.lock().unwrap();
     let repo = repos.get(&repo_id).ok_or_else(|| Error::RepoNotFound(repo_id.clone()))?;
-    let workdir = repo.workdir().ok_or_else(|| Error::InvalidArg("Bare repository".into()))?;
-    let full_path = workdir.join(&path);
+    let full_path = crate::repo::workdir(repo)?.join(&path);
     std::fs::read_to_string(&full_path).map_err(io_err)
 }
 
@@ -421,8 +420,7 @@ pub fn resolve_with_content(
 ) -> Result<()> {
     let repos = state.0.lock().unwrap();
     let repo = repos.get(&repo_id).ok_or_else(|| Error::RepoNotFound(repo_id.clone()))?;
-    let workdir = repo.workdir().ok_or_else(|| Error::InvalidArg("Bare repository".into()))?;
-    let full_path = workdir.join(&path);
+    let full_path = crate::repo::workdir(repo)?.join(&path);
     std::fs::write(&full_path, content.as_bytes()).map_err(io_err)?;
     let mut index = repo.index()?;
     index.add_path(Path::new(&path))?;

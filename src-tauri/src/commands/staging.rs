@@ -73,10 +73,7 @@ pub fn stage_file(repo_id: String, path: String, state: State<RepoState>) -> Res
     let repos = state.0.lock().unwrap();
     let repo = repos.get(&repo_id).ok_or_else(|| Error::RepoNotFound(repo_id.clone()))?;
 
-    let workdir = repo
-        .workdir()
-        .ok_or_else(|| Error::InvalidArg("Bare repository".into()))?;
-
+    let workdir = crate::repo::workdir(repo)?;
     let mut index = repo.index()?;
 
     if workdir.join(&path).exists() {
@@ -157,10 +154,7 @@ pub fn stage_paths(repo_id: String, paths: Vec<String>, state: State<RepoState>)
     let repos = state.0.lock().unwrap();
     let repo = repos.get(&repo_id).ok_or_else(|| Error::RepoNotFound(repo_id.clone()))?;
 
-    let workdir = repo
-        .workdir()
-        .ok_or_else(|| Error::InvalidArg("Bare repository".into()))?;
-
+    let workdir = crate::repo::workdir(repo)?;
     let mut index = repo.index()?;
     for path in &paths {
         if workdir.join(path).exists() {

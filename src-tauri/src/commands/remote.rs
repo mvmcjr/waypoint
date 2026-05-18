@@ -17,59 +17,32 @@ pub struct PullResult {
     pub conflicted: Vec<String>,
 }
 
-fn home_dir() -> Option<std::path::PathBuf> {
-    std::env::var("USERPROFILE")
-        .or_else(|_| std::env::var("HOME"))
-        .ok()
-        .map(std::path::PathBuf::from)
+/// Shell out to the system `git` binary so that GCM / credential helpers work
+/// exactly as they do in the terminal — no re-auth prompts.
+fn run_git(workdir: &std::path::Path, args: &[&str]) -> Result<()> {
+    let output = std::process::Command::new("git")
+        .current_dir(workdir)
+        .args(args)
+        .output()
+        .map_err(|e| Error::InvalidArg(format!("failed to run git: {}", e)))?;
+
+    if output.status.success() {
+        return Ok(());
+    }
+
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    let msg = if !stderr.trim().is_empty() {
+        stderr
+    } else {
+        String::from_utf8_lossy(&output.stdout)
+    };
+    Err(Error::InvalidArg(msg.trim().to_string()))
 }
 
-fn make_callbacks<'a>() -> git2::RemoteCallbacks<'a> {
-    let mut tried_agent = false;
-    let mut tried_ssh_key = false;
-    let mut tried_helper = false;
-
-    let mut callbacks = git2::RemoteCallbacks::new();
-    callbacks.credentials(move |url, username_from_url, allowed| {
-        if allowed.contains(git2::CredentialType::SSH_KEY) && !tried_agent {
-            tried_agent = true;
-            if let Some(username) = username_from_url {
-                if let Ok(cred) = git2::Cred::ssh_key_from_agent(username) {
-                    return Ok(cred);
-                }
-            }
-        }
-
-        if allowed.contains(git2::CredentialType::SSH_KEY) && !tried_ssh_key {
-            tried_ssh_key = true;
-            if let Some(username) = username_from_url {
-                if let Some(home) = home_dir() {
-                    for key_name in &["id_ed25519", "id_rsa", "id_ecdsa"] {
-                        let path = home.join(".ssh").join(key_name);
-                        if path.exists() {
-                            if let Ok(cred) = git2::Cred::ssh_key(username, None, &path, None) {
-                                return Ok(cred);
-                            }
-                        }
-                    }
-                }
-            }
-        }
-
-        if allowed.contains(git2::CredentialType::USER_PASS_PLAINTEXT) && !tried_helper {
-            tried_helper = true;
-            if let Ok(cfg) = git2::Config::open_default() {
-                if let Ok(cred) = git2::Cred::credential_helper(&cfg, url, username_from_url) {
-                    return Ok(cred);
-                }
-            }
-        }
-
-        Err(git2::Error::from_str(
-            "authentication failed: no credentials available (tried SSH agent, key files, and credential helper)",
-        ))
-    });
-    callbacks
+fn get_workdir(state: &State<RepoState>, repo_id: &str) -> Result<std::path::PathBuf> {
+    let repos = state.0.lock().unwrap();
+    let repo = repos.get(repo_id).ok_or_else(|| Error::RepoNotFound(repo_id.to_string()))?;
+    crate::repo::workdir(repo)
 }
 
 #[tauri::command]
@@ -97,20 +70,7 @@ pub fn fetch_remote(
     remote_name: String,
     state: State<RepoState>,
 ) -> Result<()> {
-    let repos = state.0.lock().unwrap();
-    let repo = repos.get(&repo_id).ok_or_else(|| Error::RepoNotFound(repo_id.clone()))?;
-
-    let mut remote = repo
-        .find_remote(&remote_name)
-        .map_err(|_| Error::InvalidArg(format!("remote '{}' not found", remote_name)))?;
-
-    let callbacks = make_callbacks();
-    let mut opts = git2::FetchOptions::new();
-    opts.remote_callbacks(callbacks);
-    opts.download_tags(git2::AutotagOption::Unspecified);
-
-    remote.fetch(&[] as &[&str], Some(&mut opts), None)?;
-    Ok(())
+    run_git(&get_workdir(&state, &repo_id)?, &["fetch", &remote_name])
 }
 
 #[tauri::command]
@@ -121,29 +81,12 @@ pub fn push_branch(
     force: bool,
     state: State<RepoState>,
 ) -> Result<()> {
-    let repos = state.0.lock().unwrap();
-    let repo = repos.get(&repo_id).ok_or_else(|| Error::RepoNotFound(repo_id.clone()))?;
-
-    let mut remote = repo
-        .find_remote(&remote_name)
-        .map_err(|_| Error::InvalidArg(format!("remote '{}' not found", remote_name)))?;
-
-    let prefix = if force { "+" } else { "" };
-    let refspec = format!("{}refs/heads/{}:refs/heads/{}", prefix, branch_name, branch_name);
-
-    let mut callbacks = make_callbacks();
-    callbacks.push_update_reference(|_refname, status| {
-        if let Some(msg) = status {
-            return Err(git2::Error::from_str(msg));
-        }
-        Ok(())
-    });
-
-    let mut opts = git2::PushOptions::new();
-    opts.remote_callbacks(callbacks);
-
-    remote.push(&[refspec.as_str()], Some(&mut opts))?;
-    Ok(())
+    let workdir = get_workdir(&state, &repo_id)?;
+    let mut args: Vec<&str> = vec!["push"];
+    if force { args.push("--force"); }
+    args.push(&remote_name);
+    args.push(&branch_name);
+    run_git(&workdir, &args)
 }
 
 /// Push a local tag to a remote.
@@ -154,27 +97,8 @@ pub fn push_tag(
     tag_name: String,
     state: State<RepoState>,
 ) -> Result<()> {
-    let repos = state.0.lock().unwrap();
-    let repo = repos.get(&repo_id).ok_or_else(|| Error::RepoNotFound(repo_id.clone()))?;
-
-    let mut remote = repo
-        .find_remote(&remote_name)
-        .map_err(|_| Error::InvalidArg(format!("remote '{}' not found", remote_name)))?;
-
     let refspec = format!("refs/tags/{}:refs/tags/{}", tag_name, tag_name);
-
-    let mut callbacks = make_callbacks();
-    callbacks.push_update_reference(|_refname, status| {
-        if let Some(msg) = status {
-            return Err(git2::Error::from_str(msg));
-        }
-        Ok(())
-    });
-
-    let mut opts = git2::PushOptions::new();
-    opts.remote_callbacks(callbacks);
-    remote.push(&[refspec.as_str()], Some(&mut opts))?;
-    Ok(())
+    run_git(&get_workdir(&state, &repo_id)?, &["push", &remote_name, &refspec])
 }
 
 /// Delete a tag from a remote (empty-source refspec).
@@ -185,27 +109,8 @@ pub fn delete_remote_tag(
     tag_name: String,
     state: State<RepoState>,
 ) -> Result<()> {
-    let repos = state.0.lock().unwrap();
-    let repo = repos.get(&repo_id).ok_or_else(|| Error::RepoNotFound(repo_id.clone()))?;
-
-    let mut remote = repo
-        .find_remote(&remote_name)
-        .map_err(|_| Error::InvalidArg(format!("remote '{}' not found", remote_name)))?;
-
     let refspec = format!(":refs/tags/{}", tag_name);
-
-    let mut callbacks = make_callbacks();
-    callbacks.push_update_reference(|_refname, status| {
-        if let Some(msg) = status {
-            return Err(git2::Error::from_str(msg));
-        }
-        Ok(())
-    });
-
-    let mut opts = git2::PushOptions::new();
-    opts.remote_callbacks(callbacks);
-    remote.push(&[refspec.as_str()], Some(&mut opts))?;
-    Ok(())
+    run_git(&get_workdir(&state, &repo_id)?, &["push", &remote_name, &refspec])
 }
 
 #[tauri::command]
@@ -214,33 +119,36 @@ pub fn pull_branch(
     remote_name: String,
     state: State<RepoState>,
 ) -> Result<PullResult> {
+    // Get branch name and workdir, then release the lock before the blocking network call.
+    let (branch_name, workdir) = {
+        let repos = state.0.lock().unwrap();
+        let repo = repos.get(&repo_id).ok_or_else(|| Error::RepoNotFound(repo_id.clone()))?;
+        let head = repo.head()?;
+        if !head.is_branch() {
+            return Err(Error::InvalidArg(
+                "Cannot pull: HEAD is detached. Checkout a branch first.".into(),
+            ));
+        }
+        let branch_name = head
+            .shorthand()
+            .ok_or_else(|| Error::InvalidArg("Cannot determine current branch name.".into()))?
+            .to_string();
+        (branch_name, crate::repo::workdir(repo)?)
+    };
+
+    run_git(&workdir, &["fetch", &remote_name, &branch_name])?;
+
     let repos = state.0.lock().unwrap();
     let repo = repos.get(&repo_id).ok_or_else(|| Error::RepoNotFound(repo_id.clone()))?;
 
-    // Require a named branch (not detached HEAD).
-    let head = repo.head()?;
-    if !head.is_branch() {
+    // Guard against a concurrent checkout that happened while we were fetching.
+    let current_head = repo.head()?;
+    if !current_head.is_branch() || current_head.shorthand() != Some(branch_name.as_str()) {
         return Err(Error::InvalidArg(
-            "Cannot pull: HEAD is detached. Checkout a branch first.".into(),
+            "HEAD changed during fetch; checkout the intended branch and try again.".into(),
         ));
     }
-    let branch_name = head
-        .shorthand()
-        .ok_or_else(|| Error::InvalidArg("Cannot determine current branch name.".into()))?
-        .to_string();
 
-    // Fetch the specific branch from the remote.
-    {
-        let mut remote = repo
-            .find_remote(&remote_name)
-            .map_err(|_| Error::InvalidArg(format!("remote '{}' not found", remote_name)))?;
-        let callbacks = make_callbacks();
-        let mut opts = git2::FetchOptions::new();
-        opts.remote_callbacks(callbacks);
-        remote.fetch(&[branch_name.as_str()], Some(&mut opts), None)?;
-    }
-
-    // Locate the tracking ref written by the fetch.
     let tracking_ref_name = format!("refs/remotes/{}/{}", remote_name, branch_name);
     let tracking_oid = repo
         .find_reference(&tracking_ref_name)
@@ -274,22 +182,10 @@ pub fn pull_branch(
     let mut index = repo.index()?;
     index.write()?;
 
+    let merge_msg = format!("Merge remote-tracking branch '{}/{}'", remote_name, branch_name);
+
     if index.has_conflicts() {
-        let mut conflicted = Vec::new();
-        for entry in index.conflicts()? {
-            let c = entry?;
-            let path = c.our
-                .as_ref()
-                .or(c.their.as_ref())
-                .or(c.ancestor.as_ref())
-                .map(|e| String::from_utf8_lossy(&e.path).into_owned())
-                .unwrap_or_default();
-            if !path.is_empty() {
-                conflicted.push(path);
-            }
-        }
-        let merge_msg =
-            format!("Merge remote-tracking branch '{}/{}'", remote_name, branch_name);
+        let conflicted = crate::commands::merge::collect_conflict_paths(&index)?;
         let git_dir = repo.path();
         std::fs::write(git_dir.join("MERGE_HEAD"), format!("{}\n", tracking_oid))
             .map_err(|e| Error::InvalidArg(e.to_string()))?;
@@ -298,20 +194,13 @@ pub fn pull_branch(
         return Ok(PullResult { kind: "conflicts".into(), conflicted });
     }
 
-    // Auto-commit the merge.
     let sig = repo.signature()?;
     let head_commit = repo.head()?.peel_to_commit()?;
     let other_commit = repo.find_commit(tracking_oid)?;
     let tree_oid = index.write_tree()?;
     let tree = repo.find_tree(tree_oid)?;
-    let merge_msg =
-        format!("Merge remote-tracking branch '{}/{}'", remote_name, branch_name);
     repo.commit(Some("HEAD"), &sig, &sig, &merge_msg, &tree, &[&head_commit, &other_commit])?;
-
-    let git_dir = repo.path();
-    for name in &["MERGE_HEAD", "MERGE_MSG", "MERGE_MODE"] {
-        let _ = std::fs::remove_file(git_dir.join(name));
-    }
+    crate::commands::merge::cleanup_merge_state(repo);
 
     Ok(PullResult { kind: "merged".into(), conflicted: vec![] })
 }
