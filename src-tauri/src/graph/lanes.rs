@@ -10,6 +10,8 @@ pub struct CommitNode {
     pub author_email: String,
     pub timestamp: i64,
     pub refs: Vec<String>,
+    pub local_branches: Vec<String>,
+    pub remote_branches: Vec<String>,
 }
 
 #[derive(Debug, Clone, Serialize)]

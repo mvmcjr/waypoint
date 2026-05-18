@@ -9,6 +9,8 @@ import type { PositionedCommit } from "@/lib/ipc";
 
 export type CommitAction =
   | { kind: "checkout-detached"; oid: string }
+  | { kind: "checkout-branch"; branchName: string }
+  | { kind: "checkout-remote-branch"; remoteBranch: string }
   | { kind: "create-branch"; oid: string }
   | { kind: "create-tag"; oid: string }
   | { kind: "reset"; oid: string }
@@ -25,9 +27,11 @@ interface Props {
 export function CommitContextMenu({ item, onAction, children }: Props) {
   const oid = item.commit.oid;
   const short = oid.slice(0, 8);
+  const { local_branches: localBranches, remote_branches: remoteBranches } = item.commit;
+  const remoteOnlyBranches = remoteBranches.filter((rb) => !rb.endsWith("/HEAD"));
   // Prefer a local branch; fall back to any ref (remote/tag) for the merge label.
   const mergeLabel =
-    item.commit.refs.find((r) => !r.includes("/") && r !== "HEAD") ??
+    localBranches[0] ??
     item.commit.refs.find((r) => r !== "HEAD") ??
     "";
 
@@ -35,11 +39,23 @@ export function CommitContextMenu({ item, onAction, children }: Props) {
     <ContextMenu>
       <ContextMenuTrigger>{children}</ContextMenuTrigger>
       <ContextMenuContent className="w-56">
-        <ContextMenuItem
-          onClick={() => onAction({ kind: "checkout-detached", oid })}
-        >
-          Checkout <span className="ml-auto font-mono text-xs text-muted-foreground">{short}</span>
-        </ContextMenuItem>
+        {localBranches.length > 0 ? (
+          localBranches.map((branch) => (
+            <ContextMenuItem key={branch} onClick={() => onAction({ kind: "checkout-branch", branchName: branch })}>
+              Checkout <span className="ml-auto font-mono text-xs text-muted-foreground">{branch}</span>
+            </ContextMenuItem>
+          ))
+        ) : remoteOnlyBranches.length > 0 ? (
+          remoteOnlyBranches.map((rb) => (
+            <ContextMenuItem key={rb} onClick={() => onAction({ kind: "checkout-remote-branch", remoteBranch: rb })}>
+              Checkout <span className="ml-auto font-mono text-xs text-muted-foreground">{rb}</span>
+            </ContextMenuItem>
+          ))
+        ) : (
+          <ContextMenuItem onClick={() => onAction({ kind: "checkout-detached", oid })}>
+            Checkout <span className="ml-auto font-mono text-xs text-muted-foreground">{short}</span>
+          </ContextMenuItem>
+        )}
 
         <ContextMenuItem onClick={() => onAction({ kind: "create-branch", oid })}>
           New branch here…

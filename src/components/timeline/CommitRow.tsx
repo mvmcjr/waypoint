@@ -17,7 +17,7 @@ interface Props {
 export function CommitRow({ item, refsWidth, graphWidth, isSelected, isHead, headBranch, isStash, onClick }: Props) {
   const { commit } = item;
   const relative = formatDistanceToNow(new Date(commit.timestamp * 1000), { addSuffix: true });
-  const refGroups = groupRefs(commit.refs, headBranch);
+  const refGroups = groupRefs(commit.refs, item.commit.local_branches, item.commit.remote_branches, headBranch);
   const MAX_REFS = 3;
   const visibleRefs = refGroups.slice(0, MAX_REFS);
   const hiddenCount = refGroups.length - MAX_REFS;

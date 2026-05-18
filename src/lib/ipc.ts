@@ -8,6 +8,8 @@ export interface CommitNode {
   author_email: string;
   timestamp: number;
   refs: string[];
+  local_branches: string[];
+  remote_branches: string[];
 }
 
 export interface GraphEdge {
@@ -129,6 +131,9 @@ export const ipc = {
 
   checkoutBranch: (repoId: string, branchName: string, force: boolean) =>
     invoke<void>("checkout_branch", { repoId, branchName, force }),
+
+  checkoutRemoteBranch: (repoId: string, remoteBranch: string, force: boolean) =>
+    invoke<void>("checkout_remote_branch", { repoId, remoteBranch, force }),
 
   checkoutCommit: (repoId: string, oid: string, force: boolean) =>
     invoke<void>("checkout_commit", { repoId, oid, force }),

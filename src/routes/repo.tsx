@@ -13,6 +13,7 @@ import { Input } from "@/components/ui/input";
 import {
   CheckoutCommitDialog,
   CheckoutBranchDialog,
+  CheckoutRemoteBranchDialog,
   CreateBranchDialog,
   DeleteBranchDialog,
   ResetDialog,
@@ -42,6 +43,7 @@ type DialogState =
   | { kind: "none" }
   | { kind: "checkout-detached"; oid: string }
   | { kind: "checkout-branch"; branchName: string }
+  | { kind: "checkout-remote-branch"; remoteBranch: string }
   | { kind: "create-branch"; oid: string }
   | { kind: "delete-branch"; branchName: string }
   | { kind: "reset"; oid: string }
@@ -199,6 +201,8 @@ export function RepoView() {
       setDialog({ kind: "merge", oid: action.oid, label: action.label });
     } else if (action.kind === "rebase") {
       setDialog({ kind: "rebase", oid: action.oid });
+    } else if (action.kind === "checkout-remote-branch") {
+      setDialog({ kind: "checkout-remote-branch", remoteBranch: action.remoteBranch });
     } else if (action.kind === "push") {
       handlePushBranch(action.branchName);
     } else if (action.kind === "delete-branch") {
@@ -213,6 +217,10 @@ export function RepoView() {
   function handleCommitAction(action: CommitAction) {
     if (action.kind === "checkout-detached") {
       setDialog({ kind: "checkout-detached", oid: action.oid });
+    } else if (action.kind === "checkout-branch") {
+      setDialog({ kind: "checkout-branch", branchName: action.branchName });
+    } else if (action.kind === "checkout-remote-branch") {
+      setDialog({ kind: "checkout-remote-branch", remoteBranch: action.remoteBranch });
     } else if (action.kind === "create-branch") {
       setDialog({ kind: "create-branch", oid: action.oid });
     } else if (action.kind === "create-tag") {
@@ -396,6 +404,14 @@ export function RepoView() {
         <CheckoutBranchDialog
           repoId={repoId}
           branchName={dialog.branchName}
+          onClose={() => setDialog({ kind: "none" })}
+          onSuccess={handleSuccess}
+        />
+      )}
+      {repoId && dialog.kind === "checkout-remote-branch" && (
+        <CheckoutRemoteBranchDialog
+          repoId={repoId}
+          remoteBranch={dialog.remoteBranch}
           onClose={() => setDialog({ kind: "none" })}
           onSuccess={handleSuccess}
         />

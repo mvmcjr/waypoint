@@ -205,6 +205,33 @@ pub fn rebase_onto(repo_id: String, onto_oid: String, state: State<RepoState>) -
     Ok(())
 }
 
+/// Checkout a remote tracking branch by creating (or reusing) a local branch.
+/// `remote_branch` is the shorthand, e.g. "origin/feature".
+#[tauri::command]
+pub fn checkout_remote_branch(repo_id: String, remote_branch: String, force: bool, state: State<RepoState>) -> Result<()> {
+    let repos = state.0.lock().unwrap();
+    let repo = repos.get(&repo_id).ok_or_else(|| Error::RepoNotFound(repo_id.clone()))?;
+
+    let slash = remote_branch.find('/').ok_or_else(|| {
+        Error::InvalidArg(format!("'{}' is not a valid remote tracking branch", remote_branch))
+    })?;
+    let local_name = &remote_branch[slash + 1..];
+    let remote_ref = format!("refs/remotes/{}", remote_branch);
+
+    let remote_obj = repo.revparse_single(&remote_ref)
+        .map_err(|_| Error::InvalidArg(format!("Remote branch '{}' not found", remote_branch)))?;
+    let remote_commit = remote_obj.peel_to_commit()?;
+
+    let local_ref = format!("refs/heads/{}", local_name);
+    match repo.branch(local_name, &remote_commit, false) {
+        Ok(mut b) => { let _ = b.set_upstream(Some(&remote_branch)); }
+        Err(e) if e.code() == git2::ErrorCode::Exists => {}
+        Err(e) => return Err(Error::Git(e)),
+    }
+
+    do_checkout(repo, &local_ref, force)
+}
+
 /// Delete a local branch by short name.
 /// Refuses to delete the currently checked-out branch.
 #[tauri::command]

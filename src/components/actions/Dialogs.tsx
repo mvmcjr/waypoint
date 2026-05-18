@@ -189,13 +189,17 @@ export function RemoteErrorDialog({ message, onClose }: { message: string; onClo
   );
 }
 
-// ─── Checkout Commit (detached HEAD) ───────────────────────────────────────
+// ─── Shared checkout shell ─────────────────────────────────────────────────
 
-interface CheckoutCommitProps extends BaseProps {
-  oid: string;
+interface CheckoutShellProps {
+  title: string;
+  description: React.ReactNode;
+  onRun: (force: boolean) => Promise<void>;
+  onClose: () => void;
+  onSuccess: () => void;
 }
 
-export function CheckoutCommitDialog({ repoId, oid, onClose, onSuccess }: CheckoutCommitProps) {
+function CheckoutShell({ title, description, onRun, onClose, onSuccess }: CheckoutShellProps) {
   const [force, setForce] = useState(false);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -204,7 +208,7 @@ export function CheckoutCommitDialog({ repoId, oid, onClose, onSuccess }: Checko
     setLoading(true);
     setError(null);
     try {
-      await ipc.checkoutCommit(repoId, oid, force);
+      await onRun(force);
       onSuccess();
     } catch (e) {
       setError(String(e));
@@ -217,13 +221,9 @@ export function CheckoutCommitDialog({ repoId, oid, onClose, onSuccess }: Checko
     <Dialog open onOpenChange={(o) => !o && onClose()}>
       <DialogContent>
         <DialogHeader>
-          <DialogTitle>Checkout commit</DialogTitle>
-          <DialogDescription>
-            This will create a <strong>detached HEAD</strong> at{" "}
-            <code className="font-mono">{short(oid)}</code>.
-          </DialogDescription>
+          <DialogTitle>{title}</DialogTitle>
+          <DialogDescription>{description}</DialogDescription>
         </DialogHeader>
-
         <label className="flex items-center gap-2 text-sm cursor-pointer select-none">
           <input
             type="checkbox"
@@ -233,9 +233,7 @@ export function CheckoutCommitDialog({ repoId, oid, onClose, onSuccess }: Checko
           />
           Force (discard uncommitted local changes)
         </label>
-
         {error && <ErrorNote msg={error} />}
-
         <DialogFooter>
           <Button variant="outline" onClick={onClose} disabled={loading}>Cancel</Button>
           <Button onClick={run} disabled={loading}>
@@ -247,6 +245,24 @@ export function CheckoutCommitDialog({ repoId, oid, onClose, onSuccess }: Checko
   );
 }
 
+// ─── Checkout Commit (detached HEAD) ───────────────────────────────────────
+
+interface CheckoutCommitProps extends BaseProps {
+  oid: string;
+}
+
+export function CheckoutCommitDialog({ repoId, oid, onClose, onSuccess }: CheckoutCommitProps) {
+  return (
+    <CheckoutShell
+      title="Checkout commit"
+      description={<>This will create a <strong>detached HEAD</strong> at{" "}<code className="font-mono">{short(oid)}</code>.</>}
+      onRun={(force) => ipc.checkoutCommit(repoId, oid, force)}
+      onClose={onClose}
+      onSuccess={onSuccess}
+    />
+  );
+}
+
 // ─── Checkout Branch ───────────────────────────────────────────────────────
 
 interface CheckoutBranchProps extends BaseProps {
@@ -254,53 +270,33 @@ interface CheckoutBranchProps extends BaseProps {
 }
 
 export function CheckoutBranchDialog({ repoId, branchName, onClose, onSuccess }: CheckoutBranchProps) {
-  const [force, setForce] = useState(false);
-  const [loading, setLoading] = useState(false);
-  const [error, setError] = useState<string | null>(null);
-
-  async function run() {
-    setLoading(true);
-    setError(null);
-    try {
-      await ipc.checkoutBranch(repoId, branchName, force);
-      onSuccess();
-    } catch (e) {
-      setError(String(e));
-    } finally {
-      setLoading(false);
-    }
-  }
-
   return (
-    <Dialog open onOpenChange={(o) => !o && onClose()}>
-      <DialogContent>
-        <DialogHeader>
-          <DialogTitle>Checkout branch</DialogTitle>
-          <DialogDescription>
-            Switch to <code className="font-mono">{branchName}</code>
-          </DialogDescription>
-        </DialogHeader>
+    <CheckoutShell
+      title="Checkout branch"
+      description={<>Switch to <code className="font-mono">{branchName}</code></>}
+      onRun={(force) => ipc.checkoutBranch(repoId, branchName, force)}
+      onClose={onClose}
+      onSuccess={onSuccess}
+    />
+  );
+}
 
-        <label className="flex items-center gap-2 text-sm cursor-pointer select-none">
-          <input
-            type="checkbox"
-            checked={force}
-            onChange={(e) => setForce(e.target.checked)}
-            className="accent-primary"
-          />
-          Force (discard uncommitted local changes)
-        </label>
+// ─── Checkout Remote Branch ────────────────────────────────────────────────
 
-        {error && <ErrorNote msg={error} />}
+interface CheckoutRemoteBranchProps extends BaseProps {
+  remoteBranch: string;
+}
 
-        <DialogFooter>
-          <Button variant="outline" onClick={onClose} disabled={loading}>Cancel</Button>
-          <Button onClick={run} disabled={loading}>
-            {loading ? "Checking out…" : "Checkout"}
-          </Button>
-        </DialogFooter>
-      </DialogContent>
-    </Dialog>
+export function CheckoutRemoteBranchDialog({ repoId, remoteBranch, onClose, onSuccess }: CheckoutRemoteBranchProps) {
+  const localName = remoteBranch.slice(remoteBranch.indexOf("/") + 1);
+  return (
+    <CheckoutShell
+      title="Checkout branch"
+      description={<>Create local branch <code className="font-mono">{localName}</code> tracking{" "}<code className="font-mono">{remoteBranch}</code> and switch to it.</>}
+      onRun={(force) => ipc.checkoutRemoteBranch(repoId, remoteBranch, force)}
+      onClose={onClose}
+      onSuccess={onSuccess}
+    />
   );
 }
 

@@ -69,6 +69,8 @@ describe("Timeline", () => {
       timestamp: 0,
       summary: "First commit",
       refs: [],
+      local_branches: [],
+      remote_branches: [],
     },
   };
 

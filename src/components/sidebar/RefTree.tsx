@@ -11,6 +11,7 @@ import {
 
 export type RefAction =
   | { kind: "checkout-branch"; branchName: string }
+  | { kind: "checkout-remote-branch"; remoteBranch: string }
   | { kind: "checkout-tag"; oid: string }
   | { kind: "merge"; oid: string; label: string }
   | { kind: "rebase"; oid: string }
@@ -161,6 +162,10 @@ function buildMenu(
   if (label === "Remotes" && ref.target_oid) {
     return (
       <>
+        <ContextMenuItem onClick={() => onRefAction({ kind: "checkout-remote-branch", remoteBranch: ref.shorthand })}>
+          Checkout {ref.shorthand}
+        </ContextMenuItem>
+        <ContextMenuSeparator />
         <ContextMenuItem onClick={() => onRefAction({ kind: "merge", oid: ref.target_oid!, label: ref.shorthand })}>
           Merge into current
         </ContextMenuItem>

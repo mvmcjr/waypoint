@@ -7,33 +7,42 @@ export interface RefGroup {
   isHead: boolean;
 }
 
-export function groupRefs(refs: string[], headBranch: string | null): RefGroup[] {
-  const visible = refs.filter((r) => r !== "HEAD" && r !== "origin/HEAD");
-
-  const locals = visible.filter((r) => !r.includes("/"));
-  const remotes = visible.filter((r) => r.includes("/"));
-
-  const usedRemotes = new Set<string>();
+export function groupRefs(
+  allRefs: string[],
+  localBranches: string[],
+  remoteBranches: string[],
+  headBranch: string | null,
+): RefGroup[] {
   const groups: RefGroup[] = [];
+  const covered = new Set<string>(["HEAD"]);
 
-  for (const local of locals) {
-    const matched = remotes.filter((r) => {
+  // Local branches merged with their matching remote tracking branches
+  for (const local of localBranches) {
+    covered.add(local);
+    const matched = remoteBranches.filter((r) => {
       const slash = r.indexOf("/");
       return slash !== -1 && r.slice(slash + 1) === local;
     });
-    matched.forEach((r) => usedRemotes.add(r));
+    matched.forEach((r) => covered.add(r));
     groups.push({ name: local, hasLocal: true, hasRemote: matched.length > 0, isHead: local === headBranch });
   }
 
-  for (const remote of remotes) {
-    if (usedRemotes.has(remote)) continue;
+  // Remote-only branches (no corresponding local branch)
+  for (const remote of remoteBranches) {
+    if (covered.has(remote) || remote.endsWith("/HEAD")) continue;
+    covered.add(remote);
     const slash = remote.indexOf("/");
     const name = slash !== -1 ? remote.slice(slash + 1) : remote;
     groups.push({ name, hasLocal: false, hasRemote: true, isHead: false });
   }
 
-  groups.sort((a, b) => (b.isHead ? 1 : 0) - (a.isHead ? 1 : 0));
+  // Other refs (tags, etc.) not yet represented
+  for (const ref of allRefs) {
+    if (covered.has(ref)) continue;
+    groups.push({ name: ref, hasLocal: false, hasRemote: false, isHead: false });
+  }
 
+  groups.sort((a, b) => (b.isHead ? 1 : 0) - (a.isHead ? 1 : 0));
   return groups;
 }
 
