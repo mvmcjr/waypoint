@@ -1,22 +1,12 @@
 import { open as openDialog } from "@tauri-apps/plugin-dialog";
-import { load } from "@tauri-apps/plugin-store";
-import { ipc } from "@/lib/ipc";
 import { useStore } from "@/lib/store";
-
-const STORE_KEY = "recent_repos";
-const MAX_RECENT = 10;
-
-async function persistRecent(path: string) {
-  const store = await load("waypoint.json", { defaults: {} });
-  const current = (await store.get<string[]>(STORE_KEY)) ?? [];
-  const updated = [path, ...current.filter((p) => p !== path)].slice(0, MAX_RECENT);
-  await store.set(STORE_KEY, updated);
-}
+import { useOpenRepo } from "@/lib/useOpenRepo";
 
 export function TabBar() {
   const tabs = useStore((s) => s.tabs);
   const activeTabId = useStore((s) => s.activeTabId);
-  const { switchTab, closeTab, openTab } = useStore();
+  const { switchTab, closeTab } = useStore();
+  const openRepo = useOpenRepo();
 
   async function handleOpenNew() {
     const selected = await openDialog({
@@ -25,11 +15,8 @@ export function TabBar() {
       title: "Open Repository",
     });
     if (!selected) return;
-    const path = selected as string;
     try {
-      const id = await ipc.openRepo(path);
-      await persistRecent(path);
-      openTab(id, path);
+      await openRepo(selected as string);
     } catch {
       // Non-git directory — silently ignore; the user will see no tab opened.
     }
