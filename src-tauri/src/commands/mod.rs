@@ -1,5 +1,6 @@
 pub mod actions;
 pub mod diff;
+pub mod fs;
 pub mod history;
 pub mod merge;
 pub mod remote;

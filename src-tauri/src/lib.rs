@@ -22,6 +22,7 @@ pub fn run() {
     tauri::Builder::default()
         .manage(StartupPath(Mutex::new(startup_path)))
         .manage(RepoState::default())
+        .plugin(tauri_plugin_global_shortcut::Builder::new().build())
         .plugin(tauri_plugin_opener::init())
         .plugin(tauri_plugin_dialog::init())
         .plugin(tauri_plugin_store::Builder::default().build())
@@ -72,6 +73,7 @@ pub fn run() {
             commands::remote::delete_remote_tag,
             commands::tags::create_tag,
             commands::tags::delete_tag,
+            commands::fs::scan_for_git_repos,
         ])
         .run(tauri::generate_context!())
         .expect("error while running waypoint");

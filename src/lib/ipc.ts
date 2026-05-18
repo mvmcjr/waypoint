@@ -240,4 +240,7 @@ export const ipc = {
 
   deleteRemoteTag: (repoId: string, remoteName: string, tagName: string) =>
     invoke<void>("delete_remote_tag", { repoId, remoteName, tagName }),
+
+  scanForGitRepos: (path: string) =>
+    invoke<string[]>("scan_for_git_repos", { path }),
 };
