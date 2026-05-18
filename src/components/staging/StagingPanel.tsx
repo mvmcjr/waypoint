@@ -7,7 +7,7 @@ import {
 } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { ipc, type FileStatus } from "@/lib/ipc";
-import { useFileStatus } from "@/lib/queries";
+import { useFileStatus, useRefreshRepo } from "@/lib/queries";
 
 interface Props {
   repoId: string;
@@ -236,6 +236,7 @@ function TreeNodes({
 export function StagingPanel({ repoId, onCommitSuccess, onFileClick }: Props) {
   const qc = useQueryClient();
   const { data: files = [], isLoading } = useFileStatus(repoId);
+  const refresh = useRefreshRepo(repoId);
   const [summary, setSummary] = useState("");
   const [description, setDescription] = useState("");
   const [committing, setCommitting] = useState(false);
@@ -302,7 +303,7 @@ export function StagingPanel({ repoId, onCommitSuccess, onFileClick }: Props) {
     setDiscardArmed(false);
     setWorking(true);
     setError(null);
-    try { await ipc.discardAll(repoId); invalidate(); }
+    try { await ipc.discardAll(repoId); refresh(); }
     catch (e) { setError(String(e)); }
     finally { setWorking(false); }
   }

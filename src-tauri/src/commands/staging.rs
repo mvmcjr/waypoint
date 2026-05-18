@@ -218,11 +218,15 @@ pub fn unstage_paths(repo_id: String, paths: Vec<String>, state: State<RepoState
 /// Untracked files are left untouched.
 #[tauri::command]
 pub fn discard_all(repo_id: String, state: State<RepoState>) -> Result<()> {
-    let repos = state.0.lock().unwrap();
-    let repo = repos.get(&repo_id).ok_or_else(|| Error::RepoNotFound(repo_id.clone()))?;
-
-    let head = repo.head()?.peel_to_commit()?;
-    repo.reset(head.as_object(), git2::ResetType::Hard, None)?;
+    {
+        let repos = state.0.lock().unwrap();
+        let repo = repos.get(&repo_id).ok_or_else(|| Error::RepoNotFound(repo_id.clone()))?;
+        let head = repo.head()?.peel_to_commit()?;
+        repo.reset(head.as_object(), git2::ResetType::Hard, None)?;
+    }
+    // Re-open with a fresh handle so libgit2's internal cache reflects the reset state.
+    let fresh = git2::Repository::open(&repo_id)?;
+    state.0.lock().unwrap().insert(repo_id, fresh);
     Ok(())
 }
 
