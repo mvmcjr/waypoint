@@ -35,7 +35,7 @@ export const useStore = create<AppState>((set) => ({
 
   openTab: (id, path) =>
     set((state) => {
-      // If already open, just switch to it.
+      if (state.activeTabId === id) return state;
       if (state.tabs.some((t) => t.id === id)) {
         return { activeTabId: id, ...BLANK_VIEW };
       }
