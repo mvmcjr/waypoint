@@ -71,18 +71,25 @@ function RefGroup({ label, refs, filter, onSelect, onRefAction }: GroupProps) {
             const btn = (
               <button
                 className={[
-                  "w-full text-left px-3 py-[3px] text-[12px] truncate rounded-sm flex items-center gap-2 transition-colors duration-75",
+                  "w-full text-left px-3 py-[3px] text-[12px] truncate rounded-sm flex items-center justify-between gap-2 transition-colors duration-75",
                   ref.is_head
                     ? "text-teal-300/90 font-medium hover:bg-teal-500/8"
                     : "text-foreground/55 hover:text-foreground/80 hover:bg-white/[0.05]",
                 ].join(" ")}
                 onClick={() => onSelect?.(ref)}
               >
-                <span className={[
-                  "w-1.5 h-1.5 rounded-full shrink-0 transition-colors",
-                  ref.is_head ? "bg-teal-400 shadow-[0_0_4px_rgba(45,212,191,0.5)]" : "bg-transparent",
-                ].join(" ")} />
-                <span className="truncate">{ref.shorthand}</span>
+                <div className="flex items-center gap-2 min-w-0">
+                  <span className={[
+                    "w-1.5 h-1.5 rounded-full shrink-0 transition-colors",
+                    ref.is_head ? "bg-teal-400 shadow-[0_0_4px_rgba(45,212,191,0.5)]" : "bg-transparent",
+                  ].join(" ")} />
+                  <span className="truncate">{ref.shorthand}</span>
+                </div>
+                {label === "Tags" && !ref.is_pushed && (
+                  <span className="text-[9px] font-semibold text-amber-500/80 bg-amber-500/10 px-1.5 py-0.5 rounded border border-amber-500/20 shrink-0 select-none tracking-wide uppercase">
+                    local
+                  </span>
+                )}
               </button>
             );
 

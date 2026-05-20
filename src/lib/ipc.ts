@@ -34,6 +34,7 @@ export interface RefInfo {
   kind: "local_branch" | "remote_branch" | "tag" | "other";
   target_oid: string | null;
   is_head: boolean;
+  is_pushed: boolean;
 }
 
 export interface FileDiff {
