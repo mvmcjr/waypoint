@@ -129,6 +129,10 @@ function buildMenu(
             Current branch
           </ContextMenuItem>
           <ContextMenuSeparator />
+          <ContextMenuItem onClick={() => navigator.clipboard.writeText(ref.shorthand)}>
+            Copy branch name
+          </ContextMenuItem>
+          <ContextMenuSeparator />
           <ContextMenuItem onClick={() => onRefAction({ kind: "push", branchName: ref.shorthand })}>
             Push…
           </ContextMenuItem>
@@ -151,6 +155,10 @@ function buildMenu(
             </ContextMenuItem>
           </>
         )}
+        <ContextMenuSeparator />
+        <ContextMenuItem onClick={() => navigator.clipboard.writeText(ref.shorthand)}>
+          Copy branch name
+        </ContextMenuItem>
         <ContextMenuSeparator />
         <ContextMenuItem onClick={() => onRefAction({ kind: "push", branchName: ref.shorthand })}>
           Push…
@@ -178,6 +186,10 @@ function buildMenu(
         </ContextMenuItem>
         <ContextMenuItem onClick={() => onRefAction({ kind: "rebase", oid: ref.target_oid! })}>
           Rebase current onto {ref.shorthand}
+        </ContextMenuItem>
+        <ContextMenuSeparator />
+        <ContextMenuItem onClick={() => navigator.clipboard.writeText(ref.shorthand)}>
+          Copy branch name
         </ContextMenuItem>
       </>
     );
