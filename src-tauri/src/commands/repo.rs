@@ -91,6 +91,10 @@ pub fn list_refs(repo_id: String, state: State<RepoState>) -> Result<Vec<RefInfo
                 is_pushed = true;
             } else {
                 for remote_oid in &remote_oids {
+                    if *remote_oid == commit_oid {
+                        is_pushed = true;
+                        break;
+                    }
                     if let Ok(is_descendant) = repo.graph_descendant_of(*remote_oid, commit_oid) {
                         if is_descendant {
                             is_pushed = true;
