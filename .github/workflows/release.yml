@@ -130,4 +130,4 @@ jobs:
           releaseDraft: true
           # Tags containing a hyphen (e.g. v1.0.0-beta.1) are pre-releases.
           prerelease: ${{ contains(github.ref_name, '-') }}
-          args: ${{ matrix.args }}
+          args: ${{ matrix.args }}${{ matrix.platform == 'macos-latest' && !secrets.APPLE_CERTIFICATE && ' --no-sign' || '' }}
