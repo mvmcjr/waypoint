@@ -17,6 +17,7 @@ interface AppState {
   commits: PositionedCommit[];
   selectedOid: string | null;
   searchFilter: string;
+  settingsOpen: boolean;
 
   openTab: (id: string, path: string) => void;
   closeTab: (id: string) => void;
@@ -24,6 +25,7 @@ interface AppState {
   setCommits: (commits: PositionedCommit[]) => void;
   selectCommit: (oid: string | null) => void;
   setSearchFilter: (filter: string) => void;
+  setSettingsOpen: (open: boolean) => void;
 }
 
 const BLANK_VIEW = { commits: [], selectedOid: null, searchFilter: "" };
@@ -31,6 +33,7 @@ const BLANK_VIEW = { commits: [], selectedOid: null, searchFilter: "" };
 export const useStore = create<AppState>((set) => ({
   tabs: [],
   activeTabId: null,
+  settingsOpen: false,
   ...BLANK_VIEW,
 
   openTab: (id, path) =>
@@ -62,4 +65,5 @@ export const useStore = create<AppState>((set) => ({
   setCommits: (commits) => set({ commits }),
   selectCommit: (selectedOid) => set({ selectedOid }),
   setSearchFilter: (searchFilter) => set({ searchFilter }),
+  setSettingsOpen: (settingsOpen) => set({ settingsOpen }),
 }));

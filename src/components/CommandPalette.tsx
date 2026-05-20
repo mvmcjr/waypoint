@@ -1,6 +1,6 @@
 import { useState, useEffect, useRef, useCallback } from "react";
 import { Dialog as DialogPrimitive } from "@base-ui/react/dialog";
-import { FolderOpen, Search, ArrowLeft, ExternalLink, Download } from "lucide-react";
+import { FolderOpen, Search, ArrowLeft, ExternalLink, Download, Settings } from "lucide-react";
 import { open as openDialog } from "@tauri-apps/plugin-dialog";
 import { revealItemInDir } from "@tauri-apps/plugin-opener";
 import { cn, repoLabel, truncatePath } from "@/lib/utils";
@@ -141,6 +141,15 @@ export function CommandPalette({ open, onClose }: Props) {
       label: "Load Repos into Recent",
       icon: Download,
       execute: scanAndLoad,
+    },
+    {
+      id: "open-settings",
+      label: "Preferences: Open Settings",
+      icon: Settings,
+      execute: () => {
+        useStore.getState().setSettingsOpen(true);
+        onClose();
+      },
     },
   ];
 

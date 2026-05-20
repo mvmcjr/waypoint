@@ -2,11 +2,12 @@ import { useState, useEffect, useRef } from "react";
 import { open as openDialog } from "@tauri-apps/plugin-dialog";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
-import { Search } from "lucide-react";
+import { Search, Settings } from "lucide-react";
 import { ipc } from "@/lib/ipc";
 import { getRecentRepos } from "@/lib/recentRepos";
 import { useOpenRepo } from "@/lib/useOpenRepo";
 import { repoLabel, truncatePath } from "@/lib/utils";
+import { useStore } from "@/lib/store";
 
 const PINNED_COUNT = 5;
 
@@ -109,6 +110,16 @@ export function WelcomeScreen() {
           </ul>
         </div>
       )}
+
+      <div className="mt-auto pb-6 flex justify-center shrink-0">
+        <button
+          onClick={() => useStore.getState().setSettingsOpen(true)}
+          className="flex items-center gap-1.5 text-xs text-muted-foreground/35 hover:text-muted-foreground/75 cursor-pointer transition-all duration-150 select-none px-2.5 py-1 rounded-md hover:bg-muted/40 border border-transparent hover:border-border/10"
+        >
+          <Settings className="size-3.5 animate-[spin_8s_linear_infinite] hover:animate-[spin_2s_linear_infinite]" />
+          <span>Preferences & Settings</span>
+        </button>
+      </div>
     </div>
   );
 }

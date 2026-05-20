@@ -13,6 +13,67 @@ fn get_startup_path(state: tauri::State<StartupPath>) -> Option<String> {
     state.0.lock().unwrap().take()
 }
 
+#[cfg(target_os = "windows")]
+fn register_context_menu_impl() -> std::io::Result<()> {
+    use winreg::enums::*;
+    use winreg::RegKey;
+
+    if let Ok(exe_path) = std::env::current_exe() {
+        if let Some(exe_str) = exe_path.to_str() {
+            let hkcu = RegKey::predef(HKEY_CURRENT_USER);
+            
+            // 1. Right-click on a folder
+            let (key, _) = hkcu.create_subkey(r"Software\Classes\Directory\shell\Waypoint")?;
+            key.set_value("", &"Open in Waypoint")?;
+            key.set_value("Icon", &format!("{},0", exe_str))?;
+            
+            let (cmd_key, _) = hkcu.create_subkey(r"Software\Classes\Directory\shell\Waypoint\command")?;
+            cmd_key.set_value("", &format!("\"{}\" \"%1\"", exe_str))?;
+
+            // 2. Right-click on the folder background
+            let (bg_key, _) = hkcu.create_subkey(r"Software\Classes\Directory\Background\shell\Waypoint")?;
+            bg_key.set_value("", &"Open in Waypoint")?;
+            bg_key.set_value("Icon", &format!("{},0", exe_str))?;
+            
+            let (bg_cmd_key, _) = hkcu.create_subkey(r"Software\Classes\Directory\Background\shell\Waypoint\command")?;
+            bg_cmd_key.set_value("", &format!("\"{}\" \"%V\"", exe_str))?;
+        }
+    }
+    Ok(())
+}
+
+#[cfg(target_os = "windows")]
+fn unregister_context_menu_impl() -> std::io::Result<()> {
+    use winreg::enums::*;
+    use winreg::RegKey;
+
+    let hkcu = RegKey::predef(HKEY_CURRENT_USER);
+    let _ = hkcu.delete_subkey(r"Software\Classes\Directory\shell\Waypoint\command");
+    let _ = hkcu.delete_subkey(r"Software\Classes\Directory\shell\Waypoint");
+    let _ = hkcu.delete_subkey(r"Software\Classes\Directory\Background\shell\Waypoint\command");
+    let _ = hkcu.delete_subkey(r"Software\Classes\Directory\Background\shell\Waypoint");
+    Ok(())
+}
+
+#[tauri::command]
+fn is_windows() -> bool {
+    cfg!(target_os = "windows")
+}
+
+#[tauri::command]
+fn register_explorer_context_menu(register: bool) -> Result<(), String> {
+    #[cfg(target_os = "windows")]
+    {
+        if register {
+            register_context_menu_impl().map_err(|e| e.to_string())?;
+        } else {
+            unregister_context_menu_impl().map_err(|e| e.to_string())?;
+        }
+    }
+    Ok(())
+}
+
+
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     let startup_path = std::env::args()
@@ -28,6 +89,8 @@ pub fn run() {
         .plugin(tauri_plugin_store::Builder::default().build())
         .invoke_handler(tauri::generate_handler![
             get_startup_path,
+            is_windows,
+            register_explorer_context_menu,
             commands::repo::open_repo,
             commands::repo::list_refs,
             commands::history::walk_commits,

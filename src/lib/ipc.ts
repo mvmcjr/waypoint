@@ -108,6 +108,12 @@ export const ipc = {
   getStartupPath: () =>
     invoke<string | null>("get_startup_path"),
 
+  isWindows: () =>
+    invoke<boolean>("is_windows"),
+
+  registerExplorerContextMenu: (register: boolean) =>
+    invoke<void>("register_explorer_context_menu", { register }),
+
   openRepo: (path: string) =>
     invoke<string>("open_repo", { path }),
 
