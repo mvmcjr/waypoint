@@ -19,11 +19,15 @@ pub struct PullResult {
 
 /// Shell out to the system `git` binary so that GCM / credential helpers work
 /// exactly as they do in the terminal — no re-auth prompts.
-fn run_git(workdir: &std::path::Path, args: &[&str]) -> Result<()> {
-    let output = std::process::Command::new("git")
+///
+/// Uses `tokio::process::Command` so the wait is non-blocking: the Tauri async
+/// runtime can keep the UI responsive while git is running over the network.
+async fn run_git(workdir: &std::path::Path, args: &[&str]) -> Result<()> {
+    let output = tokio::process::Command::new("git")
         .current_dir(workdir)
         .args(args)
         .output()
+        .await
         .map_err(|e| Error::InvalidArg(format!("failed to run git: {}", e)))?;
 
     if output.status.success() {
@@ -39,14 +43,14 @@ fn run_git(workdir: &std::path::Path, args: &[&str]) -> Result<()> {
     Err(Error::InvalidArg(msg.trim().to_string()))
 }
 
-fn get_workdir(state: &State<RepoState>, repo_id: &str) -> Result<std::path::PathBuf> {
+fn get_workdir(state: &State<'_, RepoState>, repo_id: &str) -> Result<std::path::PathBuf> {
     let repos = state.0.lock().unwrap();
     let repo = repos.get(repo_id).ok_or_else(|| Error::RepoNotFound(repo_id.to_string()))?;
     crate::repo::workdir(repo)
 }
 
 #[tauri::command]
-pub fn list_remotes(repo_id: String, state: State<RepoState>) -> Result<Vec<RemoteInfo>> {
+pub fn list_remotes(repo_id: String, state: State<'_, RepoState>) -> Result<Vec<RemoteInfo>> {
     let repos = state.0.lock().unwrap();
     let repo = repos.get(&repo_id).ok_or_else(|| Error::RepoNotFound(repo_id.clone()))?;
 
@@ -65,61 +69,64 @@ pub fn list_remotes(repo_id: String, state: State<RepoState>) -> Result<Vec<Remo
 }
 
 #[tauri::command]
-pub fn fetch_remote(
+pub async fn fetch_remote(
     repo_id: String,
     remote_name: String,
-    state: State<RepoState>,
+    state: State<'_, RepoState>,
 ) -> Result<()> {
-    run_git(&get_workdir(&state, &repo_id)?, &["fetch", &remote_name])
+    run_git(&get_workdir(&state, &repo_id)?, &["fetch", &remote_name]).await
 }
 
 #[tauri::command]
-pub fn push_branch(
+pub async fn push_branch(
     repo_id: String,
     remote_name: String,
     branch_name: String,
     force: bool,
-    state: State<RepoState>,
+    state: State<'_, RepoState>,
 ) -> Result<()> {
     let workdir = get_workdir(&state, &repo_id)?;
     let mut args: Vec<&str> = vec!["push"];
-    if force { args.push("--force"); }
+    if force {
+        args.push("--force");
+    }
     args.push(&remote_name);
     args.push(&branch_name);
-    run_git(&workdir, &args)
+    run_git(&workdir, &args).await
 }
 
 /// Push a local tag to a remote.
 #[tauri::command]
-pub fn push_tag(
+pub async fn push_tag(
     repo_id: String,
     remote_name: String,
     tag_name: String,
-    state: State<RepoState>,
+    state: State<'_, RepoState>,
 ) -> Result<()> {
     let refspec = format!("refs/tags/{}:refs/tags/{}", tag_name, tag_name);
-    run_git(&get_workdir(&state, &repo_id)?, &["push", &remote_name, &refspec])
+    run_git(&get_workdir(&state, &repo_id)?, &["push", &remote_name, &refspec]).await
 }
 
 /// Delete a tag from a remote (empty-source refspec).
 #[tauri::command]
-pub fn delete_remote_tag(
+pub async fn delete_remote_tag(
     repo_id: String,
     remote_name: String,
     tag_name: String,
-    state: State<RepoState>,
+    state: State<'_, RepoState>,
 ) -> Result<()> {
     let refspec = format!(":refs/tags/{}", tag_name);
-    run_git(&get_workdir(&state, &repo_id)?, &["push", &remote_name, &refspec])
+    run_git(&get_workdir(&state, &repo_id)?, &["push", &remote_name, &refspec]).await
 }
 
 #[tauri::command]
-pub fn pull_branch(
+pub async fn pull_branch(
     repo_id: String,
     remote_name: String,
-    state: State<RepoState>,
+    state: State<'_, RepoState>,
 ) -> Result<PullResult> {
-    // Get branch name and workdir, then release the lock before the blocking network call.
+    // Get branch name and workdir, then release the lock before the async network call.
+    // git2::Repository is not Sync, so we must not hold the MutexGuard across .await.
     let (branch_name, workdir) = {
         let repos = state.0.lock().unwrap();
         let repo = repos.get(&repo_id).ok_or_else(|| Error::RepoNotFound(repo_id.clone()))?;
@@ -134,10 +141,11 @@ pub fn pull_branch(
             .ok_or_else(|| Error::InvalidArg("Cannot determine current branch name.".into()))?
             .to_string();
         (branch_name, crate::repo::workdir(repo)?)
-    };
+    }; // MutexGuard dropped here — safe to .await below
 
-    run_git(&workdir, &["fetch", &remote_name, &branch_name])?;
+    run_git(&workdir, &["fetch", &remote_name, &branch_name]).await?;
 
+    // Re-acquire the lock for the merge logic (no more .await points after this).
     let repos = state.0.lock().unwrap();
     let repo = repos.get(&repo_id).ok_or_else(|| Error::RepoNotFound(repo_id.clone()))?;
 
@@ -170,10 +178,28 @@ pub fn pull_branch(
 
     if analysis.is_fast_forward() {
         let refname = format!("refs/heads/{}", branch_name);
+
+        // Guard: refuse to fast-forward over staged changes.  checkout_head
+        // with .force() would silently discard them, so we check first and
+        // return a clear error instead of losing work.
+        {
+            let head_tree = repo.head()?.peel_to_commit()?.tree()?;
+            let index = repo.index()?;
+            let staged = repo.diff_tree_to_index(Some(&head_tree), Some(&index), None)?;
+            if staged.deltas().count() > 0 {
+                return Err(Error::InvalidArg(
+                    "Cannot fast-forward: you have staged changes. \
+                     Commit or stash them first.".into(),
+                ));
+            }
+        }
+
         repo.find_reference(&refname)?
             .set_target(tracking_oid, "pull: Fast-forward")?;
         repo.set_head(&refname)?;
-        repo.checkout_head(Some(git2::build::CheckoutBuilder::default().force()))?;
+        // No .force() — libgit2 will protect unstaged working-tree changes
+        // that would be overwritten by the fast-forward.
+        repo.checkout_head(Some(&mut git2::build::CheckoutBuilder::new()))?;
         return Ok(PullResult { kind: "fast_forward".into(), conflicted: vec![] });
     }
 

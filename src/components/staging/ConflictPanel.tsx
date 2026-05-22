@@ -55,12 +55,23 @@ export function ConflictPanel({ repoId, onDone }: Props) {
   }, [qc, repoId]);
 
   // Stable callback so ConflictHunkPicker's onResolvedRef always sees the
-  // latest conflicts / selectedPath without re-registering the apply effect.
-  const handleFileResolved = useCallback(() => {
+  // latest conflict list without re-registering the apply effect.
+  //
+  // Navigation is anchored on `resolvedPath` (the file that was just written),
+  // not on `selectedPath` (a closure that can be stale when two files are
+  // resolved in rapid succession before the React Query re-fetch lands).
+  // Using the resolved file's index in the current list means we always advance
+  // forward correctly even if conflicted_paths hasn't been refreshed yet.
+  const handleFileResolved = useCallback((resolvedPath: string) => {
     invalidate();
-    const remaining = (merge?.conflicted_paths ?? []).filter((p) => p !== selectedPath);
-    setSelectedPath(remaining[0] ?? null);
-  }, [merge?.conflicted_paths, selectedPath, invalidate]);
+    setSelectedPath(() => {
+      const paths = merge?.conflicted_paths ?? [];
+      const idx = paths.indexOf(resolvedPath);
+      if (idx === -1 || paths.length <= 1) return null;
+      // Prefer the path after the resolved one; fall back to the one before.
+      return paths[idx + 1] ?? paths[idx - 1] ?? null;
+    });
+  }, [merge?.conflicted_paths, invalidate]);
 
   // ─────────────────────────────────────────────────────────────────────────
 

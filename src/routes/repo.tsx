@@ -84,13 +84,17 @@ export function RepoView() {
     if (!remoteName) return;
 
     setIsFetching(true);
+    const p = ipc.fetchRemote(repoId, remoteName);
+    toast.promise(p, {
+      loading: `Fetching from ${remoteName}…`,
+      success: `Fetched from ${remoteName}`,
+      error: (e) => `Fetch failed: ${e}`,
+    });
     try {
-      await toast.promise(ipc.fetchRemote(repoId, remoteName), {
-        loading: `Fetching from ${remoteName}…`,
-        success: `Fetched from ${remoteName}`,
-        error: (e) => `Fetch failed: ${e}`,
-      });
+      await p;
       refresh();
+    } catch {
+      // error already shown by toast
     } finally {
       setIsFetching(false);
     }

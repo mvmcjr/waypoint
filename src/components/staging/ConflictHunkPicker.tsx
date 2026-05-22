@@ -546,7 +546,7 @@ interface Props {
   repoId: string;
   path: string;
   viewMode: ViewMode;
-  onResolved: () => void;
+  onResolved: (resolvedPath: string) => void;
 }
 
 export function ConflictHunkPicker({ repoId, path, viewMode, onResolved }: Props) {
@@ -560,7 +560,7 @@ export function ConflictHunkPicker({ repoId, path, viewMode, onResolved }: Props
   // Stable ref so the auto-apply effect always calls the latest onResolved without
   // needing to re-register the effect (avoids stale-closure navigation bugs).
   const onResolvedRef = useRef(onResolved);
-  useEffect(() => { onResolvedRef.current = onResolved; });
+  useEffect(() => { onResolvedRef.current = onResolved; }); // always latest
 
   // Load file on selection change
   useEffect(() => {
@@ -594,7 +594,7 @@ export function ConflictHunkPicker({ repoId, path, viewMode, onResolved }: Props
     setApplying(true);
     ipc
       .resolveWithContent(repoId, path, buildResolved(segments, resolutions))
-      .then(() => onResolvedRef.current())
+      .then(() => onResolvedRef.current(path))
       .catch((e) => {
         if (active) {
           setError(String(e));
