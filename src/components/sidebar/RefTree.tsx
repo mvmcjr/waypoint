@@ -125,6 +125,11 @@ function buildMenu(
             Copy branch name
           </ContextMenuItem>
           <ContextMenuSeparator />
+          {ref.target_oid && (
+            <ContextMenuItem onClick={() => onRefAction({ kind: "create-tag", oid: ref.target_oid! })}>
+              Create tag here…
+            </ContextMenuItem>
+          )}
           <ContextMenuItem onClick={() => onRefAction({ kind: "push", branchName: ref.shorthand })}>
             Push…
           </ContextMenuItem>
@@ -152,6 +157,11 @@ function buildMenu(
           Copy branch name
         </ContextMenuItem>
         <ContextMenuSeparator />
+        {ref.target_oid && (
+          <ContextMenuItem onClick={() => onRefAction({ kind: "create-tag", oid: ref.target_oid! })}>
+            Create tag here…
+          </ContextMenuItem>
+        )}
         <ContextMenuItem onClick={() => onRefAction({ kind: "push", branchName: ref.shorthand })}>
           Push…
         </ContextMenuItem>

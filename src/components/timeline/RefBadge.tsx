@@ -17,7 +17,8 @@ export type RefAction =
   | { kind: "push"; branchName: string }
   | { kind: "delete-branch"; branchName: string }
   | { kind: "push-tag"; tagName: string }
-  | { kind: "delete-tag"; tagName: string };
+  | { kind: "delete-tag"; tagName: string }
+  | { kind: "create-tag"; oid: string };
 
 export interface RefGroup {
   name: string;
@@ -101,6 +102,11 @@ function BadgeMenu({
         {act && (
           <>
             <ContextMenuSeparator />
+            {oid && (
+              <ContextMenuItem onClick={() => act({ kind: "create-tag", oid })}>
+                Create tag here…
+              </ContextMenuItem>
+            )}
             <ContextMenuItem onClick={() => act({ kind: "push", branchName: name })}>
               Push…
             </ContextMenuItem>
@@ -164,6 +170,11 @@ function BadgeMenu({
         <ContextMenuItem onClick={() => navigator.clipboard.writeText(name)}>
           Copy name
         </ContextMenuItem>
+        {act && oid && (
+          <ContextMenuItem onClick={() => act({ kind: "create-tag", oid })}>
+            Create tag here…
+          </ContextMenuItem>
+        )}
         {act && (
           <>
             <ContextMenuSeparator />
@@ -205,6 +216,11 @@ function BadgeMenu({
         <ContextMenuItem onClick={() => navigator.clipboard.writeText(name)}>
           Copy name
         </ContextMenuItem>
+        {act && oid && (
+          <ContextMenuItem onClick={() => act({ kind: "create-tag", oid })}>
+            Create tag here…
+          </ContextMenuItem>
+        )}
       </>
     );
   }
