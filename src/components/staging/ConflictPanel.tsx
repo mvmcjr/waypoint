@@ -1,4 +1,4 @@
-import { useEffect, useState } from "react";
+import { useCallback, useEffect, useState } from "react";
 import { useQueryClient } from "@tanstack/react-query";
 import {
   GitMerge,
@@ -46,6 +46,24 @@ export function ConflictPanel({ repoId, onDone }: Props) {
     });
   }, [merge?.conflicted_paths]);
 
+  // Hooks must live above any early return ─────────────────────────────────
+
+  const invalidate = useCallback(() => {
+    qc.invalidateQueries({ queryKey: ["staging",      repoId] });
+    qc.invalidateQueries({ queryKey: ["status",       repoId] });
+    qc.invalidateQueries({ queryKey: ["merge-status", repoId] });
+  }, [qc, repoId]);
+
+  // Stable callback so ConflictHunkPicker's onResolvedRef always sees the
+  // latest conflicts / selectedPath without re-registering the apply effect.
+  const handleFileResolved = useCallback(() => {
+    invalidate();
+    const remaining = (merge?.conflicted_paths ?? []).filter((p) => p !== selectedPath);
+    setSelectedPath(remaining[0] ?? null);
+  }, [merge?.conflicted_paths, selectedPath, invalidate]);
+
+  // ─────────────────────────────────────────────────────────────────────────
+
   if (!merge?.in_progress) return null;
 
   const isCherryPick  = merge.kind === "cherry_pick";
@@ -53,12 +71,6 @@ export function ConflictPanel({ repoId, onDone }: Props) {
   const hasConflicts  = conflicts.length > 0;
   const disabled      = working || committing;
   const canFinish     = !hasConflicts && message.trim().length > 0 && !committing;
-
-  function invalidate() {
-    qc.invalidateQueries({ queryKey: ["staging",      repoId] });
-    qc.invalidateQueries({ queryKey: ["status",       repoId] });
-    qc.invalidateQueries({ queryKey: ["merge-status", repoId] });
-  }
 
   // ── Whole-file resolution ─────────────────────────────────────────────────
 
@@ -76,15 +88,6 @@ export function ConflictPanel({ repoId, onDone }: Props) {
     try { await ipc.resolveTheirs(repoId, path); invalidate(); }
     catch (err) { setError(String(err)); }
     finally { setWorking(false); }
-  }
-
-  // ── After hunk-level resolution of one file ───────────────────────────────
-
-  function handleFileResolved() {
-    invalidate();
-    // Auto-advance to the next unresolved file
-    const remaining = conflicts.filter((p) => p !== selectedPath);
-    setSelectedPath(remaining[0] ?? null);
   }
 
   // ── Abort ─────────────────────────────────────────────────────────────────
@@ -162,7 +165,7 @@ export function ConflictPanel({ repoId, onDone }: Props) {
 
         {/* Left: file list sidebar */}
         <div className="w-52 shrink-0 border-r border-border flex flex-col overflow-hidden">
-          <div className="px-3 py-1.5 text-[10px] uppercase tracking-wider text-muted-foreground/50 font-semibold border-b border-border/40">
+          <div className="px-3 py-1.5 text-[10px] uppercase tracking-wider text-muted-foreground/65 font-semibold border-b border-border/40">
             {hasConflicts
               ? `${conflicts.length} unresolved`
               : "All resolved"}
@@ -189,9 +192,9 @@ export function ConflictPanel({ repoId, onDone }: Props) {
                     >
                       <AlertTriangle size={10} className="text-orange-400 shrink-0 mt-0.5" />
                       <span className="flex-1 min-w-0">
-                        <span className="block truncate text-xs text-foreground/85 leading-tight">{name}</span>
+                        <span className="block truncate text-xs text-foreground/90 leading-tight">{name}</span>
                         {dir && (
-                          <span className="block truncate text-[10px] text-muted-foreground/45 leading-tight">{dir}</span>
+                          <span className="block truncate text-[10px] text-muted-foreground/60 leading-tight">{dir}</span>
                         )}
                       </span>
                     </button>
@@ -244,13 +247,13 @@ export function ConflictPanel({ repoId, onDone }: Props) {
               </div>
               <div>
                 <p className="text-sm font-medium text-foreground/80">All conflicts resolved</p>
-                <p className="text-xs text-muted-foreground/60 mt-0.5">
+                <p className="text-xs text-muted-foreground/70 mt-0.5">
                   Review the commit message below and finish the {isCherryPick ? "cherry-pick" : "merge"}.
                 </p>
               </div>
             </div>
           ) : (
-            <div className="flex-1 flex items-center justify-center text-xs text-muted-foreground/40 italic">
+            <div className="flex-1 flex items-center justify-center text-xs text-muted-foreground/55 italic">
               Select a file to resolve its conflicts
             </div>
           )}

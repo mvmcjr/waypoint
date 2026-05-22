@@ -77,7 +77,7 @@ describe("ConflictHunkPicker", () => {
     expect(screen.getByText("Click ○ lines to include…")).toBeInTheDocument();
   });
 
-  it("handles whole hunk picker choices: Ours", async () => {
+  it("Ours: shows result preview before accepting, then applies on Accept", async () => {
     vi.mocked(ipc.getConflictContent).mockResolvedValue(mockConflictContent);
     vi.mocked(ipc.resolveWithContent).mockResolvedValue(undefined);
 
@@ -94,11 +94,20 @@ describe("ConflictHunkPicker", () => {
       expect(screen.getByText("Conflict 1 of 1")).toBeInTheDocument();
     });
 
-    // Click "Ours" button
-    const oursBtn = screen.getByRole("button", { name: "Ours" });
-    fireEvent.click(oursBtn);
+    // Click "Ours" — should show result preview but NOT apply yet
+    fireEvent.click(screen.getByRole("button", { name: "Ours" }));
 
-    // Expect resolveWithContent to be called automatically because all hunks are resolved
+    // Result section and Accept button should appear
+    await waitFor(() => {
+      expect(screen.getByRole("button", { name: "Accept" })).toBeInTheDocument();
+    });
+
+    // resolveWithContent must NOT have been called yet
+    expect(ipc.resolveWithContent).not.toHaveBeenCalled();
+
+    // Now confirm
+    fireEvent.click(screen.getByRole("button", { name: "Accept" }));
+
     await waitFor(() => {
       expect(ipc.resolveWithContent).toHaveBeenCalledWith(
         "repo1",
@@ -113,7 +122,7 @@ console.log("world");`
     expect(mockOnResolved).toHaveBeenCalled();
   });
 
-  it("handles whole hunk picker choices: Theirs", async () => {
+  it("Theirs: shows result preview before accepting, then applies on Accept", async () => {
     vi.mocked(ipc.getConflictContent).mockResolvedValue(mockConflictContent);
     vi.mocked(ipc.resolveWithContent).mockResolvedValue(undefined);
 
@@ -130,9 +139,15 @@ console.log("world");`
       expect(screen.getByText("Conflict 1 of 1")).toBeInTheDocument();
     });
 
-    // Click "Theirs" button
-    const theirsBtn = screen.getByRole("button", { name: "Theirs" });
-    fireEvent.click(theirsBtn);
+    fireEvent.click(screen.getByRole("button", { name: "Theirs" }));
+
+    await waitFor(() => {
+      expect(screen.getByRole("button", { name: "Accept" })).toBeInTheDocument();
+    });
+
+    expect(ipc.resolveWithContent).not.toHaveBeenCalled();
+
+    fireEvent.click(screen.getByRole("button", { name: "Accept" }));
 
     await waitFor(() => {
       expect(ipc.resolveWithContent).toHaveBeenCalledWith(
@@ -148,7 +163,7 @@ console.log("world");`
     expect(mockOnResolved).toHaveBeenCalled();
   });
 
-  it("handles whole hunk picker choices: Both", async () => {
+  it("Both: shows result preview before accepting, then applies on Accept", async () => {
     vi.mocked(ipc.getConflictContent).mockResolvedValue(mockConflictContent);
     vi.mocked(ipc.resolveWithContent).mockResolvedValue(undefined);
 
@@ -165,9 +180,15 @@ console.log("world");`
       expect(screen.getByText("Conflict 1 of 1")).toBeInTheDocument();
     });
 
-    // Click "Both" button
-    const bothBtn = screen.getByRole("button", { name: "Both" });
-    fireEvent.click(bothBtn);
+    fireEvent.click(screen.getByRole("button", { name: "Both" }));
+
+    await waitFor(() => {
+      expect(screen.getByRole("button", { name: "Accept" })).toBeInTheDocument();
+    });
+
+    expect(ipc.resolveWithContent).not.toHaveBeenCalled();
+
+    fireEvent.click(screen.getByRole("button", { name: "Accept" }));
 
     await waitFor(() => {
       expect(ipc.resolveWithContent).toHaveBeenCalledWith(
@@ -183,6 +204,50 @@ console.log("world");`
     });
 
     expect(mockOnResolved).toHaveBeenCalled();
+  });
+
+  it("can change selection from Ours to Theirs before accepting", async () => {
+    vi.mocked(ipc.getConflictContent).mockResolvedValue(mockConflictContent);
+    vi.mocked(ipc.resolveWithContent).mockResolvedValue(undefined);
+
+    render(
+      <ConflictHunkPicker
+        repoId="repo1"
+        path="src/index.js"
+        viewMode="stacked"
+        onResolved={mockOnResolved}
+      />
+    );
+
+    await waitFor(() => {
+      expect(screen.getByText("Conflict 1 of 1")).toBeInTheDocument();
+    });
+
+    // First pick Ours — Accept button appears
+    fireEvent.click(screen.getByRole("button", { name: "Ours" }));
+    await waitFor(() => {
+      expect(screen.getByRole("button", { name: "Accept" })).toBeInTheDocument();
+    });
+
+    // Change mind — switch to Theirs before accepting
+    fireEvent.click(screen.getByRole("button", { name: "Theirs" }));
+
+    // Still not applied yet
+    expect(ipc.resolveWithContent).not.toHaveBeenCalled();
+
+    // Now accept (should use Theirs, not Ours)
+    fireEvent.click(screen.getByRole("button", { name: "Accept" }));
+
+    await waitFor(() => {
+      expect(ipc.resolveWithContent).toHaveBeenCalledWith(
+        "repo1",
+        "src/index.js",
+        `console.log("hello");
+const mode = "theirs";
+console.log("doing theirs");
+console.log("world");`
+      );
+    });
   });
 
   it("handles custom line-level picking and displays Result live", async () => {
@@ -210,8 +275,8 @@ console.log("world");`
     const lineTheirs = screen.getByText("console.log(\"doing theirs\");");
     fireEvent.click(lineTheirs);
 
-    // Click "Accept Selection" button to finalize
-    const acceptBtn = screen.getByRole("button", { name: "Accept Selection" });
+    // Click "Accept" button to finalize
+    const acceptBtn = screen.getByRole("button", { name: "Accept" });
     fireEvent.click(acceptBtn);
 
     // It should trigger a merge resolving with only the selected custom lines!
