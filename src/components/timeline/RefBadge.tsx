@@ -29,8 +29,9 @@ export function groupRefs(
 
   // Remote-only branches (no corresponding local branch)
   for (const remote of remoteBranches) {
-    if (covered.has(remote) || remote.endsWith("/HEAD")) continue;
-    covered.add(remote);
+    if (covered.has(remote)) continue;
+    covered.add(remote); // mark as handled before the /HEAD skip so it doesn't leak below
+    if (remote.endsWith("/HEAD")) continue;
     const slash = remote.indexOf("/");
     const name = slash !== -1 ? remote.slice(slash + 1) : remote;
     groups.push({ name, hasLocal: false, hasRemote: true, isHead: false });
@@ -38,7 +39,7 @@ export function groupRefs(
 
   // Other refs (tags, etc.) not yet represented
   for (const ref of allRefs) {
-    if (covered.has(ref)) continue;
+    if (covered.has(ref) || ref.endsWith("/HEAD")) continue;
     groups.push({ name: ref, hasLocal: false, hasRemote: false, isHead: false });
   }
 
