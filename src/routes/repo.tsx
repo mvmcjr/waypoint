@@ -30,7 +30,8 @@ import {
 import type { CommitAction } from "@/components/timeline/CommitContextMenu";
 import type { RefAction } from "@/components/sidebar/RefTree";
 import { ipc, type FileDiff, type RefInfo, type RemoteInfo } from "@/lib/ipc";
-import { RefreshCw, ArrowDown, ArrowUp, Loader2 } from "lucide-react";
+import { RefreshCw, ArrowDown, ArrowUp } from "lucide-react";
+import { toast } from "sonner";
 import { Button } from "@/components/ui/button";
 
 function getDefaultRemote(remotes: RemoteInfo[]): string {
@@ -76,8 +77,6 @@ export function RepoView() {
   const [focusedFile, setFocusedFile] = useState<FileDiff | null>(null);
   const [focusedStagingFile, setFocusedStagingFile] = useState<{ path: string; section: "staged" | "unstaged" } | null>(null);
   const [isFetching, setIsFetching] = useState(false);
-  const [isPulling, setIsPulling] = useState(false);
-  const [isPushing, setIsPushing] = useState(false);
 
   async function handleFetch() {
     if (!remotes || remotes.length === 0 || !repoId) return;
@@ -86,22 +85,37 @@ export function RepoView() {
 
     setIsFetching(true);
     try {
-      await ipc.fetchRemote(repoId, remoteName);
+      await toast.promise(ipc.fetchRemote(repoId, remoteName), {
+        loading: `Fetching from ${remoteName}…`,
+        success: `Fetched from ${remoteName}`,
+        error: (e) => `Fetch failed: ${e}`,
+      });
       refresh();
-    } catch (e) {
-      console.error("Fetch failed", e);
     } finally {
       setIsFetching(false);
     }
   }
+
+  const [isPulling, setIsPulling] = useState(false);
 
   async function handlePull() {
     if (!remotes || remotes.length === 0 || !repoId || !head?.branch) return;
     const remoteName = getDefaultRemote(remotes);
     if (!remoteName) return;
     setIsPulling(true);
+    const p = ipc.pullBranch(repoId, remoteName);
+    toast.promise(p, {
+      loading: `Pulling from ${remoteName}…`,
+      success: (result) =>
+        result.kind === "up_to_date"
+          ? "Already up to date"
+          : result.kind === "fast_forward"
+          ? "Pulled (fast-forward)"
+          : "Pulled and merged",
+      error: (e) => `Pull failed: ${e}`,
+    });
     try {
-      const result = await ipc.pullBranch(repoId, remoteName);
+      const result = await p;
       if (result.kind === "conflicts") {
         setDialog({ kind: "pull-conflicts" });
       }
@@ -113,13 +127,21 @@ export function RepoView() {
     }
   }
 
+  const [isPushing, setIsPushing] = useState(false);
+
   async function handlePushBranch(branchName: string) {
     if (!remotes || remotes.length === 0 || !repoId) return;
     const remoteName = getDefaultRemote(remotes);
     if (!remoteName) return;
     setIsPushing(true);
+    const p = ipc.pushBranch(repoId, remoteName, branchName, false);
+    toast.promise(p, {
+      loading: `Pushing ${branchName}…`,
+      success: `Pushed ${branchName} to ${remoteName}`,
+      error: () => null, // handled below with dialog
+    });
     try {
-      await ipc.pushBranch(repoId, remoteName, branchName, false);
+      await p;
       refresh();
     } catch (e) {
       const msg = String(e);
@@ -312,7 +334,7 @@ export function RepoView() {
                   disabled={isPulling || !head?.branch}
                   onClick={handlePull}
                 >
-                  {isPulling ? <Loader2 size={11} className="animate-spin" /> : <ArrowDown size={11} />}
+                  {isPulling ? <RefreshCw size={11} className="animate-spin" /> : <ArrowDown size={11} />}
                   Pull
                 </Button>
                 <Button
@@ -322,7 +344,7 @@ export function RepoView() {
                   disabled={isPushing || !head?.branch}
                   onClick={() => head?.branch && handlePushBranch(head.branch)}
                 >
-                  {isPushing ? <Loader2 size={11} className="animate-spin" /> : <ArrowUp size={11} />}
+                  {isPushing ? <RefreshCw size={11} className="animate-spin" /> : <ArrowUp size={11} />}
                   Push
                 </Button>
                 <div className="w-px h-3.5 bg-border mx-0.5" />
