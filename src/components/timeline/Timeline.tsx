@@ -1,7 +1,7 @@
-import { useRef, useState, useEffect, useCallback, forwardRef, useImperativeHandle } from "react";
+import { useRef, useState, useEffect, useCallback, useMemo, forwardRef, useImperativeHandle } from "react";
 import { useVirtualizer } from "@tanstack/react-virtual";
 import type { PositionedCommit } from "@/lib/ipc";
-import { useRepoStatus, useStashes } from "@/lib/queries";
+import { useRepoStatus, useRefs, useStashes } from "@/lib/queries";
 import { clamp, isStashCommit } from "@/lib/utils";
 import { GraphLayer, LANE_WIDTH, ROW_HEIGHT, REFS_COL_WIDTH } from "./GraphLayer";
 import { CommitRow } from "./CommitRow";
@@ -50,6 +50,11 @@ export const Timeline = forwardRef<TimelineHandle, Props>(function Timeline(
   const parentRef = useRef<HTMLDivElement>(null);
   const { data: status } = useRepoStatus(repoId);
   const { data: stashes = [] } = useStashes(repoId);
+  const { data: refs = [] } = useRefs(repoId);
+  const pushedTagNames = useMemo(
+    () => new Set(refs.filter((r) => r.kind === "tag" && r.is_pushed).map((r) => r.shorthand)),
+    [refs],
+  );
   const stashOids = new Set(stashes.map((s) => s.oid));
 
   const [refsWidth, setRefsWidth] = useState(() =>
@@ -202,6 +207,7 @@ export const Timeline = forwardRef<TimelineHandle, Props>(function Timeline(
                     isSelected={item.commit.oid === selectedOid}
                     isHead={item.commit.oid === headOid}
                     headBranch={headBranch}
+                    pushedTagNames={pushedTagNames}
                     isStash={isStash}
                     onClick={() => onSelectOid(item.commit.oid)}
                   />

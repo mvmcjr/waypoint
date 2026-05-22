@@ -1,13 +1,14 @@
 import { describe, it, expect, vi, beforeEach } from "vitest";
 import { render, screen, fireEvent } from "@testing-library/react";
 import { Timeline } from "./Timeline";
-import { useRepoStatus, useStashes } from "@/lib/queries";
+import { useRepoStatus, useRefs, useStashes } from "@/lib/queries";
 import type { PositionedCommit } from "@/lib/ipc";
 
 // Mock the queries
 vi.mock("@/lib/queries", () => ({
   useRepoStatus: vi.fn(),
   useStashes: vi.fn(),
+  useRefs: vi.fn(),
 }));
 
 // Mock the subcomponents to isolate the Timeline tests
@@ -93,6 +94,7 @@ describe("Timeline", () => {
       data: { staged_count: 0, unstaged_count: 0, merge_in_progress: false },
     } as any);
     vi.mocked(useStashes).mockReturnValue({ data: [] } as any);
+    vi.mocked(useRefs).mockReturnValue({ data: [] } as any);
 
     // Mock localStorage
     const store: Record<string, string> = {};

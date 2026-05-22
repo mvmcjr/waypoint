@@ -1,10 +1,11 @@
-import { Monitor, Globe } from "lucide-react";
+import { Monitor, Globe, Tag } from "lucide-react";
 
 export interface RefGroup {
   name: string;
   hasLocal: boolean;
   hasRemote: boolean;
   isHead: boolean;
+  isTag: boolean;
 }
 
 export function groupRefs(
@@ -12,6 +13,7 @@ export function groupRefs(
   localBranches: string[],
   remoteBranches: string[],
   headBranch: string | null,
+  pushedTagNames?: Set<string>,
 ): RefGroup[] {
   const groups: RefGroup[] = [];
   const covered = new Set<string>(["HEAD"]);
@@ -24,7 +26,7 @@ export function groupRefs(
       return slash !== -1 && r.slice(slash + 1) === local;
     });
     matched.forEach((r) => covered.add(r));
-    groups.push({ name: local, hasLocal: true, hasRemote: matched.length > 0, isHead: local === headBranch });
+    groups.push({ name: local, hasLocal: true, hasRemote: matched.length > 0, isHead: local === headBranch, isTag: false });
   }
 
   // Remote-only branches (no corresponding local branch)
@@ -34,13 +36,16 @@ export function groupRefs(
     if (remote.endsWith("/HEAD")) continue;
     const slash = remote.indexOf("/");
     const name = slash !== -1 ? remote.slice(slash + 1) : remote;
-    groups.push({ name, hasLocal: false, hasRemote: true, isHead: false });
+    groups.push({ name, hasLocal: false, hasRemote: true, isHead: false, isTag: false });
   }
 
-  // Other refs (tags, etc.) not yet represented
+  // Other refs (tags, etc.) not yet represented — tags always live in
+  // refs/tags/ i.e. the local repo, so hasLocal = true. hasRemote = true
+  // when the caller confirms the tag has been pushed to a remote.
   for (const ref of allRefs) {
     if (covered.has(ref) || ref.endsWith("/HEAD")) continue;
-    groups.push({ name: ref, hasLocal: false, hasRemote: false, isHead: false });
+    const isPushed = pushedTagNames?.has(ref) ?? false;
+    groups.push({ name: ref, hasLocal: true, hasRemote: isPushed, isHead: false, isTag: true });
   }
 
   groups.sort((a, b) => (b.isHead ? 1 : 0) - (a.isHead ? 1 : 0));
@@ -49,7 +54,7 @@ export function groupRefs(
 
 interface Props extends RefGroup {}
 
-export function RefBadge({ name, hasLocal, hasRemote, isHead }: Props) {
+export function RefBadge({ name, hasLocal, hasRemote, isHead, isTag }: Props) {
   const base = "inline-flex items-center gap-0.5 px-1.5 py-px rounded text-[10px] font-mono min-w-0 max-w-[124px]";
 
   if (isHead) {
@@ -62,6 +67,19 @@ export function RefBadge({ name, hasLocal, hasRemote, isHead }: Props) {
     );
   }
 
+  // ── Tag badge ────────────────────────────────────────────────────────────
+  if (isTag) {
+    return (
+      <span className={`${base} bg-amber-500/12 text-amber-300/85 border border-amber-500/20`}>
+        <Tag size={8} className="shrink-0 opacity-60 mr-0.5" />
+        <span className="truncate">{name}</span>
+        {hasLocal  && <Monitor size={8} className="shrink-0 opacity-40 ml-0.5" />}
+        {hasRemote && <Globe   size={8} className="shrink-0 opacity-40" />}
+      </span>
+    );
+  }
+
+  // ── Branch badge ─────────────────────────────────────────────────────────
   const colorClass =
     hasLocal && hasRemote
       ? "bg-indigo-500/15 text-indigo-300/90 border border-indigo-500/25"
@@ -72,8 +90,8 @@ export function RefBadge({ name, hasLocal, hasRemote, isHead }: Props) {
   return (
     <span className={`${base} ${colorClass}`}>
       <span className="truncate">{name}</span>
-      {hasLocal && <Monitor size={8} className="shrink-0 opacity-40 ml-0.5" />}
-      {hasRemote && <Globe size={8} className="shrink-0 opacity-40" />}
+      {hasLocal  && <Monitor size={8} className="shrink-0 opacity-40 ml-0.5" />}
+      {hasRemote && <Globe   size={8} className="shrink-0 opacity-40" />}
     </span>
   );
 }
