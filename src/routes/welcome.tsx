@@ -1,5 +1,6 @@
 import { useState, useEffect, useRef } from "react";
 import { open as openDialog } from "@tauri-apps/plugin-dialog";
+import { getVersion } from "@tauri-apps/api/app";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Search, Settings } from "lucide-react";
@@ -16,10 +17,15 @@ export function WelcomeScreen() {
   const [recent, setRecent] = useState<string[]>([]);
   const [filter, setFilter] = useState("");
   const [error, setError] = useState<string | null>(null);
+  const [version, setVersion] = useState<string | null>(null);
   const filterRef = useRef<HTMLInputElement>(null);
 
   useEffect(() => {
     getRecentRepos().then(setRecent);
+  }, []);
+
+  useEffect(() => {
+    getVersion().then(setVersion);
   }, []);
 
   // getStartupPath is consumed once; cancellation guard prevents stale setState after unmount
@@ -56,6 +62,11 @@ export function WelcomeScreen() {
         <div className="text-center">
           <h1 className="text-4xl font-bold tracking-tight text-foreground">Waypoint</h1>
           <p className="text-muted-foreground mt-2">A local Git GUI, no account required.</p>
+          {version && (
+            <p className="text-xs text-muted-foreground/40 mt-1.5 font-mono tracking-wide">
+              v{version}
+            </p>
+          )}
         </div>
         <Button size="lg" onClick={pickFolder}>
           Open Repository
