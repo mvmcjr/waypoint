@@ -374,6 +374,8 @@ export function RepoView() {
               section={focusedStagingFile.section}
               onClose={() => setFocusedStagingFile(null)}
             />
+          ) : wipSelected && repoId && mergeInProgress ? (
+            <ConflictPanel repoId={repoId} onDone={handleCommitSuccess} />
           ) : (
             <Timeline
               ref={timelineRef}
@@ -390,17 +392,14 @@ export function RepoView() {
             />
           )}
 
-          {/* Right panel: conflict resolver, staging view, or commit detail */}
-          {wipSelected && repoId && (
+          {/* Right panel: staging view or commit detail */}
+          {wipSelected && repoId && !mergeInProgress && (
             <div className="w-80 shrink-0">
-              {mergeInProgress
-                ? <ConflictPanel repoId={repoId} onDone={handleCommitSuccess} />
-                : <StagingPanel
-                    repoId={repoId}
-                    onCommitSuccess={handleCommitSuccess}
-                    onFileClick={(path, section) => setFocusedStagingFile({ path, section })}
-                  />
-              }
+              <StagingPanel
+                repoId={repoId}
+                onCommitSuccess={handleCommitSuccess}
+                onFileClick={(path, section) => setFocusedStagingFile({ path, section })}
+              />
             </div>
           )}
           {!wipSelected && selectedItem && repoId && (
