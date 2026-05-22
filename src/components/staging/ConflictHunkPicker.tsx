@@ -1,12 +1,16 @@
 import { useState, useEffect } from "react";
-import { Loader2, Check } from "lucide-react";
+import { Loader2 } from "lucide-react";
 import { ipc } from "@/lib/ipc";
+
+// ── Types ─────────────────────────────────────────────────────────────────────
 
 type Choice = "ours" | "theirs" | "both";
 
 type Segment =
   | { kind: "context"; lines: string[] }
   | { kind: "conflict"; idx: number; oursLabel: string; ours: string[]; theirs: string[]; theirsLabel: string };
+
+// ── Parser / builder (unchanged logic) ────────────────────────────────────────
 
 function parseConflictFile(content: string): Segment[] {
   const lines = content.split("\n");
@@ -37,8 +41,7 @@ function parseConflictFile(content: string): Segment[] {
         } else if (l.startsWith("=======")) {
           state = "theirs";
         } else if (l.startsWith("|||||||")) {
-          // diff3 base section — skip
-          state = "base";
+          state = "base"; // diff3 base — skip
         } else if (state === "ours") {
           ours.push(l);
         } else if (state === "theirs") {
@@ -70,45 +73,246 @@ function buildResolved(segments: Segment[], choices: Map<number, Choice>): strin
       else parts.push([...seg.ours, ...seg.theirs].join("\n"));
     }
   }
-  // Filter empty parts so that accepting an empty section doesn't leave a blank line.
   return parts.filter((p) => p !== "").join("\n");
 }
 
-const MAX_LINES = 8;
+// ── Code display helpers ───────────────────────────────────────────────────────
 
-function CodeLines({ lines, tint }: { lines: string[]; tint: "blue" | "purple" }) {
-  const colorClass = tint === "blue" ? "text-blue-100/75" : "text-purple-100/75";
-  const shown: (string | null)[] =
-    lines.length > MAX_LINES ? [...lines.slice(0, 6), null, ...lines.slice(-2)] : lines;
+function CodeBlock({
+  lines,
+  tint,
+  placeholder = "(empty — this side deletes these lines)",
+}: {
+  lines: string[];
+  tint: "blue" | "purple";
+  placeholder?: string;
+}) {
+  const textColor = tint === "blue" ? "text-blue-100/80" : "text-purple-100/80";
+  const bgStripe  = tint === "blue" ? "bg-blue-500/[0.07]" : "bg-purple-500/[0.07]";
+
+  if (lines.length === 0) {
+    return (
+      <div className={`px-3 py-2 font-mono text-[11px] italic text-muted-foreground/40 ${bgStripe}`}>
+        {placeholder}
+      </div>
+    );
+  }
+
   return (
-    <div className={`font-mono text-[10px] overflow-x-auto leading-[1.65] ${colorClass}`}>
-      {shown.map((line, i) =>
-        line === null ? (
-          <div key={i} className="px-2 italic text-muted-foreground/40">
-            …{lines.length - MAX_LINES} more lines
+    <div className={`font-mono text-[11px] leading-[1.7] overflow-x-auto ${textColor} ${bgStripe}`}>
+      {lines.map((line, i) => (
+        <div key={i} className="flex items-start min-w-0">
+          <span className="w-8 shrink-0 text-right pr-2 text-muted-foreground/30 select-none border-r border-white/5">
+            {i + 1}
+          </span>
+          <span className="pl-2 whitespace-pre min-w-0">{line || "\u200b"}</span>
+        </div>
+      ))}
+    </div>
+  );
+}
+
+// ── Hunk card — stacked layout ────────────────────────────────────────────────
+
+function StackedHunk({
+  seg,
+  num,
+  total,
+  choice,
+  onPick,
+}: {
+  seg: Extract<Segment, { kind: "conflict" }>;
+  num: number;
+  total: number;
+  choice: Choice | undefined;
+  onPick: (c: Choice) => void;
+}) {
+  return (
+    <div className="border border-border/50 rounded-lg overflow-hidden mb-4">
+      {/* Counter badge */}
+      <div className="flex items-center justify-between px-3 py-1.5 bg-white/[0.03] border-b border-border/40">
+        <span className="text-[10px] font-semibold uppercase tracking-widest text-muted-foreground/50">
+          Conflict {num} of {total}
+        </span>
+        {choice && (
+          <span className="text-[10px] text-green-400/80 font-medium">✓ resolved</span>
+        )}
+      </div>
+
+      {/* Ours */}
+      <div className={`border-l-[3px] border-blue-400/60 transition-colors ${choice === "ours" || choice === "both" ? "bg-blue-500/[0.12]" : ""}`}>
+        <div className="flex items-center justify-between px-3 py-1 border-b border-border/20">
+          <span className="text-[10px] font-mono text-blue-300/70 truncate min-w-0 mr-2">
+            ← {seg.oursLabel || "HEAD"}
+          </span>
+          <ChoiceButton active={choice === "ours"} tint="blue" label="Ours" onClick={() => onPick("ours")} />
+        </div>
+        <CodeBlock lines={seg.ours} tint="blue" />
+      </div>
+
+      {/* Separator */}
+      <div className="h-px bg-border/40" />
+
+      {/* Theirs */}
+      <div className={`border-l-[3px] border-purple-400/60 transition-colors ${choice === "theirs" || choice === "both" ? "bg-purple-500/[0.12]" : ""}`}>
+        <div className="flex items-center justify-between px-3 py-1 border-b border-border/20">
+          <span className="text-[10px] font-mono text-purple-300/70 truncate min-w-0 mr-2">
+            → {seg.theirsLabel || "theirs"}
+          </span>
+          <div className="flex gap-1.5 shrink-0">
+            <ChoiceButton active={choice === "both"} tint="teal" label="Both" onClick={() => onPick("both")} />
+            <ChoiceButton active={choice === "theirs"} tint="purple" label="Theirs" onClick={() => onPick("theirs")} />
           </div>
-        ) : (
-          <div key={i} className="px-2 whitespace-pre">
-            {line || "​"}
+        </div>
+        <CodeBlock lines={seg.theirs} tint="purple" />
+      </div>
+    </div>
+  );
+}
+
+// ── Hunk card — side-by-side layout ──────────────────────────────────────────
+
+function SideBySideHunk({
+  seg,
+  num,
+  total,
+  choice,
+  onPick,
+}: {
+  seg: Extract<Segment, { kind: "conflict" }>;
+  num: number;
+  total: number;
+  choice: Choice | undefined;
+  onPick: (c: Choice) => void;
+}) {
+  const maxLines = Math.max(seg.ours.length, seg.theirs.length);
+
+  return (
+    <div className="border border-border/50 rounded-lg overflow-hidden mb-4">
+      {/* Counter badge */}
+      <div className="flex items-center justify-between px-3 py-1.5 bg-white/[0.03] border-b border-border/40">
+        <span className="text-[10px] font-semibold uppercase tracking-widest text-muted-foreground/50">
+          Conflict {num} of {total}
+        </span>
+        {choice && (
+          <span className="text-[10px] text-green-400/80 font-medium">✓ resolved</span>
+        )}
+      </div>
+
+      {/* Side-by-side panes */}
+      <div className="flex divide-x divide-border/40">
+        {/* Ours */}
+        <div className={`flex-1 min-w-0 border-l-[3px] border-blue-400/60 transition-colors ${choice === "ours" || choice === "both" ? "bg-blue-500/[0.12]" : ""}`}>
+          <div className="flex items-center justify-between px-3 py-1 border-b border-border/20">
+            <span className="text-[10px] font-mono text-blue-300/70 truncate min-w-0 mr-2">
+              ← {seg.oursLabel || "HEAD"}
+            </span>
+            <ChoiceButton active={choice === "ours"} tint="blue" label="Ours" onClick={() => onPick("ours")} />
           </div>
-        ),
+          <div className="font-mono text-[11px] leading-[1.7] overflow-x-auto text-blue-100/80">
+            {maxLines === 0 ? (
+              <div className="px-3 py-2 italic text-muted-foreground/40 text-[11px]">(empty)</div>
+            ) : (
+              Array.from({ length: maxLines }, (_, i) => {
+                const line = seg.ours[i];
+                return (
+                  <div key={i} className="flex items-start">
+                    <span className="w-8 shrink-0 text-right pr-2 text-muted-foreground/30 select-none border-r border-white/5">
+                      {i + 1}
+                    </span>
+                    <span className="pl-2 whitespace-pre min-w-0">{line ?? ""}</span>
+                  </div>
+                );
+              })
+            )}
+          </div>
+        </div>
+
+        {/* Theirs */}
+        <div className={`flex-1 min-w-0 border-l-[3px] border-purple-400/60 transition-colors ${choice === "theirs" || choice === "both" ? "bg-purple-500/[0.12]" : ""}`}>
+          <div className="flex items-center justify-between px-3 py-1 border-b border-border/20">
+            <span className="text-[10px] font-mono text-purple-300/70 truncate min-w-0 mr-2">
+              → {seg.theirsLabel || "theirs"}
+            </span>
+            <div className="flex gap-1.5 shrink-0">
+              <ChoiceButton active={choice === "both"} tint="teal" label="Both" onClick={() => onPick("both")} />
+              <ChoiceButton active={choice === "theirs"} tint="purple" label="Theirs" onClick={() => onPick("theirs")} />
+            </div>
+          </div>
+          <div className="font-mono text-[11px] leading-[1.7] overflow-x-auto text-purple-100/80">
+            {maxLines === 0 ? (
+              <div className="px-3 py-2 italic text-muted-foreground/40 text-[11px]">(empty)</div>
+            ) : (
+              Array.from({ length: maxLines }, (_, i) => {
+                const line = seg.theirs[i];
+                return (
+                  <div key={i} className="flex items-start">
+                    <span className="w-8 shrink-0 text-right pr-2 text-muted-foreground/30 select-none border-r border-white/5">
+                      {i + 1}
+                    </span>
+                    <span className="pl-2 whitespace-pre min-w-0">{line ?? ""}</span>
+                  </div>
+                );
+              })
+            )}
+          </div>
+        </div>
+      </div>
+
+      {/* Both button row */}
+      {choice !== "both" && (
+        <div className="border-t border-border/30 px-3 py-1.5 flex justify-end">
+          <ChoiceButton active={false} tint="teal" label="Accept Both" onClick={() => onPick("both")} />
+        </div>
       )}
     </div>
   );
 }
 
+// ── Shared choice pill button ─────────────────────────────────────────────────
+
+function ChoiceButton({
+  active,
+  tint,
+  label,
+  onClick,
+}: {
+  active: boolean;
+  tint: "blue" | "purple" | "teal";
+  label: string;
+  onClick: () => void;
+}) {
+  const base = "shrink-0 text-[10px] px-2 py-0.5 rounded-full border transition-colors font-medium";
+  const styles = {
+    blue:   active ? "bg-blue-500/30 text-blue-200 border-blue-400/60"     : "text-blue-300/55 border-blue-400/25 hover:text-blue-200 hover:bg-blue-500/20",
+    purple: active ? "bg-purple-500/30 text-purple-200 border-purple-400/60" : "text-purple-300/55 border-purple-400/25 hover:text-purple-200 hover:bg-purple-500/20",
+    teal:   active ? "bg-teal-500/25 text-teal-200 border-teal-400/50"     : "text-muted-foreground/45 border-border/40 hover:text-teal-200 hover:bg-teal-500/15",
+  };
+  return (
+    <button className={`${base} ${styles[tint]}`} onClick={onClick}>
+      {active ? `✓ ${label}` : label}
+    </button>
+  );
+}
+
+// ── Public component ──────────────────────────────────────────────────────────
+
+export type ViewMode = "stacked" | "side-by-side";
+
 interface Props {
   repoId: string;
   path: string;
+  viewMode: ViewMode;
   onResolved: () => void;
 }
 
-export function ConflictHunkPicker({ repoId, path, onResolved }: Props) {
+export function ConflictHunkPicker({ repoId, path, viewMode, onResolved }: Props) {
   const [segments, setSegments] = useState<Segment[] | null>(null);
-  const [choices, setChoices] = useState<Map<number, Choice>>(new Map());
+  const [choices, setChoices]   = useState<Map<number, Choice>>(new Map());
   const [applying, setApplying] = useState(false);
-  const [error, setError] = useState<string | null>(null);
+  const [error, setError]       = useState<string | null>(null);
 
+  // Reload whenever the selected file changes
   useEffect(() => {
     let mounted = true;
     setSegments(null);
@@ -117,18 +321,38 @@ export function ConflictHunkPicker({ repoId, path, onResolved }: Props) {
     ipc
       .getConflictContent(repoId, path)
       .then((content) => { if (mounted) setSegments(parseConflictFile(content)); })
-      .catch((e) => { if (mounted) setError(String(e)); });
+      .catch((e)      => { if (mounted) setError(String(e)); });
     return () => { mounted = false; };
   }, [repoId, path]);
 
+  // Auto-apply as soon as all hunks in this file are resolved
+  useEffect(() => {
+    if (!segments) return;
+    const conflicts = segments.filter((s): s is Extract<Segment, { kind: "conflict" }> => s.kind === "conflict");
+    if (conflicts.length === 0) return;
+    const allDone = conflicts.every((s) => choices.has(s.idx));
+    if (!allDone || applying) return;
+
+    setApplying(true);
+    ipc
+      .resolveWithContent(repoId, path, buildResolved(segments, choices))
+      .then(() => { onResolved(); })
+      .catch((e) => { setError(String(e)); setApplying(false); });
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [choices]);
+
   if (error) {
-    return <div className="px-3 py-2 text-xs text-destructive">{error}</div>;
+    return (
+      <div className="flex-1 flex items-center justify-center p-6 text-xs text-destructive">
+        {error}
+      </div>
+    );
   }
 
   if (!segments) {
     return (
-      <div className="flex justify-center py-3">
-        <Loader2 size={13} className="animate-spin text-muted-foreground/40" />
+      <div className="flex-1 flex items-center justify-center">
+        <Loader2 size={16} className="animate-spin text-muted-foreground/40" />
       </div>
     );
   }
@@ -139,129 +363,65 @@ export function ConflictHunkPicker({ repoId, path, onResolved }: Props) {
 
   if (conflicts.length === 0) {
     return (
-      <div className="px-3 py-2 text-xs text-muted-foreground/60 italic">
-        No conflict markers found — use Ours or Theirs above to stage.
+      <div className="flex-1 flex items-center justify-center text-xs text-muted-foreground/50 italic">
+        No conflict markers found in this file.
       </div>
     );
   }
 
-  const resolvedCount = conflicts.filter((s) => choices.has(s.idx)).length;
-  const allResolved = resolvedCount === conflicts.length;
+  if (applying) {
+    return (
+      <div className="flex-1 flex items-center justify-center gap-2 text-xs text-muted-foreground">
+        <Loader2 size={14} className="animate-spin" />
+        Applying resolution…
+      </div>
+    );
+  }
 
   function pick(idx: number, choice: Choice) {
     setChoices((prev) => new Map(prev).set(idx, choice));
   }
 
-  async function applyResolution() {
-    if (!allResolved || !segments) return;
-    setApplying(true);
-    setError(null);
-    try {
-      await ipc.resolveWithContent(repoId, path, buildResolved(segments, choices));
-      onResolved();
-    } catch (e) {
-      setError(String(e));
-      setApplying(false);
-    }
-  }
+  const resolved = conflicts.filter((s) => choices.has(s.idx)).length;
 
   return (
-    <div className="pb-2">
-      {conflicts.map((seg, num) => {
-        const choice = choices.get(seg.idx);
-        const oursActive = choice === "ours" || choice === "both";
-        const theirsActive = choice === "theirs" || choice === "both";
+    <div className="flex-1 flex flex-col min-h-0 overflow-hidden">
+      {/* Progress bar */}
+      <div className="shrink-0 px-4 pt-3 pb-2">
+        <div className="flex items-center justify-between text-[10px] text-muted-foreground/50 mb-1.5">
+          <span>{conflicts.length - resolved} conflict{conflicts.length - resolved !== 1 ? "s" : ""} remaining</span>
+          <span>{resolved} / {conflicts.length} resolved</span>
+        </div>
+        <div className="h-1 rounded-full bg-white/5 overflow-hidden">
+          <div
+            className="h-full bg-teal-500/60 rounded-full transition-all duration-300"
+            style={{ width: `${(resolved / conflicts.length) * 100}%` }}
+          />
+        </div>
+      </div>
 
-        return (
-          <div key={seg.idx} className="mx-2 mb-1.5 rounded border border-border/40 overflow-hidden text-xs">
-            {/* Conflict counter */}
-            <div className="px-2 py-0.5 bg-white/[0.03] border-b border-border/30 text-[9px] text-muted-foreground/50 uppercase tracking-wide">
-              Conflict {num + 1} of {conflicts.length}
-            </div>
-
-            {/* Ours section */}
-            <div
-              className={`border-l-2 border-blue-400/50 transition-colors ${oursActive ? "bg-blue-500/[0.14]" : "bg-blue-500/[0.05]"}`}
-            >
-              <div className="flex items-center justify-between px-2 py-0.5 gap-2">
-                <span className="text-[9px] text-blue-300/70 font-medium truncate min-w-0">
-                  {seg.oursLabel || "HEAD"}
-                </span>
-                <button
-                  onClick={() => pick(seg.idx, "ours")}
-                  className={`shrink-0 text-[9px] px-1.5 py-0.5 rounded transition-colors ${
-                    choice === "ours"
-                      ? "bg-blue-500/30 text-blue-200 border border-blue-400/50"
-                      : "text-blue-300/55 hover:text-blue-200 hover:bg-blue-500/20"
-                  }`}
-                >
-                  {choice === "ours" ? "✓ Ours" : "Ours"}
-                </button>
-              </div>
-              {seg.ours.length > 0 ? (
-                <CodeLines lines={seg.ours} tint="blue" />
-              ) : (
-                <div className="px-2 pb-1 font-mono text-[10px] text-muted-foreground/35 italic">(empty)</div>
-              )}
-            </div>
-
-            {/* Theirs section */}
-            <div
-              className={`border-l-2 border-purple-400/50 border-t border-t-border/30 transition-colors ${theirsActive ? "bg-purple-500/[0.14]" : "bg-purple-500/[0.05]"}`}
-            >
-              <div className="flex items-center justify-between px-2 py-0.5 gap-2">
-                <span className="text-[9px] text-purple-300/70 font-medium truncate min-w-0">
-                  {seg.theirsLabel || "theirs"}
-                </span>
-                <div className="flex gap-1 shrink-0">
-                  <button
-                    onClick={() => pick(seg.idx, "both")}
-                    className={`text-[9px] px-1.5 py-0.5 rounded transition-colors ${
-                      choice === "both"
-                        ? "bg-teal-500/25 text-teal-200 border border-teal-400/40"
-                        : "text-muted-foreground/45 hover:text-teal-200 hover:bg-teal-500/15"
-                    }`}
-                  >
-                    {choice === "both" ? "✓ Both" : "Both"}
-                  </button>
-                  <button
-                    onClick={() => pick(seg.idx, "theirs")}
-                    className={`text-[9px] px-1.5 py-0.5 rounded transition-colors ${
-                      choice === "theirs"
-                        ? "bg-purple-500/30 text-purple-200 border border-purple-400/50"
-                        : "text-purple-300/55 hover:text-purple-200 hover:bg-purple-500/20"
-                    }`}
-                  >
-                    {choice === "theirs" ? "✓ Theirs" : "Theirs"}
-                  </button>
-                </div>
-              </div>
-              {seg.theirs.length > 0 ? (
-                <CodeLines lines={seg.theirs} tint="purple" />
-              ) : (
-                <div className="px-2 pb-1 font-mono text-[10px] text-muted-foreground/35 italic">(empty)</div>
-              )}
-            </div>
-          </div>
-        );
-      })}
-
-      {error && <p className="px-3 py-1 text-xs text-destructive break-words">{error}</p>}
-
-      <div className="px-2 pt-0.5">
-        {allResolved ? (
-          <button
-            onClick={applyResolution}
-            disabled={applying}
-            className="w-full flex items-center justify-center gap-1.5 py-1.5 rounded text-xs bg-teal-500/20 text-teal-300 border border-teal-400/30 hover:bg-teal-500/30 disabled:opacity-50 transition-colors"
-          >
-            {applying ? <Loader2 size={11} className="animate-spin" /> : <Check size={11} />}
-            Apply Resolution
-          </button>
-        ) : (
-          <p className="text-center text-[10px] text-muted-foreground/40 py-0.5">
-            {conflicts.length - resolvedCount} conflict{conflicts.length - resolvedCount !== 1 ? "s" : ""} remaining
-          </p>
+      {/* Hunk list */}
+      <div className="flex-1 overflow-y-auto min-h-0 px-4 pb-4">
+        {conflicts.map((seg, num) =>
+          viewMode === "side-by-side" ? (
+            <SideBySideHunk
+              key={seg.idx}
+              seg={seg}
+              num={num + 1}
+              total={conflicts.length}
+              choice={choices.get(seg.idx)}
+              onPick={(c) => pick(seg.idx, c)}
+            />
+          ) : (
+            <StackedHunk
+              key={seg.idx}
+              seg={seg}
+              num={num + 1}
+              total={conflicts.length}
+              choice={choices.get(seg.idx)}
+              onPick={(c) => pick(seg.idx, c)}
+            />
+          ),
         )}
       </div>
     </div>

@@ -1,10 +1,17 @@
 import { useEffect, useState } from "react";
 import { useQueryClient } from "@tanstack/react-query";
-import { GitMerge, Check, X, AlertTriangle, ChevronRight } from "lucide-react";
+import {
+  GitMerge,
+  Check,
+  X,
+  AlertTriangle,
+  Columns2,
+  AlignJustify,
+} from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { ipc } from "@/lib/ipc";
 import { useMergeStatus } from "@/lib/queries";
-import { ConflictHunkPicker } from "./ConflictHunkPicker";
+import { ConflictHunkPicker, type ViewMode } from "./ConflictHunkPicker";
 
 interface Props {
   repoId: string;
@@ -14,12 +21,15 @@ interface Props {
 export function ConflictPanel({ repoId, onDone }: Props) {
   const qc = useQueryClient();
   const { data: merge } = useMergeStatus(repoId);
-  const [message, setMessage] = useState("");
-  const [working, setWorking] = useState(false);
-  const [committing, setCommitting] = useState(false);
-  const [error, setError] = useState<string | null>(null);
-  const [expandedPath, setExpandedPath] = useState<string | null>(null);
 
+  const [message,    setMessage]    = useState("");
+  const [working,    setWorking]    = useState(false);
+  const [committing, setCommitting] = useState(false);
+  const [error,      setError]      = useState<string | null>(null);
+  const [selectedPath, setSelectedPath] = useState<string | null>(null);
+  const [viewMode,   setViewMode]   = useState<ViewMode>("stacked");
+
+  // Pre-fill commit message once
   useEffect(() => {
     if (merge?.default_message && !message) {
       setMessage(merge.default_message);
@@ -27,37 +37,67 @@ export function ConflictPanel({ repoId, onDone }: Props) {
   // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [merge?.default_message]);
 
-  if (!merge || !merge.in_progress) return null;
+  // Auto-select first conflicted file on load / when conflict list changes
+  useEffect(() => {
+    if (!merge?.conflicted_paths?.length) return;
+    setSelectedPath((prev) => {
+      if (prev && merge.conflicted_paths.includes(prev)) return prev;
+      return merge.conflicted_paths[0];
+    });
+  }, [merge?.conflicted_paths]);
 
-  const isCherryPick = merge.kind === "cherry_pick";
+  if (!merge?.in_progress) return null;
+
+  const isCherryPick  = merge.kind === "cherry_pick";
+  const conflicts     = merge.conflicted_paths;
+  const hasConflicts  = conflicts.length > 0;
+  const disabled      = working || committing;
+  const canFinish     = !hasConflicts && message.trim().length > 0 && !committing;
 
   function invalidate() {
-    qc.invalidateQueries({ queryKey: ["staging", repoId] });
-    qc.invalidateQueries({ queryKey: ["status", repoId] });
+    qc.invalidateQueries({ queryKey: ["staging",      repoId] });
+    qc.invalidateQueries({ queryKey: ["status",       repoId] });
     qc.invalidateQueries({ queryKey: ["merge-status", repoId] });
   }
 
-  async function handleResolveOurs(path: string) {
+  // ── Whole-file resolution ─────────────────────────────────────────────────
+
+  async function handleResolveOurs(path: string, e: React.MouseEvent) {
+    e.stopPropagation();
     setWorking(true);
-    try { await ipc.resolveOurs(repoId, path); setExpandedPath(null); invalidate(); }
-    catch (e) { setError(String(e)); }
+    try { await ipc.resolveOurs(repoId, path); invalidate(); }
+    catch (err) { setError(String(err)); }
     finally { setWorking(false); }
   }
 
-  async function handleResolveTheirs(path: string) {
+  async function handleResolveTheirs(path: string, e: React.MouseEvent) {
+    e.stopPropagation();
     setWorking(true);
-    try { await ipc.resolveTheirs(repoId, path); setExpandedPath(null); invalidate(); }
-    catch (e) { setError(String(e)); }
+    try { await ipc.resolveTheirs(repoId, path); invalidate(); }
+    catch (err) { setError(String(err)); }
     finally { setWorking(false); }
   }
+
+  // ── After hunk-level resolution of one file ───────────────────────────────
+
+  function handleFileResolved() {
+    invalidate();
+    // Auto-advance to the next unresolved file
+    const remaining = conflicts.filter((p) => p !== selectedPath);
+    setSelectedPath(remaining[0] ?? null);
+  }
+
+  // ── Abort ─────────────────────────────────────────────────────────────────
 
   async function handleAbort() {
     setWorking(true);
     setError(null);
     try { await ipc.abortMerge(repoId); invalidate(); onDone(); }
-    catch (e) { setError(String(e)); }
+    catch (err) { setError(String(err)); }
     finally { setWorking(false); }
   }
+
+  // ── Finish (commit merge / cherry-pick) ───────────────────────────────────
 
   async function handleFinish() {
     const msg = message.trim();
@@ -71,26 +111,40 @@ export function ConflictPanel({ repoId, onDone }: Props) {
         await ipc.finishMerge(repoId, msg);
       }
       onDone();
-    }
-    catch (e) { setError(String(e)); }
+    } catch (err) { setError(String(err)); }
     finally { setCommitting(false); }
   }
 
-  const conflicts = merge.conflicted_paths;
-  const hasConflicts = conflicts.length > 0;
-  const disabled = working || committing;
-  const canFinish = !hasConflicts && message.trim().length > 0 && !committing;
+  // ─────────────────────────────────────────────────────────────────────────
 
   return (
-    <div className="flex flex-col h-full border-l border-border text-sm overflow-hidden">
-      {/* Header */}
-      <div className="shrink-0 flex items-center justify-between px-3 py-2 border-b border-border">
-        <div className="flex items-center gap-1.5">
-          <GitMerge size={13} className="text-orange-400 shrink-0" />
-          <span className="font-semibold text-orange-300 text-xs uppercase tracking-wide">
-            {isCherryPick ? "Cherry-pick in Progress" : "Merge in Progress"}
-          </span>
+    <div className="flex-1 flex flex-col overflow-hidden border-r border-border bg-background min-w-0">
+
+      {/* ── Header ── */}
+      <div className="shrink-0 flex items-center gap-2 px-3 py-2 border-b border-border">
+        <GitMerge size={14} className="text-orange-400 shrink-0" />
+        <span className="font-semibold text-orange-300 text-xs uppercase tracking-wide">
+          {isCherryPick ? "Cherry-pick in Progress" : "Merge in Progress"}
+        </span>
+
+        {/* View mode toggle */}
+        <div className="ml-auto flex items-center gap-0.5 rounded-md border border-border/50 p-0.5">
+          <button
+            title="Stacked view"
+            onClick={() => setViewMode("stacked")}
+            className={`rounded p-1 transition-colors ${viewMode === "stacked" ? "bg-white/10 text-foreground" : "text-muted-foreground/50 hover:text-foreground"}`}
+          >
+            <AlignJustify size={12} />
+          </button>
+          <button
+            title="Side-by-side view"
+            onClick={() => setViewMode("side-by-side")}
+            className={`rounded p-1 transition-colors ${viewMode === "side-by-side" ? "bg-white/10 text-foreground" : "text-muted-foreground/50 hover:text-foreground"}`}
+          >
+            <Columns2 size={12} />
+          </button>
         </div>
+
         <Button
           size="sm"
           variant="ghost"
@@ -103,107 +157,131 @@ export function ConflictPanel({ repoId, onDone }: Props) {
         </Button>
       </div>
 
-      {/* File list */}
-      <div className="flex-1 overflow-y-auto min-h-0">
-        {hasConflicts && (
-          <>
-            <div className="px-3 py-1.5 text-[10px] uppercase tracking-wider text-orange-400/80 font-semibold border-b border-border/30">
-              Conflicts ({conflicts.length})
-            </div>
-            {conflicts.map((path) => {
-              const parts = path.split("/");
-              const name = parts[parts.length - 1];
-              const dir = parts.length > 1 ? parts.slice(0, -1).join("/") : "";
-              const expanded = expandedPath === path;
+      {/* ── Body: file list + hunk editor ── */}
+      <div className="flex flex-1 min-h-0 overflow-hidden">
 
-              return (
-                <div key={path} className="border-b border-border/20 last:border-b-0">
-                  {/* File row */}
-                  <div className="flex items-center gap-1 py-1 px-2 hover:bg-white/[0.04]">
-                    {/* Expand toggle + filename */}
+        {/* Left: file list sidebar */}
+        <div className="w-52 shrink-0 border-r border-border flex flex-col overflow-hidden">
+          <div className="px-3 py-1.5 text-[10px] uppercase tracking-wider text-muted-foreground/50 font-semibold border-b border-border/40">
+            {hasConflicts
+              ? `${conflicts.length} unresolved`
+              : "All resolved"}
+          </div>
+
+          <div className="flex-1 overflow-y-auto min-h-0">
+            {hasConflicts ? (
+              conflicts.map((path) => {
+                const parts = path.split("/");
+                const name  = parts[parts.length - 1];
+                const dir   = parts.length > 1 ? parts.slice(0, -1).join("/") : "";
+                const isSelected = path === selectedPath;
+
+                return (
+                  <div key={path}>
                     <button
-                      className="flex items-center gap-1.5 flex-1 min-w-0 text-left"
-                      onClick={() => setExpandedPath(expanded ? null : path)}
+                      className={`w-full text-left px-2 py-1.5 flex items-start gap-1.5 transition-colors group ${
+                        isSelected
+                          ? "bg-orange-500/10 border-l-2 border-orange-400/60"
+                          : "border-l-2 border-transparent hover:bg-white/[0.04]"
+                      }`}
+                      onClick={() => setSelectedPath(path)}
                       disabled={disabled}
                     >
-                      <ChevronRight
-                        size={10}
-                        className={`text-muted-foreground/45 shrink-0 transition-transform duration-150 ${expanded ? "rotate-90" : ""}`}
-                      />
-                      <AlertTriangle size={10} className="text-orange-400 shrink-0" />
-                      <span className="flex-1 min-w-0 truncate text-xs leading-tight">
-                        <span className="text-foreground/85">{name}</span>
-                        {dir && <span className="text-muted-foreground/50 ml-1.5 text-[10px]">{dir}</span>}
+                      <AlertTriangle size={10} className="text-orange-400 shrink-0 mt-0.5" />
+                      <span className="flex-1 min-w-0">
+                        <span className="block truncate text-xs text-foreground/85 leading-tight">{name}</span>
+                        {dir && (
+                          <span className="block truncate text-[10px] text-muted-foreground/45 leading-tight">{dir}</span>
+                        )}
                       </span>
                     </button>
-                    {/* Quick whole-file resolution */}
-                    <div className="flex gap-1 shrink-0">
-                      <button
-                        onClick={() => handleResolveOurs(path)}
-                        disabled={disabled}
-                        className="text-[10px] px-1.5 py-0.5 rounded border border-blue-400/35 text-blue-300/80 hover:text-blue-200 hover:bg-blue-400/10 disabled:opacity-30 transition-colors"
-                        title="Accept our version (pre-merge)"
-                      >
-                        Ours
-                      </button>
-                      <button
-                        onClick={() => handleResolveTheirs(path)}
-                        disabled={disabled}
-                        className="text-[10px] px-1.5 py-0.5 rounded border border-purple-400/35 text-purple-300/80 hover:text-purple-200 hover:bg-purple-400/10 disabled:opacity-30 transition-colors"
-                        title="Accept their version (incoming)"
-                      >
-                        Theirs
-                      </button>
-                    </div>
+
+                    {/* Quick whole-file resolution — shown when this row is selected */}
+                    {isSelected && (
+                      <div className="flex gap-1 px-2 pb-1.5">
+                        <button
+                          onClick={(e) => handleResolveOurs(path, e)}
+                          disabled={disabled}
+                          className="flex-1 text-[10px] py-0.5 rounded border border-blue-400/30 text-blue-300/80 hover:text-blue-200 hover:bg-blue-400/10 disabled:opacity-30 transition-colors"
+                        >
+                          Ours
+                        </button>
+                        <button
+                          onClick={(e) => handleResolveTheirs(path, e)}
+                          disabled={disabled}
+                          className="flex-1 text-[10px] py-0.5 rounded border border-purple-400/30 text-purple-300/80 hover:text-purple-200 hover:bg-purple-400/10 disabled:opacity-30 transition-colors"
+                        >
+                          Theirs
+                        </button>
+                      </div>
+                    )}
                   </div>
-
-                  {/* Inline hunk picker */}
-                  {expanded && (
-                    <ConflictHunkPicker
-                      repoId={repoId}
-                      path={path}
-                      onResolved={() => {
-                        setExpandedPath(null);
-                        invalidate();
-                      }}
-                    />
-                  )}
-                </div>
-              );
-            })}
-          </>
-        )}
-
-        {!hasConflicts && (
-          <div className="px-3 py-3 flex items-center gap-2 text-xs text-green-400">
-            <Check size={13} />
-            All conflicts resolved — ready to commit.
+                );
+              })
+            ) : (
+              <div className="flex items-center gap-2 px-3 py-3 text-xs text-green-400">
+                <Check size={13} />
+                All conflicts resolved
+              </div>
+            )}
           </div>
-        )}
+        </div>
+
+        {/* Right: hunk editor */}
+        <div className="flex-1 flex flex-col overflow-hidden min-w-0">
+          {selectedPath && hasConflicts ? (
+            <ConflictHunkPicker
+              key={selectedPath}
+              repoId={repoId}
+              path={selectedPath}
+              viewMode={viewMode}
+              onResolved={handleFileResolved}
+            />
+          ) : !hasConflicts ? (
+            <div className="flex-1 flex flex-col items-center justify-center gap-3 text-center px-8">
+              <div className="w-10 h-10 rounded-full bg-green-500/10 flex items-center justify-center">
+                <Check size={20} className="text-green-400" />
+              </div>
+              <div>
+                <p className="text-sm font-medium text-foreground/80">All conflicts resolved</p>
+                <p className="text-xs text-muted-foreground/60 mt-0.5">
+                  Review the commit message below and finish the {isCherryPick ? "cherry-pick" : "merge"}.
+                </p>
+              </div>
+            </div>
+          ) : (
+            <div className="flex-1 flex items-center justify-center text-xs text-muted-foreground/40 italic">
+              Select a file to resolve its conflicts
+            </div>
+          )}
+        </div>
       </div>
 
-      {/* Commit area */}
-      <div className="shrink-0 border-t border-border p-3 flex flex-col gap-2">
+      {/* ── Footer: commit area ── */}
+      <div className="shrink-0 border-t border-border px-4 py-3 flex gap-3 items-end">
         <textarea
           value={message}
           onChange={(e) => setMessage(e.target.value)}
           rows={2}
           disabled={disabled}
-          className="w-full resize-none rounded border border-border bg-background px-2 py-1.5 text-xs text-foreground placeholder:text-muted-foreground focus:outline-none focus:ring-1 focus:ring-ring disabled:opacity-50"
+          className="flex-1 resize-none rounded border border-border bg-background px-2.5 py-1.5 text-xs text-foreground placeholder:text-muted-foreground focus:outline-none focus:ring-1 focus:ring-ring disabled:opacity-50"
           placeholder={isCherryPick ? "Cherry-pick commit message…" : "Merge commit message…"}
         />
-        {error && <p className="text-xs text-destructive break-words">{error}</p>}
-        <Button
-          size="sm"
-          className="w-full gap-1.5"
-          onClick={handleFinish}
-          disabled={!canFinish}
-        >
-          <GitMerge size={13} />
-          {hasConflicts
-            ? `Resolve ${conflicts.length} conflict${conflicts.length !== 1 ? "s" : ""} first`
-            : isCherryPick ? "Commit Cherry-pick" : "Commit Merge"}
-        </Button>
+
+        <div className="shrink-0 flex flex-col gap-2">
+          {error && <p className="text-[10px] text-destructive max-w-48 break-words">{error}</p>}
+          <Button
+            size="sm"
+            className="gap-1.5 whitespace-nowrap"
+            onClick={handleFinish}
+            disabled={!canFinish}
+          >
+            <GitMerge size={13} />
+            {hasConflicts
+              ? `${conflicts.length} conflict${conflicts.length !== 1 ? "s" : ""} remaining`
+              : isCherryPick ? "Commit Cherry-pick" : "Commit Merge"}
+          </Button>
+        </div>
       </div>
     </div>
   );
