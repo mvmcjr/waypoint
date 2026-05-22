@@ -137,17 +137,6 @@ pub fn merge_commit(
 
         if analysis.is_up_to_date() {
             MergeResult { kind: "up_to_date".into(), conflicted: vec![] }
-        } else if analysis.is_fast_forward() {
-            let head = repo.head()?;
-            if head.is_branch() {
-                let refname = head.name().unwrap_or("HEAD").to_string();
-                repo.find_reference(&refname)?.set_target(git_oid, "merge: Fast-forward")?;
-                repo.set_head(&refname)?;
-            } else {
-                repo.set_head_detached(git_oid)?;
-            }
-            repo.checkout_head(Some(git2::build::CheckoutBuilder::default().force()))?;
-            MergeResult { kind: "fast_forward".into(), conflicted: vec![] }
         } else {
             // Normal merge.
             repo.merge(&[&annotated], None, None)?;
