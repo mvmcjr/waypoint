@@ -390,6 +390,7 @@ export function RepoView() {
               headBranch={head?.branch ?? null}
               onSelectOid={handleSelectCommit}
               onCommitAction={handleCommitAction}
+              onRefAction={handleRefAction}
               onWipClick={handleWipClick}
               wipSelected={wipSelected}
               searchActive={searchActive}

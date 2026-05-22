@@ -7,6 +7,7 @@ import { GraphLayer, LANE_WIDTH, ROW_HEIGHT, REFS_COL_WIDTH } from "./GraphLayer
 import { CommitRow } from "./CommitRow";
 import { WipRow } from "./WipRow";
 import { CommitContextMenu, type CommitAction } from "./CommitContextMenu";
+import type { RefAction } from "./RefBadge";
 
 const REFS_WIDTH_MIN = 60;
 const REFS_WIDTH_MAX = 400;
@@ -38,13 +39,14 @@ interface Props {
   headBranch: string | null;
   onSelectOid: (oid: string) => void;
   onCommitAction: (action: CommitAction) => void;
+  onRefAction?: (action: RefAction) => void;
   onWipClick: () => void;
   wipSelected: boolean;
   searchActive?: boolean;
 }
 
 export const Timeline = forwardRef<TimelineHandle, Props>(function Timeline(
-  { repoId, commits, selectedOid, headOid, headBranch, onSelectOid, onCommitAction, onWipClick, wipSelected, searchActive }: Props,
+  { repoId, commits, selectedOid, headOid, headBranch, onSelectOid, onCommitAction, onRefAction, onWipClick, wipSelected, searchActive }: Props,
   ref
 ) {
   const parentRef = useRef<HTMLDivElement>(null);
@@ -209,6 +211,7 @@ export const Timeline = forwardRef<TimelineHandle, Props>(function Timeline(
                     headBranch={headBranch}
                     pushedTagNames={pushedTagNames}
                     isStash={isStash}
+                    onRefAction={onRefAction}
                     onClick={() => onSelectOid(item.commit.oid)}
                   />
                 </CommitContextMenu>

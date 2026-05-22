@@ -8,17 +8,9 @@ import {
   ContextMenuSeparator,
   ContextMenuTrigger,
 } from "@/components/ui/context-menu";
+import type { RefAction } from "@/components/timeline/RefBadge";
 
-export type RefAction =
-  | { kind: "checkout-branch"; branchName: string }
-  | { kind: "checkout-remote-branch"; remoteBranch: string }
-  | { kind: "checkout-tag"; oid: string }
-  | { kind: "merge"; oid: string; label: string }
-  | { kind: "rebase"; oid: string }
-  | { kind: "push"; branchName: string }
-  | { kind: "delete-branch"; branchName: string }
-  | { kind: "push-tag"; tagName: string }
-  | { kind: "delete-tag"; tagName: string };
+export type { RefAction };
 
 const GROUP_META = {
   Branches: { icon: GitBranch },
