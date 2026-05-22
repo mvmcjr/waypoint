@@ -8,6 +8,7 @@ import { WelcomeScreen } from "@/routes/welcome";
 import { RepoView } from "@/routes/repo";
 import { CommandPalette } from "@/components/CommandPalette";
 import { SettingsDialog } from "@/components/SettingsDialog";
+import { Toaster } from "@/components/ui/sonner";
 import { load } from "@tauri-apps/plugin-store";
 import { ipc } from "@/lib/ipc";
 import {
@@ -80,6 +81,7 @@ function Inner() {
       {activeTabId ? <RepoView /> : <WelcomeScreen />}
       <CommandPalette open={paletteOpen} onClose={() => setPaletteOpen(false)} />
       <SettingsDialog />
+      <Toaster position="bottom-right" richColors />
 
       <Dialog open={showConsentDialog} onOpenChange={(o) => { if (!o) handleConsentChoice(false); }}>
         <DialogContent showCloseButton={false} className="sm:max-w-[400px]">
