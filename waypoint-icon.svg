@@ -1,0 +1,157 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512" width="512" height="512">
+  <defs>
+
+    <!-- Background: deep navy matching dark theme -->
+    <radialGradient id="bg" cx="50%" cy="44%" r="62%">
+      <stop offset="0%"   stop-color="#181b28"/>
+      <stop offset="100%" stop-color="#0c0e17"/>
+    </radialGradient>
+
+    <!-- Diamond fill: teal gradient, top-left bright → bottom-right dark -->
+    <linearGradient id="dFill" x1="0%" y1="0%" x2="100%" y2="100%">
+      <stop offset="0%"   stop-color="#4fede0" stop-opacity="0.72"/>
+      <stop offset="45%"  stop-color="#2dd4bf" stop-opacity="0.50"/>
+      <stop offset="100%" stop-color="#117a70" stop-opacity="0.14"/>
+    </linearGradient>
+
+    <!-- Diamond center radial bloom -->
+    <radialGradient id="dBloom" cx="50%" cy="50%" r="50%">
+      <stop offset="0%"   stop-color="#7ffff0" stop-opacity="0.38"/>
+      <stop offset="100%" stop-color="#2dd4bf" stop-opacity="0.00"/>
+    </radialGradient>
+
+    <!-- Large ambient bloom around diamond -->
+    <filter id="fBloom" x="-100%" y="-100%" width="300%" height="300%"
+            color-interpolation-filters="sRGB">
+      <feGaussianBlur in="SourceGraphic" stdDeviation="22" result="b"/>
+      <feMerge>
+        <feMergeNode in="b"/>
+        <feMergeNode in="SourceGraphic"/>
+      </feMerge>
+    </filter>
+
+    <!-- Small glow for commit nodes -->
+    <filter id="fNode" x="-200%" y="-200%" width="500%" height="500%"
+            color-interpolation-filters="sRGB">
+      <feGaussianBlur in="SourceGraphic" stdDeviation="4" result="b"/>
+      <feMerge>
+        <feMergeNode in="b"/>
+        <feMergeNode in="SourceGraphic"/>
+      </feMerge>
+    </filter>
+
+    <!-- Glow for the center core -->
+    <filter id="fCore" x="-150%" y="-150%" width="400%" height="400%"
+            color-interpolation-filters="sRGB">
+      <feGaussianBlur in="SourceGraphic" stdDeviation="9" result="b"/>
+      <feMerge>
+        <feMergeNode in="b"/>
+        <feMergeNode in="SourceGraphic"/>
+      </feMerge>
+    </filter>
+
+    <!-- Clip to rounded square (preview) — OS applies its own mask for production -->
+    <clipPath id="clip">
+      <rect width="512" height="512" rx="100" ry="100"/>
+    </clipPath>
+
+  </defs>
+
+  <!-- Background -->
+  <rect width="512" height="512" rx="100" ry="100" fill="url(#bg)"/>
+
+  <g clip-path="url(#clip)">
+
+    <!-- ─────────────────────────────────────────
+         GRAPH TRACKS
+         Two tracks converge at the diamond top vertex;
+         two diverge from the diamond bottom vertex.
+         Colors are the actual LANE_COLORS from GraphLayer.tsx.
+    ───────────────────────────────────────── -->
+
+    <!-- Track A · #2dd4bf teal · upper-left → diamond top (256, 178) -->
+    <path d="M 162,46 Q 162,178 256,178"
+          stroke="#2dd4bf" stroke-width="2.5" fill="none"
+          stroke-linecap="round" opacity="0.52"/>
+
+    <!-- Track B · #818cf8 indigo · upper-right → diamond top (256, 178) -->
+    <path d="M 350,46 Q 350,178 256,178"
+          stroke="#818cf8" stroke-width="2.5" fill="none"
+          stroke-linecap="round" opacity="0.52"/>
+
+    <!-- Track C · #2dd4bf teal · diamond bottom → straight down -->
+    <line x1="256" y1="334" x2="256" y2="466"
+          stroke="#2dd4bf" stroke-width="2.5"
+          stroke-linecap="round" opacity="0.52"/>
+
+    <!-- Track D · #a78bfa violet · diamond bottom → lower-right branch -->
+    <path d="M 256,334 Q 304,404 360,458"
+          stroke="#a78bfa" stroke-width="2.5" fill="none"
+          stroke-linecap="round" opacity="0.46"/>
+
+    <!-- ─────────────────────────────────────────
+         COMMIT NODES
+    ───────────────────────────────────────── -->
+
+    <!-- Track A: 2 teal commits -->
+    <circle cx="162" cy="88"  r="7.5" fill="#2dd4bf" filter="url(#fNode)" opacity="0.95"/>
+    <circle cx="166" cy="136" r="5.5" fill="#2dd4bf" opacity="0.60"/>
+
+    <!-- Track B: 2 indigo commits -->
+    <circle cx="350" cy="88"  r="7.5" fill="#818cf8" filter="url(#fNode)" opacity="0.95"/>
+    <circle cx="346" cy="136" r="5.5" fill="#818cf8" opacity="0.60"/>
+
+    <!-- Track C: 2 teal commits (fading as they recede) -->
+    <circle cx="256" cy="378" r="7.0" fill="#2dd4bf" filter="url(#fNode)" opacity="0.90"/>
+    <circle cx="256" cy="432" r="4.5" fill="#2dd4bf" opacity="0.40"/>
+
+    <!-- Track D: 2 violet commits -->
+    <circle cx="284" cy="364" r="6.5" fill="#a78bfa" filter="url(#fNode)" opacity="0.90"/>
+    <circle cx="318" cy="410" r="5.5" fill="#a78bfa" opacity="0.60"/>
+
+    <!-- ─────────────────────────────────────────
+         DIAMOND WAYPOINT MARKER
+         Center: 256, 256
+         Vertices: top(256,178) right(334,256) bottom(256,334) left(178,256)
+    ───────────────────────────────────────── -->
+
+    <!-- Soft ambient bloom (very large, very faint) -->
+    <path d="M 256,146 L 366,256 L 256,366 L 146,256 Z"
+          fill="#2dd4bf" opacity="0.055" filter="url(#fBloom)"/>
+
+    <!-- Diamond body: gradient fill -->
+    <path d="M 256,178 L 334,256 L 256,334 L 178,256 Z"
+          fill="url(#dFill)"/>
+
+    <!-- Diamond body: center bloom overlay -->
+    <path d="M 256,178 L 334,256 L 256,334 L 178,256 Z"
+          fill="url(#dBloom)"/>
+
+    <!-- Subtle top-right facet: catches the light -->
+    <path d="M 256,178 L 334,256 L 256,256 Z"
+          fill="white" opacity="0.055"/>
+
+    <!-- Diamond crisp border -->
+    <path d="M 256,178 L 334,256 L 256,334 L 178,256 Z"
+          fill="none" stroke="#2dd4bf" stroke-width="1.5" opacity="0.72"/>
+
+    <!-- Inner ring — echoes the diamond form, ±32px from center -->
+    <path d="M 256,224 L 288,256 L 256,288 L 224,256 Z"
+          fill="none" stroke="#4fede0" stroke-width="0.9" opacity="0.24"/>
+
+    <!-- Vertex accent dots — top & bottom where tracks connect -->
+    <circle cx="256" cy="178" r="4.5" fill="#2dd4bf" opacity="0.82"/>
+    <circle cx="256" cy="334" r="4.5" fill="#2dd4bf" opacity="0.82"/>
+    <!-- Left & right vertices: subtle, no tracks -->
+    <circle cx="178" cy="256" r="2.5" fill="#2dd4bf" opacity="0.28"/>
+    <circle cx="334" cy="256" r="2.5" fill="#2dd4bf" opacity="0.28"/>
+
+    <!-- Center: glow halo -->
+    <circle cx="256" cy="256" r="28"  fill="#2dd4bf" opacity="0.18" filter="url(#fCore)"/>
+    <!-- Center: solid teal core -->
+    <circle cx="256" cy="256" r="11"  fill="#2dd4bf" opacity="0.95"/>
+    <!-- Center: white highlight -->
+    <circle cx="256" cy="256" r="5.5" fill="white"   opacity="0.93"/>
+
+  </g>
+</svg>
