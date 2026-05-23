@@ -100,6 +100,13 @@ export interface RemoteInfo {
   url: string;
 }
 
+export interface CliShimInfo {
+  /** Absolute path where the shim script was written. */
+  shim_path: string;
+  /** True when we modified the user's PATH (restart terminal to take effect). */
+  path_was_updated: boolean;
+}
+
 export interface PullResult {
   kind: "up_to_date" | "fast_forward" | "merged" | "conflicts";
   conflicted: string[];
@@ -255,4 +262,13 @@ export const ipc = {
 
   scanForGitRepos: (path: string) =>
     invoke<string[]>("scan_for_git_repos", { path }),
+
+  registerCliShim: () =>
+    invoke<CliShimInfo>("register_cli_shim"),
+
+  unregisterCliShim: () =>
+    invoke<void>("unregister_cli_shim"),
+
+  checkCliShim: () =>
+    invoke<boolean>("check_cli_shim"),
 };

@@ -138,6 +138,9 @@ pub fn run() {
             commands::tags::create_tag,
             commands::tags::delete_tag,
             commands::fs::scan_for_git_repos,
+            commands::cli::register_cli_shim,
+            commands::cli::unregister_cli_shim,
+            commands::cli::check_cli_shim,
         ])
         .run(tauri::generate_context!())
         .expect("error while running waypoint");

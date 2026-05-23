@@ -6,7 +6,7 @@ import {
   Dialog,
   DialogContent,
 } from "@/components/ui/dialog";
-import { Sliders, HelpCircle, Terminal } from "lucide-react";
+import { Sliders, HelpCircle, Terminal, RefreshCw, AlertCircle } from "lucide-react";
 
 type SettingsTab = "general" | "integrations" | "about";
 
@@ -16,9 +16,20 @@ export function SettingsDialog() {
 
   const [activeTab, setActiveTab] = useState<SettingsTab>("general");
   const [isWin, setIsWin] = useState(false);
-  const [contextMenuEnabled, setContextMenuEnabled] = useState(false);
-  const [saving, setSaving] = useState(false);
 
+  // ── Explorer context menu (Windows only) ──────────────────────────────────
+  const [contextMenuEnabled, setContextMenuEnabled] = useState(false);
+  const [savingCtx, setSavingCtx] = useState(false);
+
+  // ── CLI shim (all platforms) ──────────────────────────────────────────────
+  const [shimInstalled, setShimInstalled] = useState(false);
+  const [savingShim, setSavingShim] = useState(false);
+  const [shimPath, setShimPath] = useState<string | null>(null);
+  const [needsRestart, setNeedsRestart] = useState(false);
+  const [shimError, setShimError] = useState<string | null>(null);
+
+  // One-time init: platform detection + context-menu stored preference +
+  // event listener for cross-view sync.
   useEffect(() => {
     let active = true;
     ipc.isWindows().then(async (win) => {
@@ -49,8 +60,17 @@ export function SettingsDialog() {
     };
   }, []);
 
+  // Re-check shim state every time the dialog is opened.
+  // The component renders null when closed (not unmounted), so the one-time
+  // effect above would never re-run — leaving shimInstalled permanently stale
+  // if the shim was added or removed externally between openings.
+  useEffect(() => {
+    if (!settingsOpen) return;
+    ipc.checkCliShim().then(setShimInstalled).catch(() => {});
+  }, [settingsOpen]);
+
   async function handleToggleContextMenu(checked: boolean) {
-    setSaving(true);
+    setSavingCtx(true);
     try {
       await ipc.registerExplorerContextMenu(checked);
       const store = await load("waypoint.json", { defaults: {} });
@@ -59,14 +79,37 @@ export function SettingsDialog() {
       await store.save();
       setContextMenuEnabled(checked);
 
-      // Keep welcome screen and other views synced
       window.dispatchEvent(
         new CustomEvent("context-menu-preference-updated", { detail: checked })
       );
     } catch (err) {
       console.error("Failed to update context menu integration:", err);
     } finally {
-      setSaving(false);
+      setSavingCtx(false);
+    }
+  }
+
+  async function handleToggleCliShim(checked: boolean) {
+    setSavingShim(true);
+    setNeedsRestart(false);
+    setShimError(null);
+    try {
+      if (checked) {
+        const info = await ipc.registerCliShim();
+        setShimInstalled(true);
+        setShimPath(info.shim_path);
+        setNeedsRestart(info.path_was_updated);
+      } else {
+        await ipc.unregisterCliShim();
+        setShimInstalled(false);
+        setShimPath(null);
+        setNeedsRestart(false);
+      }
+    } catch (err) {
+      console.error("Failed to toggle CLI shim:", err);
+      setShimError(err instanceof Error ? err.message : String(err));
+    } finally {
+      setSavingShim(false);
     }
   }
 
@@ -159,33 +202,81 @@ export function SettingsDialog() {
                 <p className="text-[11px] text-muted-foreground mt-0.5">Connect Waypoint with your local desktop environment.</p>
               </div>
 
-              {isWin ? (
-                <div className="space-y-4 pt-2">
+              <div className="space-y-3 pt-2">
+                {/* ── CLI Shim ─────────────────────────────────────────── */}
+                <div className="rounded-lg border border-border/40 bg-muted/10 overflow-hidden">
+                  <div className="flex items-start justify-between p-3.5 gap-4">
+                    <div className="space-y-1 min-w-0">
+                      <span className="text-xs font-medium text-foreground">Terminal Command</span>
+                      <p className="text-[10px] text-muted-foreground leading-normal max-w-sm">
+                        Register <code className="font-mono bg-muted/60 px-1 py-0.5 rounded text-foreground/80">waypoint</code> as a shell command.
+                        Use <code className="font-mono bg-muted/60 px-1 py-0.5 rounded text-foreground/80">waypoint .</code> or{" "}
+                        <code className="font-mono bg-muted/60 px-1 py-0.5 rounded text-foreground/80">waypoint ~/projects/foo</code> to open a
+                        repository directly from any terminal.
+                      </p>
+                      {shimInstalled && shimPath && (
+                        <p className="text-[10px] text-muted-foreground/60 font-mono truncate pt-0.5" title={shimPath}>
+                          {shimPath}
+                        </p>
+                      )}
+                    </div>
+                    <label className="relative inline-flex items-center cursor-pointer select-none shrink-0 mt-0.5">
+                      <input
+                        type="checkbox"
+                        checked={shimInstalled}
+                        disabled={savingShim}
+                        onChange={(e) => handleToggleCliShim(e.target.checked)}
+                        className="sr-only peer"
+                      />
+                      <div className="w-8 h-4.5 bg-muted rounded-full peer peer-checked:after:translate-x-full after:content-[''] after:absolute after:top-[2px] after:left-[2px] after:bg-foreground/70 peer-checked:after:bg-background after:rounded-full after:h-3.5 after:w-3.5 after:transition-all peer-checked:bg-primary border border-border/30 peer-focus-visible:ring-2 peer-focus-visible:ring-primary/50" />
+                    </label>
+                  </div>
+
+                  {/* Terminal-restart notice */}
+                  {needsRestart && (
+                    <div className="flex items-center gap-2 px-3.5 py-2 border-t border-border/40 bg-primary/5">
+                      <RefreshCw className="size-3 text-primary shrink-0" />
+                      <p className="text-[10px] text-primary/80 leading-normal">
+                        Restart your terminal (or open a new tab) for{" "}
+                        <code className="font-mono">waypoint</code> to appear in your PATH.
+                      </p>
+                    </div>
+                  )}
+
+                  {/* Error notice */}
+                  {shimError && (
+                    <div className="flex items-start gap-2 px-3.5 py-2 border-t border-border/40 bg-destructive/5">
+                      <AlertCircle className="size-3 text-destructive shrink-0 mt-0.5" />
+                      <p className="text-[10px] text-destructive/80 leading-normal break-all">
+                        {shimError}
+                      </p>
+                    </div>
+                  )}
+                </div>
+
+                {/* ── Windows Explorer Context Menu ─────────────────────── */}
+                {isWin && (
                   <div className="flex items-start justify-between p-3.5 rounded-lg border border-border/40 bg-muted/10 gap-4">
                     <div className="space-y-1">
-                      <span className="text-xs font-medium text-foreground">Windows Explorer Context Menu</span>
+                      <span className="text-xs font-medium text-foreground">Explorer Context Menu</span>
                       <p className="text-[10px] text-muted-foreground leading-normal max-w-sm">
-                        Adds a right-click <strong className="text-foreground/80">&quot;Open in Waypoint&quot;</strong> context menu item to folders and directory backgrounds to quickly jump into a repository.
+                        Adds a right-click <strong className="text-foreground/80">&quot;Open in Waypoint&quot;</strong> item to folders
+                        and directory backgrounds in Windows Explorer.
                       </p>
                     </div>
                     <label className="relative inline-flex items-center cursor-pointer select-none shrink-0 mt-0.5">
                       <input
                         type="checkbox"
                         checked={contextMenuEnabled}
-                        disabled={saving}
+                        disabled={savingCtx}
                         onChange={(e) => handleToggleContextMenu(e.target.checked)}
                         className="sr-only peer"
                       />
                       <div className="w-8 h-4.5 bg-muted rounded-full peer peer-checked:after:translate-x-full after:content-[''] after:absolute after:top-[2px] after:left-[2px] after:bg-foreground/70 peer-checked:after:bg-background after:rounded-full after:h-3.5 after:w-3.5 after:transition-all peer-checked:bg-primary border border-border/30 peer-focus-visible:ring-2 peer-focus-visible:ring-primary/50" />
                     </label>
                   </div>
-                </div>
-              ) : (
-                <div className="flex flex-col items-center justify-center pt-8 text-center gap-2">
-                  <Terminal className="size-6 text-muted-foreground/30" />
-                  <p className="text-xs text-muted-foreground">No integrations available for your operating system.</p>
-                </div>
-              )}
+                )}
+              </div>
             </div>
           )}
 

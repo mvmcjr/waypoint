@@ -1,4 +1,5 @@
 pub mod actions;
+pub mod cli;
 pub mod diff;
 pub mod fs;
 pub mod history;
