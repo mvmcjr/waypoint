@@ -60,7 +60,9 @@ export const useStore = create<AppState>((set) => ({
       return { tabs: newTabs, activeTabId: newActiveId, ...BLANK_VIEW };
     }),
 
-  switchTab: (id) => set({ activeTabId: id, ...BLANK_VIEW }),
+  switchTab: (id) => set((state) =>
+    state.activeTabId === id ? state : { activeTabId: id, ...BLANK_VIEW }
+  ),
 
   setCommits: (commits) => set({ commits }),
   selectCommit: (selectedOid) => set({ selectedOid }),
