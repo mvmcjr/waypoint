@@ -1,4 +1,4 @@
-import { useState } from "react";
+import { useState, useEffect, useRef } from "react";
 import { useQueryClient } from "@tanstack/react-query";
 import { Archive, ChevronRight } from "lucide-react";
 import {
@@ -21,6 +21,20 @@ export function StashList({ repoId, onApplied }: Props) {
   const { data: stashes = [] } = useStashes(repoId);
   const [open, setOpen] = useState(true);
   const [busy, setBusy] = useState(false);
+  // Tracks which repo's stash op is currently in-flight (null when idle).
+  const opRepoRef = useRef<string | null>(null);
+
+  // When the user switches repos, unblock the new repo's buttons immediately.
+  // But if they switch back to the repo whose op is still in-flight, keep busy
+  // so they can't double-pop/apply while the first call is still running.
+  // Hook must be called before the early return below (Rules of Hooks).
+  useEffect(() => {
+    if (opRepoRef.current === repoId) {
+      setBusy(true); // op still in-flight for this repo
+    } else {
+      setBusy(false);
+    }
+  }, [repoId]);
 
   if (stashes.length === 0) return null;
 
@@ -32,23 +46,26 @@ export function StashList({ repoId, onApplied }: Props) {
 
   async function handlePop(index: number) {
     setBusy(true);
+    opRepoRef.current = repoId;
     try { await ipc.popStash(repoId, index); invalidate(); onApplied?.(); }
     catch (e) { console.error(e); }
-    finally { setBusy(false); }
+    finally { opRepoRef.current = null; setBusy(false); }
   }
 
   async function handleApply(index: number) {
     setBusy(true);
+    opRepoRef.current = repoId;
     try { await ipc.applyStash(repoId, index); invalidate(); onApplied?.(); }
     catch (e) { console.error(e); }
-    finally { setBusy(false); }
+    finally { opRepoRef.current = null; setBusy(false); }
   }
 
   async function handleDrop(index: number) {
     setBusy(true);
+    opRepoRef.current = repoId;
     try { await ipc.dropStash(repoId, index); invalidate(); }
     catch (e) { console.error(e); }
-    finally { setBusy(false); }
+    finally { opRepoRef.current = null; setBusy(false); }
   }
 
   return (

@@ -1,4 +1,4 @@
-import { useState } from "react";
+import { useState, useEffect } from "react";
 import { Search } from "lucide-react";
 import type { RefInfo } from "@/lib/ipc";
 import { useRefs } from "@/lib/queries";
@@ -14,6 +14,12 @@ interface Props {
 export function Sidebar({ repoId, onSelectRef, onRefAction }: Props) {
   const { data: refs, isLoading } = useRefs(repoId);
   const [filter, setFilter] = useState("");
+
+  // Clear the search filter when switching repos so branch/tag names from the
+  // previous repo don't remain applied to a completely different ref list.
+  useEffect(() => {
+    setFilter("");
+  }, [repoId]);
 
   return (
     <aside className="w-56 shrink-0 border-r border-border flex flex-col bg-sidebar text-sidebar-foreground overflow-hidden">

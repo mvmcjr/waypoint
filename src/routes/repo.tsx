@@ -72,16 +72,24 @@ export function RepoView() {
 
   const timelineRef = useRef<TimelineHandle>(null);
 
+  // Always up-to-date ref for the active repo — lets in-flight async handlers
+  // detect that the user has switched away and skip stale setDialog() calls.
+  const repoIdRef = useRef(repoId);
+  repoIdRef.current = repoId;
+
   const [dialog, setDialog] = useState<DialogState>({ kind: "none" });
   const [wipSelected, setWipSelected] = useState(false);
   const [focusedFile, setFocusedFile] = useState<FileDiff | null>(null);
-  const [focusedStagingFile, setFocusedStagingFile] = useState<{ path: string; section: "staged" | "unstaged" } | null>(null);
+  // repoId is stored alongside path so we can skip the one-render flash where
+  // the old path is paired with a new repoId before the reset effect fires.
+  const [focusedStagingFile, setFocusedStagingFile] = useState<{ repoId: string; path: string; section: "staged" | "unstaged" } | null>(null);
   const [isFetching, setIsFetching] = useState(false);
 
   async function handleFetch() {
     if (!remotes || remotes.length === 0 || !repoId) return;
     const remoteName = getDefaultRemote(remotes);
     if (!remoteName) return;
+    const myRepoId = repoId;
 
     setIsFetching(true);
     const p = ipc.fetchRemote(repoId, remoteName);
@@ -92,6 +100,7 @@ export function RepoView() {
     });
     try {
       await p;
+      if (repoIdRef.current !== myRepoId) return;
       refresh();
     } catch {
       // error already shown by toast
@@ -106,6 +115,7 @@ export function RepoView() {
     if (!remotes || remotes.length === 0 || !repoId || !head?.branch) return;
     const remoteName = getDefaultRemote(remotes);
     if (!remoteName) return;
+    const myRepoId = repoId;
     setIsPulling(true);
     const p = ipc.pullBranch(repoId, remoteName);
     toast.promise(p, {
@@ -120,11 +130,13 @@ export function RepoView() {
     });
     try {
       const result = await p;
+      if (repoIdRef.current !== myRepoId) return; // user switched repos mid-flight
       if (result.kind === "conflicts") {
         setDialog({ kind: "pull-conflicts" });
       }
       refresh();
     } catch (e) {
+      if (repoIdRef.current !== myRepoId) return;
       setDialog({ kind: "remote-error", message: String(e) });
     } finally {
       setIsPulling(false);
@@ -137,6 +149,7 @@ export function RepoView() {
     if (!remotes || remotes.length === 0 || !repoId) return;
     const remoteName = getDefaultRemote(remotes);
     if (!remoteName) return;
+    const myRepoId = repoId;
     setIsPushing(true);
     const p = ipc.pushBranch(repoId, remoteName, branchName, false);
     toast.promise(p, {
@@ -146,8 +159,10 @@ export function RepoView() {
     });
     try {
       await p;
+      if (repoIdRef.current !== myRepoId) return; // user switched repos mid-flight
       refresh();
     } catch (e) {
+      if (repoIdRef.current !== myRepoId) return;
       const msg = String(e);
       if (msg.includes("non-fast-forward") || msg.includes("rejected") || msg.includes("fetch first")) {
         setDialog({ kind: "push-rejected", branchName, remoteName });
@@ -163,6 +178,23 @@ export function RepoView() {
     if (data) setCommits(data);
   }, [data, setCommits]);
 
+  // RepoView is a single persistent component instance shared across all tabs
+  // (App.tsx renders one <RepoView /> regardless of which tab is active).
+  // Local panel state — focusedFile, focusedStagingFile, wipSelected, dialog —
+  // is NOT cleared by switchTab in the Zustand store, so without this reset
+  // those panels survive the tab switch and show stale/wrong-repo content.
+  // isFetching/isPulling/isPushing are also reset so the new repo's toolbar
+  // buttons aren't frozen in a spinner from the previous repo's in-flight op.
+  useEffect(() => {
+    setFocusedFile(null);
+    setFocusedStagingFile(null);
+    setWipSelected(false);
+    setDialog({ kind: "none" });
+    setIsFetching(false);
+    setIsPulling(false);
+    setIsPushing(false);
+  }, [repoId]);
+
   // Tauri's WebView doesn't fire browser focus/visibilitychange events, so
   // refetchOnWindowFocus won't work. Use the native Tauri focus event instead.
   useEffect(() => {
@@ -175,13 +207,17 @@ export function RepoView() {
     return () => { unlisten?.(); };
   }, [refresh]);
 
-  // Auto-open WIP panel when a merge with conflicts starts.
+  // Auto-open WIP panel when a merge with conflicts starts, or when the user
+  // switches to a repo that already has a merge in progress.  repoId is in the
+  // dep array so the effect re-fires on tab switch even when merge_in_progress
+  // is already true in both the old and new repo (value unchanged → no re-fire
+  // without repoId, leaving ConflictPanel closed on the new repo).
   useEffect(() => {
     if (status?.merge_in_progress) {
       setWipSelected(true);
       selectCommit(null);
     }
-  }, [status?.merge_in_progress, selectCommit]);
+  }, [status?.merge_in_progress, repoId, selectCommit]);
 
   function handleSelectCommit(oid: string) {
     setWipSelected(false);
@@ -373,7 +409,7 @@ export function RepoView() {
               commitSummary={selectedItem.commit.summary}
               onClose={() => setFocusedFile(null)}
             />
-          ) : focusedStagingFile && repoId ? (
+          ) : focusedStagingFile && repoId && focusedStagingFile.repoId === repoId ? (
             <StagingFileDiffPanel
               repoId={repoId}
               path={focusedStagingFile.path}
@@ -405,7 +441,7 @@ export function RepoView() {
               <StagingPanel
                 repoId={repoId}
                 onCommitSuccess={handleCommitSuccess}
-                onFileClick={(path, section) => setFocusedStagingFile({ path, section })}
+                onFileClick={(path, section) => setFocusedStagingFile({ repoId: repoId!, path, section })}
               />
             </div>
           )}
