@@ -237,6 +237,8 @@ export function RepoView() {
       setDialog({ kind: "push-tag", tagName: action.tagName });
     } else if (action.kind === "delete-tag") {
       setDialog({ kind: "delete-tag", tagName: action.tagName });
+    } else if (action.kind === "create-tag") {
+      setDialog({ kind: "create-tag", oid: action.oid });
     }
   }
 
