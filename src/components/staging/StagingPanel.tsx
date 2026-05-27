@@ -7,7 +7,7 @@ import {
 } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { ipc, type FileStatus } from "@/lib/ipc";
-import { useFileStatus, useRefreshRepo } from "@/lib/queries";
+import { useFileStatus, useHeadInfo, useRefs, useRefreshRepo } from "@/lib/queries";
 
 interface Props {
   repoId: string;
@@ -239,6 +239,7 @@ export function StagingPanel({ repoId, onCommitSuccess, onFileClick }: Props) {
   const refresh = useRefreshRepo(repoId);
   const [summary, setSummary] = useState("");
   const [description, setDescription] = useState("");
+  const [amend, setAmend] = useState(false);
   const [committing, setCommitting] = useState(false);
   const [working, setWorking] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -252,6 +253,13 @@ export function StagingPanel({ repoId, onCommitSuccess, onFileClick }: Props) {
     const t = setTimeout(() => setDiscardArmed(false), 3000);
     return () => clearTimeout(t);
   }, [discardArmed]);
+
+  const { data: headInfo } = useHeadInfo(repoId);
+  const { data: refs = [] } = useRefs(repoId);
+  // True when the HEAD commit is already present in any remote ref — amending
+  // would rewrite shared history.
+  const headIsPushed = headInfo != null
+    && refs.some((r) => r.kind === "remote_branch" && r.target_oid === headInfo.oid);
 
   const staged   = files.filter((f) => f.staged !== null);
   const unstaged = files.filter((f) => f.unstaged !== null);
@@ -308,16 +316,43 @@ export function StagingPanel({ repoId, onCommitSuccess, onFileClick }: Props) {
     finally { setWorking(false); }
   }
 
+  async function toggleAmend() {
+    if (!amend) {
+      // Entering amend mode — pre-fill fields from the HEAD commit message.
+      // Only enable amend if the fetch succeeds; surface errors otherwise.
+      setError(null);
+      try {
+        const head = await ipc.getHeadInfo(repoId);
+        const commit = await ipc.getCommit(repoId, head.oid);
+        const fullMsg = commit.summary; // get_commit returns the full message here
+        const sepIdx = fullMsg.indexOf("\n\n");
+        setSummary(sepIdx >= 0 ? fullMsg.slice(0, sepIdx) : fullMsg.trimEnd());
+        setDescription(sepIdx >= 0 ? fullMsg.slice(sepIdx + 2).trimEnd() : "");
+        setAmend(true);
+      } catch (e) {
+        setError(`Cannot enable amend: ${String(e)}`);
+      }
+    } else {
+      setAmend(false);
+    }
+  }
+
   async function handleCommit() {
     const msg = summary.trim();
-    if (!msg || staged.length === 0) return;
+    if (!msg) return;
+    if (!amend && staged.length === 0) return;
     const full = description.trim() ? `${msg}\n\n${description.trim()}` : msg;
     setCommitting(true);
     setError(null);
     try {
-      await ipc.doCommit(repoId, full);
+      if (amend) {
+        await ipc.amendCommit(repoId, full);
+      } else {
+        await ipc.doCommit(repoId, full);
+      }
       setSummary("");
       setDescription("");
+      setAmend(false);
       onCommitSuccess();
     } catch (e) {
       setError(String(e));
@@ -326,7 +361,9 @@ export function StagingPanel({ repoId, onCommitSuccess, onFileClick }: Props) {
     }
   }
 
-  const canCommit = staged.length > 0 && summary.trim().length > 0 && !committing;
+  const canCommit = amend
+    ? summary.trim().length > 0 && !committing
+    : staged.length > 0 && summary.trim().length > 0 && !committing;
 
   return (
     <div className="flex flex-col h-full border-l border-border text-sm overflow-hidden">
@@ -478,6 +515,26 @@ export function StagingPanel({ repoId, onCommitSuccess, onFileClick }: Props) {
           rows={2}
           className="w-full resize-none rounded border border-border bg-background px-2 py-1.5 text-xs text-foreground placeholder:text-muted-foreground focus:outline-none focus:ring-1 focus:ring-ring"
         />
+        <label className="flex items-center gap-1.5 text-xs text-muted-foreground cursor-pointer select-none hover:text-foreground transition-colors">
+          <input
+            type="checkbox"
+            checked={amend}
+            onChange={toggleAmend}
+            disabled={disabled}
+            className="accent-primary"
+          />
+          Amend last commit
+        </label>
+        {amend && headIsPushed && (
+          <p className="text-xs text-yellow-500/80">
+            ⚠ This commit has been pushed — amending will rewrite shared history.
+          </p>
+        )}
+        {amend && staged.length === 0 && (
+          <p className="text-xs text-muted-foreground/70">
+            No staged changes — amending message only.
+          </p>
+        )}
         {error && <p className="text-xs text-destructive">{error}</p>}
         <Button
           size="sm"
@@ -486,7 +543,9 @@ export function StagingPanel({ repoId, onCommitSuccess, onFileClick }: Props) {
           disabled={!canCommit}
         >
           <GitCommitHorizontal size={13} />
-          Commit{staged.length > 0 ? ` ${staged.length} file${staged.length !== 1 ? "s" : ""}` : ""}
+          {amend
+            ? "Amend Commit"
+            : `Commit${staged.length > 0 ? ` ${staged.length} file${staged.length !== 1 ? "s" : ""}` : ""}`}
         </Button>
       </div>
     </div>

@@ -251,3 +251,29 @@ pub fn do_commit(repo_id: String, message: String, state: State<RepoState>) -> R
     repo.commit(Some("HEAD"), &sig, &sig, &message, &tree, &parents)?;
     Ok(())
 }
+
+/// Amend the HEAD commit: replace its tree with the current index and update the message.
+#[tauri::command]
+pub fn amend_commit(repo_id: String, message: String, state: State<RepoState>) -> Result<()> {
+    let repos = state.0.lock().unwrap();
+    let repo = repos.get(&repo_id).ok_or_else(|| Error::RepoNotFound(repo_id.clone()))?;
+
+    let head_commit = repo.head()?.peel_to_commit()?;
+
+    let mut index = repo.index()?;
+    let tree_oid = index.write_tree()?;
+    let tree = repo.find_tree(tree_oid)?;
+
+    let sig = repo.signature()?;
+
+    head_commit.amend(
+        Some("HEAD"),
+        None,           // keep original author (name, email, timestamp)
+        Some(&sig),     // update committer to current user
+        None,           // encoding (keep utf-8)
+        Some(&message),
+        Some(&tree),
+    )?;
+
+    Ok(())
+}

@@ -113,6 +113,7 @@ pub fn run() {
             commands::staging::stage_paths,
             commands::staging::unstage_paths,
             commands::staging::do_commit,
+            commands::staging::amend_commit,
             commands::merge::merge_commit,
             commands::merge::get_merge_status,
             commands::merge::resolve_ours,

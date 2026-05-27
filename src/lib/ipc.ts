@@ -188,6 +188,9 @@ export const ipc = {
   doCommit: (repoId: string, message: string) =>
     invoke<void>("do_commit", { repoId, message }),
 
+  amendCommit: (repoId: string, message: string) =>
+    invoke<void>("amend_commit", { repoId, message }),
+
   mergeCommit: (repoId: string, oid: string, label: string) =>
     invoke<MergeResult>("merge_commit", { repoId, oid, label }),
 

@@ -1,4 +1,4 @@
-import { useState } from "react";
+import { useState, useRef, useEffect } from "react";
 import { format } from "date-fns";
 import { Copy, Check } from "lucide-react";
 import { useCommitDiff } from "@/lib/queries";
@@ -16,13 +16,24 @@ export function CommitDetail({ repoId, item, onFileClick }: Props) {
   const { commit } = item;
   const { data: diff, isLoading } = useCommitDiff(repoId, commit.oid);
   const [copied, setCopied] = useState(false);
+  const copyTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+
+  // Clear the reset-timer if the component unmounts before it fires.
+  useEffect(() => () => {
+    if (copyTimerRef.current !== null) clearTimeout(copyTimerRef.current);
+  }, []);
 
   const date = new Date(commit.timestamp * 1000);
 
-  function copyHash() {
-    navigator.clipboard.writeText(commit.oid);
-    setCopied(true);
-    setTimeout(() => setCopied(false), 1500);
+  async function copyHash() {
+    try {
+      await navigator.clipboard.writeText(commit.oid);
+      if (copyTimerRef.current !== null) clearTimeout(copyTimerRef.current);
+      setCopied(true);
+      copyTimerRef.current = setTimeout(() => setCopied(false), 1500);
+    } catch {
+      // Clipboard unavailable — no UI change.
+    }
   }
 
   return (
