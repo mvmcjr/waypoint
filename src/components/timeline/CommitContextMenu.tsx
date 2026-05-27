@@ -39,6 +39,15 @@ export function CommitContextMenu({ item, onAction, children }: Props) {
     <ContextMenu>
       <ContextMenuTrigger>{children}</ContextMenuTrigger>
       <ContextMenuContent className="w-56">
+        <ContextMenuItem onClick={() => navigator.clipboard.writeText(short)}>
+          Copy short hash <span className="ml-auto font-mono text-xs text-muted-foreground">{short}</span>
+        </ContextMenuItem>
+        <ContextMenuItem onClick={() => navigator.clipboard.writeText(oid)}>
+          Copy full hash
+        </ContextMenuItem>
+
+        <ContextMenuSeparator />
+
         {localBranches.length > 0 ? (
           localBranches.map((branch) => (
             <ContextMenuItem key={branch} onClick={() => onAction({ kind: "checkout-branch", branchName: branch })}>
