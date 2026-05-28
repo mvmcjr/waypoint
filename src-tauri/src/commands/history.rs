@@ -56,7 +56,7 @@ pub fn walk_commits(
     }
 
     let limit = limit.unwrap_or(2000);
-    let mut nodes: Vec<CommitNode> = Vec::with_capacity(limit.min(512));
+    let mut nodes: Vec<CommitNode> = Vec::with_capacity(limit);
 
     for oid in walk.take(limit) {
         let oid = oid?;

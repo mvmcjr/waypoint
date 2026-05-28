@@ -57,7 +57,7 @@ export const Timeline = forwardRef<TimelineHandle, Props>(function Timeline(
     () => new Set(refs.filter((r) => r.kind === "tag" && r.is_pushed).map((r) => r.shorthand)),
     [refs],
   );
-  const stashOids = new Set(stashes.map((s) => s.oid));
+  const stashOids = useMemo(() => new Set(stashes.map((s) => s.oid)), [stashes]);
 
   const [refsWidth, setRefsWidth] = useState(() =>
     readStored(LS_REFS_WIDTH, REFS_COL_WIDTH, REFS_WIDTH_MIN, REFS_WIDTH_MAX),
@@ -65,6 +65,19 @@ export const Timeline = forwardRef<TimelineHandle, Props>(function Timeline(
   const [graphExtra, setGraphExtra] = useState(() =>
     readStored(LS_GRAPH_EXTRA, 0, GRAPH_EXTRA_MIN, GRAPH_EXTRA_MAX),
   );
+
+  // Stable callbacks — ref pattern so CommitRow.memo never sees a changed function reference.
+  const onSelectOidRef = useRef(onSelectOid);
+  onSelectOidRef.current = onSelectOid;
+  const stableSelectOid = useCallback((oid: string) => onSelectOidRef.current(oid), []);
+
+  const onCommitActionRef = useRef(onCommitAction);
+  onCommitActionRef.current = onCommitAction;
+  const stableCommitAction = useCallback((action: CommitAction) => onCommitActionRef.current(action), []);
+
+  const onRefActionRef = useRef(onRefAction);
+  onRefActionRef.current = onRefAction;
+  const stableRefAction = useCallback((action: RefAction) => onRefActionRef.current?.(action), []);
 
   // Tracks the active drag's cleanup so it can be called on unmount.
   const dragCleanupRef = useRef<(() => void) | null>(null);
@@ -122,17 +135,17 @@ export const Timeline = forwardRef<TimelineHandle, Props>(function Timeline(
     );
   }
 
-  const maxLanes = commits.reduce((m, c) => {
+  const maxLanes = useMemo(() => commits.reduce((m, c) => {
     let n = Math.max(m, c.lane + 1);
     for (const e of c.edges) n = Math.max(n, e.from_lane + 1, e.to_lane + 1);
     return n;
-  }, 1);
+  }, 1), [commits]);
   const naturalGraphWidth = searchActive ? 0 : maxLanes * LANE_WIDTH + LANE_WIDTH;
   const graphColWidth = searchActive ? 0 : naturalGraphWidth + graphExtra;
 
   const mergeInProgress = !!status?.merge_in_progress;
   const hasWip = !!status && ((status.staged_count + status.unstaged_count) > 0 || mergeInProgress);
-  const headItem = commits.find((c) => c.commit.oid === headOid);
+  const headItem = useMemo(() => commits.find((c) => c.commit.oid === headOid), [commits, headOid]);
   const headLane = headItem?.lane ?? 0;
   const headColorIdx = headItem?.color_idx ?? 0;
 
@@ -175,7 +188,7 @@ export const Timeline = forwardRef<TimelineHandle, Props>(function Timeline(
                 startRow={startRow}
                 visibleRows={visibleRows}
                 width={naturalGraphWidth}
-                onSelectOid={onSelectOid}
+                onSelectOid={stableSelectOid}
                 selectedOid={selectedOid}
                 headOid={headOid}
                 hasWip={hasWip}
@@ -200,7 +213,7 @@ export const Timeline = forwardRef<TimelineHandle, Props>(function Timeline(
                 <CommitContextMenu
                   key={item.commit.oid}
                   item={item}
-                  onAction={onCommitAction}
+                  onAction={stableCommitAction}
                 >
                   <CommitRow
                     item={item}
@@ -211,8 +224,8 @@ export const Timeline = forwardRef<TimelineHandle, Props>(function Timeline(
                     headBranch={headBranch}
                     pushedTagNames={pushedTagNames}
                     isStash={isStash}
-                    onRefAction={onRefAction}
-                    onClick={() => onSelectOid(item.commit.oid)}
+                    onRefAction={stableRefAction}
+                    onSelect={stableSelectOid}
                   />
                 </CommitContextMenu>
               );

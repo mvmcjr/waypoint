@@ -245,7 +245,10 @@ export function RepoView() {
     );
   }, [commits, searchFilter]);
 
-  const selectedItem = filteredCommits.find((c) => c.commit.oid === selectedOid) ?? null;
+  const selectedItem = useMemo(
+    () => filteredCommits.find((c) => c.commit.oid === selectedOid) ?? null,
+    [filteredCommits, selectedOid],
+  );
 
   function handleRefSelect(ref: RefInfo) {
     if (!ref.target_oid) return;

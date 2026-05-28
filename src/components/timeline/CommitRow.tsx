@@ -1,3 +1,4 @@
+import { memo } from "react";
 import { formatDistanceToNow } from "date-fns";
 import type { PositionedCommit } from "@/lib/ipc";
 import { RefBadge, groupRefs, type RefAction } from "./RefBadge";
@@ -13,10 +14,10 @@ interface Props {
   pushedTagNames?: Set<string>;
   isStash?: boolean;
   onRefAction?: (action: RefAction) => void;
-  onClick: () => void;
+  onSelect: (oid: string) => void;
 }
 
-export function CommitRow({ item, refsWidth, graphWidth, isSelected, isHead, headBranch, pushedTagNames, isStash, onRefAction, onClick }: Props) {
+export const CommitRow = memo(function CommitRow({ item, refsWidth, graphWidth, isSelected, isHead, headBranch, pushedTagNames, isStash, onRefAction, onSelect }: Props) {
   const { commit } = item;
   const relative = formatDistanceToNow(new Date(commit.timestamp * 1000), { addSuffix: true });
   const refGroups = groupRefs(commit.refs, item.commit.local_branches, item.commit.remote_branches, headBranch, pushedTagNames);
@@ -38,7 +39,7 @@ export function CommitRow({ item, refsWidth, graphWidth, isSelected, isHead, hea
   ].join(" ");
 
   return (
-    <div onClick={onClick} style={{ height: ROW_HEIGHT }} className={rowClass}>
+    <div onClick={() => onSelect(commit.oid)} style={{ height: ROW_HEIGHT }} className={rowClass}>
 
       {/* Left: refs column */}
       <div
@@ -79,4 +80,4 @@ export function CommitRow({ item, refsWidth, graphWidth, isSelected, isHead, hea
       </div>
     </div>
   );
-}
+});

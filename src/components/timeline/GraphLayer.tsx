@@ -92,6 +92,7 @@ export function GraphLayer({ commits, startRow, visibleRows, width, onSelectOid,
   const edges: { fromX: number; fromY: number; toX: number; toY: number; color: string; isDashed: boolean }[] = [];
 
   for (const item of commits) {
+    if (item.row >= endRow) break; // commits are row-ordered; nothing past here can enter the viewport
     let dashed: boolean | null = null;
     for (const e of item.edges) {
       if (e.from_row >= endRow || e.to_row < startRow) continue;
