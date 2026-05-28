@@ -127,6 +127,13 @@ export const Timeline = forwardRef<TimelineHandle, Props>(function Timeline(
     },
   }));
 
+  const maxLanes = useMemo(() => commits.reduce((m, c) => {
+    let n = Math.max(m, c.lane + 1);
+    for (const e of c.edges) n = Math.max(n, e.from_lane + 1, e.to_lane + 1);
+    return n;
+  }, 1), [commits]);
+  const headItem = useMemo(() => commits.find((c) => c.commit.oid === headOid), [commits, headOid]);
+
   if (commits.length === 0) {
     return (
       <div className="flex-1 flex items-center justify-center text-muted-foreground text-sm">
@@ -135,17 +142,11 @@ export const Timeline = forwardRef<TimelineHandle, Props>(function Timeline(
     );
   }
 
-  const maxLanes = useMemo(() => commits.reduce((m, c) => {
-    let n = Math.max(m, c.lane + 1);
-    for (const e of c.edges) n = Math.max(n, e.from_lane + 1, e.to_lane + 1);
-    return n;
-  }, 1), [commits]);
   const naturalGraphWidth = searchActive ? 0 : maxLanes * LANE_WIDTH + LANE_WIDTH;
   const graphColWidth = searchActive ? 0 : naturalGraphWidth + graphExtra;
 
   const mergeInProgress = !!status?.merge_in_progress;
   const hasWip = !!status && ((status.staged_count + status.unstaged_count) > 0 || mergeInProgress);
-  const headItem = useMemo(() => commits.find((c) => c.commit.oid === headOid), [commits, headOid]);
   const headLane = headItem?.lane ?? 0;
   const headColorIdx = headItem?.color_idx ?? 0;
 
