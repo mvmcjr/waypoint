@@ -362,6 +362,112 @@ function makeTags() {
   log('tags', dir);
 }
 
+/**
+ * LARGE-LINEAR
+ * 2 000 sequential commits on one branch — no lanes, no merges.
+ * Uses git-fast-import for speed (~1 s vs ~60 s with shell loops).
+ * Tests timeline scrolling, virtualization performance, and the 2 000-commit limit.
+ */
+function makeLargeLinear() {
+  const dir = fresh('large-linear');
+  initRepo(dir);
+
+  const N = 2000;
+  const parts = [];
+
+  for (let i = 1; i <= N; i++) {
+    const content    = `// auto-generated revision ${i}\nexport const REV = ${i};\n`;
+    const msg        = `chore: revision ${i}`;
+    const ts         = 1700000000 + i * 60;
+    const blobMark   = i * 2 - 1;
+    const commitMark = i * 2;
+
+    parts.push(
+      `blob`,
+      `mark :${blobMark}`,
+      `data ${Buffer.byteLength(content)}`,
+      content,
+      `commit refs/heads/main`,
+      `mark :${commitMark}`,
+      `committer Fixture User <fixture@example.com> ${ts} +0000`,
+      `data ${Buffer.byteLength(msg)}`,
+      msg,
+      ...(i > 1 ? [`from :${(i - 1) * 2}`] : []),
+      `M 100644 :${blobMark} src/module.js`,
+      ``,  // blank line terminates commit
+    );
+  }
+
+  execSync('git fast-import --quiet', {
+    cwd: dir,
+    input: parts.join('\n'),
+    stdio: ['pipe', 'pipe', 'pipe'],
+    env: { ...process.env, ...GIT_ENV },
+  });
+  run('git checkout -f main', dir);
+
+  log('large-linear', dir, `(${N} commits, 1 lane)`);
+}
+
+/**
+ * LARGE-BRANCHY
+ * ~250 commits across a main branch and 10 long-running feature branches that
+ * are all active simultaneously before merging back.  Forces 10+ concurrent
+ * graph lanes — stress-tests lane-assignment and GraphLayer rendering.
+ * Takes ~15-25 s to generate on first run.
+ */
+function makeLargeBranchy() {
+  const dir = fresh('large-branchy');
+  initRepo(dir);
+
+  const BRANCH_COUNT   = 10;
+  const BRANCH_COMMITS = 20;
+  const MAIN_BETWEEN   = 2;
+
+  write(dir, 'app.js', 'export const VERSION = "0.1.0";\n');
+  run('git add .', dir);
+  run('git commit -m "feat: initial release"', dir);
+
+  for (let i = 1; i <= 10; i++) {
+    write(dir, 'app.js', `export const VERSION = "0.1.${i}";\n`);
+    run('git add .', dir);
+    run(`git commit -m "fix: patch ${i}"`, dir);
+  }
+
+  // Create all branches at current HEAD so they are simultaneously active.
+  const branches = Array.from({ length: BRANCH_COUNT }, (_, i) => `feature/item-${i + 1}`);
+
+  for (const branch of branches) {
+    const safeName = branch.replace('/', '-');
+    run(`git checkout -b ${branch}`, dir);
+    for (let j = 1; j <= BRANCH_COMMITS; j++) {
+      write(dir, `src/${safeName}.js`, `// ${branch} step ${j}\nexport const STEP = ${j};\n`);
+      run('git add .', dir);
+      run(`git commit -m "feat(${branch.split('/')[1]}): step ${j}"`, dir);
+    }
+    run('git checkout main', dir);
+  }
+
+  // Advance main between merges so branches remain visible in the graph.
+  for (let i = 0; i < branches.length; i++) {
+    for (let k = 1; k <= MAIN_BETWEEN; k++) {
+      const ver = `1.${i * MAIN_BETWEEN + k}.0`;
+      write(dir, 'app.js', `export const VERSION = "${ver}";\n`);
+      run('git add .', dir);
+      run(`git commit -m "feat: release ${ver}"`, dir);
+    }
+    run(`git merge --no-ff ${branches[i]} -m "Merge ${branches[i]} into main"`, dir);
+  }
+
+  for (let i = 1; i <= 5; i++) {
+    write(dir, 'app.js', `export const VERSION = "2.${i}.0";\n`);
+    run('git add .', dir);
+    run(`git commit -m "feat: release 2.${i}.0"`, dir);
+  }
+
+  log('large-branchy', dir, `(${BRANCH_COUNT} simultaneous lanes)`);
+}
+
 // ── Runner ────────────────────────────────────────────────────────────────────
 
 function log(name, dir, note = '') {
@@ -378,6 +484,8 @@ const SCENARIOS = [
   ['ahead-of-remote',      makeAheadOfRemote],
   ['stash',                makeStash],
   ['tags',                 makeTags],
+  ['large-linear',         makeLargeLinear],
+  ['large-branchy',        makeLargeBranchy],
 ];
 
 mkdirSync(REPOS_DIR, { recursive: true });
