@@ -52,12 +52,12 @@ export const useStore = create<AppState>((set) => ({
   closeTab: (id) =>
     set((state) => {
       const newTabs = state.tabs.filter((t) => t.id !== id);
-      let newActiveId = state.activeTabId;
       if (state.activeTabId === id) {
         const idx = state.tabs.findIndex((t) => t.id === id);
-        newActiveId = newTabs[Math.max(0, idx - 1)]?.id ?? null;
+        const newActiveId = newTabs[Math.max(0, idx - 1)]?.id ?? null;
+        return { tabs: newTabs, activeTabId: newActiveId, ...BLANK_VIEW };
       }
-      return { tabs: newTabs, activeTabId: newActiveId, ...BLANK_VIEW };
+      return { tabs: newTabs };
     }),
 
   switchTab: (id) => set((state) =>
