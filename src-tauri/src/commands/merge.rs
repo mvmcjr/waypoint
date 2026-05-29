@@ -338,49 +338,49 @@ pub fn abort_merge(repo_id: String, state: State<RepoState>) -> Result<()> {
     Ok(())
 }
 
+fn cherry_pick_impl(repo: &git2::Repository, oid_str: &str) -> Result<CherryPickResult> {
+    let git_oid = git2::Oid::from_str(oid_str).map_err(|_| Error::CommitNotFound(oid_str.to_string()))?;
+    let commit = repo.find_commit(git_oid).map_err(|_| Error::CommitNotFound(oid_str.to_string()))?;
+
+    repo.cherrypick(&commit, None)?;
+
+    let mut index = repo.index()?;
+    index.write()?;
+
+    if index.has_conflicts() {
+        let conflicted = collect_conflict_paths(&index)?;
+        let git_dir = repo.path();
+        std::fs::write(git_dir.join("CHERRY_PICK_HEAD"), format!("{}\n", git_oid)).map_err(io_err)?;
+        let msg = commit.message().unwrap_or("").to_string();
+        std::fs::write(git_dir.join("CHERRY_PICK_MSG"), &msg).map_err(io_err)?;
+        Ok(CherryPickResult { kind: "conflicts".into(), conflicted })
+    } else {
+        let sig = repo.signature()?;
+        let head_commit = repo.head()?.peel_to_commit()?;
+        let tree_oid = index.write_tree()?;
+        let tree = repo.find_tree(tree_oid)?;
+        let message = commit.message().unwrap_or("cherry-picked commit");
+        repo.commit(Some("HEAD"), &sig, &sig, message, &tree, &[&head_commit])?;
+        Ok(CherryPickResult { kind: "applied".into(), conflicted: vec![] })
+    }
+}
+
 /// Apply the given commit onto HEAD (cherry-pick).
 /// Returns `kind = "applied"` on success or `kind = "conflicts"` with the conflicted paths.
 #[tauri::command]
 pub fn cherry_pick(repo_id: String, oid: String, state: State<RepoState>) -> Result<CherryPickResult> {
     let mut repos = state.0.lock().unwrap();
 
-    // Phase 1 — auto-stash (needs &mut repo).
     let autostashed = {
         let repo = repos.get_mut(&repo_id).ok_or_else(|| Error::RepoNotFound(repo_id.clone()))?;
         auto_stash(repo)?
     };
 
-    // Phase 2 — cherry-pick (only needs &repo).
-    let result: CherryPickResult = {
+    let result = {
         let repo = repos.get(&repo_id).ok_or_else(|| Error::RepoNotFound(repo_id.clone()))?;
-
-        let git_oid = git2::Oid::from_str(&oid).map_err(|_| Error::CommitNotFound(oid.clone()))?;
-        let commit = repo.find_commit(git_oid).map_err(|_| Error::CommitNotFound(oid.clone()))?;
-
-        repo.cherrypick(&commit, None)?;
-
-        let mut index = repo.index()?;
-        index.write()?;
-
-        if index.has_conflicts() {
-            let conflicted = collect_conflict_paths(&index)?;
-            let git_dir = repo.path();
-            std::fs::write(git_dir.join("CHERRY_PICK_HEAD"), format!("{}\n", git_oid)).map_err(io_err)?;
-            let msg = commit.message().unwrap_or("").to_string();
-            std::fs::write(git_dir.join("CHERRY_PICK_MSG"), &msg).map_err(io_err)?;
-            CherryPickResult { kind: "conflicts".into(), conflicted }
-        } else {
-            let sig = repo.signature()?;
-            let head_commit = repo.head()?.peel_to_commit()?;
-            let tree_oid = index.write_tree()?;
-            let tree = repo.find_tree(tree_oid)?;
-            let message = commit.message().unwrap_or("cherry-picked commit");
-            repo.commit(Some("HEAD"), &sig, &sig, message, &tree, &[&head_commit])?;
-            CherryPickResult { kind: "applied".into(), conflicted: vec![] }
-        }
+        cherry_pick_impl(repo, &oid)?
     };
 
-    // Phase 3 — pop autostash if applied cleanly.
     if autostashed && result.kind != "conflicts" {
         let repo = repos.get_mut(&repo_id).ok_or_else(|| Error::RepoNotFound(repo_id.clone()))?;
         auto_pop(repo);
@@ -417,31 +417,186 @@ pub fn resolve_with_content(
     Ok(())
 }
 
+fn finish_cherry_pick_impl(repo: &git2::Repository, message: &str) -> Result<()> {
+    let mut index = repo.index()?;
+    if index.has_conflicts() {
+        return Err(Error::InvalidArg("Cannot commit: there are unresolved conflicts.".into()));
+    }
+
+    let sig = repo.signature()?;
+    let head_commit = repo.head()?.peel_to_commit()?;
+    let tree_oid = index.write_tree()?;
+    let tree = repo.find_tree(tree_oid)?;
+
+    repo.commit(Some("HEAD"), &sig, &sig, message.trim(), &tree, &[&head_commit])?;
+    Ok(())
+}
+
 /// Create the cherry-pick commit after all conflicts are resolved (single-parent).
 #[tauri::command]
 pub fn finish_cherry_pick(repo_id: String, message: String, state: State<RepoState>) -> Result<()> {
     let mut repos = state.0.lock().unwrap();
 
-    // Commit phase.
     {
         let repo = repos.get(&repo_id).ok_or_else(|| Error::RepoNotFound(repo_id.clone()))?;
-
-        let mut index = repo.index()?;
-        if index.has_conflicts() {
-            return Err(Error::InvalidArg("Cannot commit: there are unresolved conflicts.".into()));
-        }
-
-        let sig = repo.signature()?;
-        let head_commit = repo.head()?.peel_to_commit()?;
-        let tree_oid = index.write_tree()?;
-        let tree = repo.find_tree(tree_oid)?;
-
-        repo.commit(Some("HEAD"), &sig, &sig, message.trim(), &tree, &[&head_commit])?;
+        finish_cherry_pick_impl(repo, &message)?;
         cleanup_merge_state(repo);
     }
 
-    // Pop autostash.
     let repo = repos.get_mut(&repo_id).ok_or_else(|| Error::RepoNotFound(repo_id.clone()))?;
     auto_pop(repo);
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use git2::{Repository, build::CheckoutBuilder};
+    use std::path::{Path, PathBuf};
+
+    fn make_temp_dir() -> PathBuf {
+        let id = uuid::Uuid::new_v4();
+        let dir = std::env::temp_dir().join(format!("wpt_test_{}", id));
+        std::fs::create_dir_all(&dir).unwrap();
+        dir
+    }
+
+    fn make_repo() -> (PathBuf, Repository) {
+        let dir = make_temp_dir();
+        let repo = Repository::init(&dir).unwrap();
+        {
+            let mut cfg = repo.config().unwrap();
+            cfg.set_str("user.name", "Test User").unwrap();
+            cfg.set_str("user.email", "test@example.com").unwrap();
+        }
+        (dir, repo)
+    }
+
+    fn write_commit(repo: &Repository, filename: &str, content: &str, msg: &str) -> git2::Oid {
+        let workdir = repo.workdir().unwrap().to_path_buf();
+        std::fs::write(workdir.join(filename), content).unwrap();
+        let mut index = repo.index().unwrap();
+        index.add_path(Path::new(filename)).unwrap();
+        index.write().unwrap();
+        let tree_oid = index.write_tree().unwrap();
+        let tree = repo.find_tree(tree_oid).unwrap();
+        let sig = repo.signature().unwrap();
+        let parents: Vec<git2::Commit> = match repo.head() {
+            Ok(head) => vec![head.peel_to_commit().unwrap()],
+            Err(_) => vec![],
+        };
+        let parent_refs: Vec<&git2::Commit> = parents.iter().collect();
+        repo.commit(Some("HEAD"), &sig, &sig, msg, &tree, &parent_refs).unwrap()
+    }
+
+    fn checkout(repo: &Repository, branch_ref: &str) {
+        repo.set_head(branch_ref).unwrap();
+        repo.checkout_head(Some(CheckoutBuilder::new().force())).unwrap();
+    }
+
+    #[test]
+    fn cherry_pick_applies_clean_commit() {
+        let (_dir, repo) = make_repo();
+        let root = write_commit(&repo, "base.txt", "base\n", "initial");
+        let root_commit = repo.find_commit(root).unwrap();
+        let main_ref = repo.head().unwrap().name().unwrap().to_string();
+
+        repo.branch("feat", &root_commit, false).unwrap();
+        checkout(&repo, "refs/heads/feat");
+        let feat_oid = write_commit(&repo, "new_feature.txt", "feature\n", "feat: add feature");
+
+        checkout(&repo, &main_ref);
+
+        let result = cherry_pick_impl(&repo, &feat_oid.to_string()).unwrap();
+
+        assert_eq!(result.kind, "applied");
+        assert!(result.conflicted.is_empty());
+        let head = repo.head().unwrap().peel_to_commit().unwrap();
+        assert_eq!(head.message().unwrap(), "feat: add feature");
+    }
+
+    #[test]
+    fn cherry_pick_detects_conflicts() {
+        let (_dir, repo) = make_repo();
+        let root = write_commit(&repo, "shared.txt", "original\n", "initial");
+        let root_commit = repo.find_commit(root).unwrap();
+        let main_ref = repo.head().unwrap().name().unwrap().to_string();
+
+        repo.branch("feat", &root_commit, false).unwrap();
+        checkout(&repo, "refs/heads/feat");
+        let feat_oid = write_commit(&repo, "shared.txt", "feat change\n", "feat: modify shared");
+
+        checkout(&repo, &main_ref);
+        let _ = write_commit(&repo, "shared.txt", "main change\n", "main: modify shared");
+
+        let result = cherry_pick_impl(&repo, &feat_oid.to_string()).unwrap();
+
+        assert_eq!(result.kind, "conflicts");
+        assert!(result.conflicted.iter().any(|p| p == "shared.txt"));
+        assert!(repo.path().join("CHERRY_PICK_HEAD").exists());
+        assert!(repo.path().join("CHERRY_PICK_MSG").exists());
+    }
+
+    #[test]
+    fn cherry_pick_unknown_oid_errors() {
+        let (_dir, repo) = make_repo();
+        let _ = write_commit(&repo, "f.txt", "content\n", "initial");
+
+        let err = cherry_pick_impl(&repo, "deadbeefdeadbeefdeadbeefdeadbeefdeadbeef").unwrap_err();
+        assert!(matches!(err, Error::CommitNotFound(_)));
+    }
+
+    #[test]
+    fn finish_cherry_pick_rejects_unresolved_conflicts() {
+        let (_dir, repo) = make_repo();
+        let root = write_commit(&repo, "shared.txt", "original\n", "initial");
+        let root_commit = repo.find_commit(root).unwrap();
+        let main_ref = repo.head().unwrap().name().unwrap().to_string();
+
+        repo.branch("feat", &root_commit, false).unwrap();
+        checkout(&repo, "refs/heads/feat");
+        let feat_oid = write_commit(&repo, "shared.txt", "feat change\n", "feat commit");
+
+        checkout(&repo, &main_ref);
+        let _ = write_commit(&repo, "shared.txt", "main change\n", "main commit");
+
+        let cp = cherry_pick_impl(&repo, &feat_oid.to_string()).unwrap();
+        assert_eq!(cp.kind, "conflicts");
+
+        let err = finish_cherry_pick_impl(&repo, "resolved").unwrap_err();
+        match err {
+            Error::InvalidArg(msg) => assert!(msg.contains("unresolved conflicts")),
+            other => panic!("expected InvalidArg, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn finish_cherry_pick_commits_after_resolve() {
+        let (_dir, repo) = make_repo();
+        let root = write_commit(&repo, "shared.txt", "original\n", "initial");
+        let root_commit = repo.find_commit(root).unwrap();
+        let main_ref = repo.head().unwrap().name().unwrap().to_string();
+
+        repo.branch("feat", &root_commit, false).unwrap();
+        checkout(&repo, "refs/heads/feat");
+        let feat_oid = write_commit(&repo, "shared.txt", "feat change\n", "feat commit");
+
+        checkout(&repo, &main_ref);
+        let _ = write_commit(&repo, "shared.txt", "main change\n", "main commit");
+
+        cherry_pick_impl(&repo, &feat_oid.to_string()).unwrap();
+
+        // Resolve: write clean content and stage
+        let workdir = repo.workdir().unwrap().to_path_buf();
+        std::fs::write(workdir.join("shared.txt"), "resolved content\n").unwrap();
+        let mut index = repo.index().unwrap();
+        index.add_path(Path::new("shared.txt")).unwrap();
+        index.write().unwrap();
+
+        finish_cherry_pick_impl(&repo, "cherry-pick: resolved").unwrap();
+
+        let head = repo.head().unwrap().peel_to_commit().unwrap();
+        assert_eq!(head.message().unwrap(), "cherry-pick: resolved");
+        assert_eq!(head.parent_count(), 1);
+    }
 }
