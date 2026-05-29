@@ -228,6 +228,126 @@ function makeCherryPickConflict() {
 }
 
 /**
+ * CHERRY-PICK READY
+ * Clean repo (no pending operations) with a `donor` branch whose tip commit
+ * conflicts with main when cherry-picked. Open in Waypoint, right-click the
+ * donor commit, choose "Cherry-pick", and the conflict panel should appear.
+ *
+ * The conflict is spread across multiple lines so the full-file context view
+ * in the hunk picker has enough surrounding code to be meaningful.
+ */
+function makeCherryPickReady() {
+  const dir = fresh('cherry-pick-ready');
+  initRepo(dir);
+
+  // ── Shared baseline ──────────────────────────────────────────────────────
+  write(dir, 'README.md', '# Cherry-pick Ready\n\nOpen in Waypoint, right-click the "feat: use staging config" commit on the donor branch, and cherry-pick it onto main to trigger a conflict.\n');
+
+  write(dir, 'src/config.js', [
+    '// Application configuration',
+    'export const API_URL  = "https://api.example.com";',
+    'export const TIMEOUT  = 5000;',
+    'export const RETRIES  = 3;',
+    'export const VERSION  = "1.0.0";',
+    'export const DEBUG    = false;',
+    '',
+  ].join('\n'));
+
+  write(dir, 'src/utils.js', [
+    'export function sleep(ms) {',
+    '  return new Promise((resolve) => setTimeout(resolve, ms));',
+    '}',
+    '',
+    'export function clamp(n, min, max) {',
+    '  return Math.min(Math.max(n, min), max);',
+    '}',
+    '',
+  ].join('\n'));
+
+  write(dir, 'src/api.js', [
+    'import { API_URL, TIMEOUT } from "./config.js";',
+    '',
+    'export async function fetchData(path) {',
+    '  const controller = new AbortController();',
+    '  const timer = setTimeout(() => controller.abort(), TIMEOUT);',
+    '  try {',
+    '    const res = await fetch(`${API_URL}${path}`, { signal: controller.signal });',
+    '    return res.json();',
+    '  } finally {',
+    '    clearTimeout(timer);',
+    '  }',
+    '}',
+    '',
+  ].join('\n'));
+
+  run('git add .', dir);
+  run('git commit -m "Initial commit: add config, utils, and api"', dir);
+
+  // ── Donor branch ─────────────────────────────────────────────────────────
+  // This commit modifies config.js in a way that will conflict with main.
+  run('git checkout -b donor', dir);
+
+  write(dir, 'src/config.js', [
+    '// Application configuration',
+    'export const API_URL  = "https://api.staging.example.com";',
+    'export const TIMEOUT  = 3000;',
+    'export const RETRIES  = 5;',
+    'export const VERSION  = "1.0.0";',
+    'export const DEBUG    = true;',
+    '',
+  ].join('\n'));
+
+  // Also add a file that won't conflict — applies cleanly during cherry-pick.
+  write(dir, 'src/logger.js', [
+    'export function log(level, msg) {',
+    '  console[level](`[${level.toUpperCase()}] ${msg}`);',
+    '}',
+    '',
+  ].join('\n'));
+
+  run('git add .', dir);
+  run('git commit -m "feat: use staging config and add logger"', dir);
+
+  // ── Main branch: diverging changes on the same lines ─────────────────────
+  run('git checkout main', dir);
+
+  write(dir, 'src/config.js', [
+    '// Application configuration',
+    'export const API_URL  = "https://api.production.example.com";',
+    'export const TIMEOUT  = 10000;',
+    'export const RETRIES  = 3;',
+    'export const VERSION  = "1.1.0";',
+    'export const DEBUG    = false;',
+    '',
+  ].join('\n'));
+
+  run('git add .', dir);
+  run('git commit -m "release: point to production API, raise timeout, bump version"', dir);
+
+  // A second commit on main so the timeline has more to show.
+  write(dir, 'src/utils.js', [
+    'export function sleep(ms) {',
+    '  return new Promise((resolve) => setTimeout(resolve, ms));',
+    '}',
+    '',
+    'export function clamp(n, min, max) {',
+    '  return Math.min(Math.max(n, min), max);',
+    '}',
+    '',
+    'export function formatDuration(ms) {',
+    '  return ms < 1000 ? `${ms}ms` : `${(ms / 1000).toFixed(1)}s`;',
+    '}',
+    '',
+  ].join('\n'));
+
+  run('git add .', dir);
+  run('git commit -m "feat: add formatDuration util"', dir);
+
+  log('cherry-pick-ready', dir,
+    '(right-click "feat: use staging config" on donor → cherry-pick → conflict)');
+}
+
+/**
  * DETACHED HEAD
  * HEAD is checked out at a specific commit (not a branch).
  * Tests the amber "detached" indicator in the toolbar.
@@ -480,6 +600,7 @@ const SCENARIOS = [
   ['staged',               makeStaged],
   ['merge-conflict',       makeMergeConflict],
   ['cherry-pick-conflict', makeCherryPickConflict],
+  ['cherry-pick-ready',    makeCherryPickReady],
   ['detached-head',        makeDetachedHead],
   ['ahead-of-remote',      makeAheadOfRemote],
   ['stash',                makeStash],
