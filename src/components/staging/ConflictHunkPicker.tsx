@@ -248,6 +248,23 @@ function ResultLine({ text, lineNo }: { text: string; lineNo: number }) {
   );
 }
 
+// ── Context lines (shown between conflict hunks in the full-file view) ────────
+
+function ContextLines({ lines }: { lines: string[] }) {
+  const display = lines[lines.length - 1] === "" ? lines.slice(0, -1) : lines;
+  if (display.length === 0) return null;
+  return (
+    <div className="font-mono text-[11px] leading-[1.7]">
+      {display.map((line, i) => (
+        <div key={i} className="flex items-start text-foreground/40 hover:bg-white/[0.02]">
+          <span className="w-10 shrink-0 select-none text-right pr-3 text-muted-foreground/20 border-r border-border/10">·</span>
+          <span className="pl-3 whitespace-pre overflow-hidden">{line || "​"}</span>
+        </div>
+      ))}
+    </div>
+  );
+}
+
 // ── Hunk: stacked ─────────────────────────────────────────────────────────────
 
 function StackedHunk({
@@ -700,26 +717,34 @@ export function ConflictHunkPicker({ repoId, path, viewMode, onResolved }: Props
 
       {/* ── Content ── */}
       {activeTab === "conflicts" ? (
-        <div className="flex-1 overflow-y-auto min-h-0 px-4 pb-4 pt-3">
-          {conflicts.map((seg, num) =>
-            viewMode === "side-by-side" ? (
-              <SideBySideHunk
-                key={seg.idx} seg={seg} num={num + 1} total={conflicts.length}
-                resolution={resolutions.get(seg.idx)}
-                onSetMode={(mode) => setMode(seg.idx, mode)}
-                onToggleLine={(side, li) => toggleLine(seg, side, li)}
-                onApprove={() => approveHunk(seg.idx)}
-              />
-            ) : (
-              <StackedHunk
-                key={seg.idx} seg={seg} num={num + 1} total={conflicts.length}
-                resolution={resolutions.get(seg.idx)}
-                onSetMode={(mode) => setMode(seg.idx, mode)}
-                onToggleLine={(side, li) => toggleLine(seg, side, li)}
-                onApprove={() => approveHunk(seg.idx)}
-              />
-            ),
-          )}
+        <div className="flex-1 overflow-y-auto min-h-0">
+          {segments.map((seg, segIdx) => {
+            if (seg.kind === "context") {
+              return <ContextLines key={segIdx} lines={seg.lines} />;
+            }
+            return (
+              <div key={seg.idx} className="px-4 pt-3">
+                {viewMode === "side-by-side" ? (
+                  <SideBySideHunk
+                    seg={seg} num={seg.idx + 1} total={conflicts.length}
+                    resolution={resolutions.get(seg.idx)}
+                    onSetMode={(mode) => setMode(seg.idx, mode)}
+                    onToggleLine={(side, li) => toggleLine(seg, side, li)}
+                    onApprove={() => approveHunk(seg.idx)}
+                  />
+                ) : (
+                  <StackedHunk
+                    seg={seg} num={seg.idx + 1} total={conflicts.length}
+                    resolution={resolutions.get(seg.idx)}
+                    onSetMode={(mode) => setMode(seg.idx, mode)}
+                    onToggleLine={(side, li) => toggleLine(seg, side, li)}
+                    onApprove={() => approveHunk(seg.idx)}
+                  />
+                )}
+              </div>
+            );
+          })}
+          <div className="pb-4" />
         </div>
       ) : (
         <ResultFilePreview segments={segments} resolutions={resolutions} />

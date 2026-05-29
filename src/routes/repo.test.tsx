@@ -49,6 +49,7 @@ vi.mock("@/components/detail/CommitDetail", () => ({
 
 vi.mock("@/components/staging/ConflictPanel", () => ({
   ConflictPanel: () => <div data-testid="conflict-panel">ConflictPanel</div>,
+  MergeCommitPanel: () => <div data-testid="merge-commit-panel">MergeCommitPanel</div>,
 }));
 
 vi.mock("@/components/detail/StagingFileDiffPanel", () => ({

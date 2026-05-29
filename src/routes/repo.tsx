@@ -8,7 +8,7 @@ import { CommitDetail } from "@/components/detail/CommitDetail";
 import { FileDiffPanel } from "@/components/detail/FileDiffPanel";
 import { StagingFileDiffPanel } from "@/components/detail/StagingFileDiffPanel";
 import { StagingPanel } from "@/components/staging/StagingPanel";
-import { ConflictPanel } from "@/components/staging/ConflictPanel";
+import { ConflictPanel, MergeCommitPanel } from "@/components/staging/ConflictPanel";
 import { Input } from "@/components/ui/input";
 import {
   CheckoutCommitDialog,
@@ -420,7 +420,7 @@ export function RepoView() {
               onClose={() => setFocusedStagingFile(null)}
             />
           ) : wipSelected && repoId && mergeInProgress ? (
-            <ConflictPanel repoId={repoId} onDone={handleCommitSuccess} />
+            <ConflictPanel repoId={repoId} />
           ) : (
             <Timeline
               ref={timelineRef}
@@ -438,14 +438,18 @@ export function RepoView() {
             />
           )}
 
-          {/* Right panel: staging view or commit detail */}
-          {wipSelected && repoId && !mergeInProgress && (
+          {/* Right panel: merge commit widget or staging view */}
+          {wipSelected && repoId && (
             <div className="w-80 shrink-0">
-              <StagingPanel
-                repoId={repoId}
-                onCommitSuccess={handleCommitSuccess}
-                onFileClick={(path, section) => setFocusedStagingFile({ repoId: repoId!, path, section })}
-              />
+              {mergeInProgress ? (
+                <MergeCommitPanel repoId={repoId} onDone={handleCommitSuccess} />
+              ) : (
+                <StagingPanel
+                  repoId={repoId}
+                  onCommitSuccess={handleCommitSuccess}
+                  onFileClick={(path, section) => setFocusedStagingFile({ repoId: repoId!, path, section })}
+                />
+              )}
             </div>
           )}
           {!wipSelected && selectedItem && repoId && (

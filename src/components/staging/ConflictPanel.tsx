@@ -15,27 +15,21 @@ import { ConflictHunkPicker, type ViewMode } from "./ConflictHunkPicker";
 
 interface Props {
   repoId: string;
+}
+
+interface CommitPanelProps {
+  repoId: string;
   onDone: () => void;
 }
 
-export function ConflictPanel({ repoId, onDone }: Props) {
+export function ConflictPanel({ repoId }: Props) {
   const qc = useQueryClient();
   const { data: merge } = useMergeStatus(repoId);
 
-  const [message,    setMessage]    = useState("");
   const [working,    setWorking]    = useState(false);
-  const [committing, setCommitting] = useState(false);
   const [error,      setError]      = useState<string | null>(null);
   const [selectedPath, setSelectedPath] = useState<string | null>(null);
   const [viewMode,   setViewMode]   = useState<ViewMode>("stacked");
-
-  // Pre-fill commit message once
-  useEffect(() => {
-    if (merge?.default_message && !message) {
-      setMessage(merge.default_message);
-    }
-  // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [merge?.default_message]);
 
   // Auto-select first conflicted file on load / when conflict list changes
   useEffect(() => {
@@ -80,8 +74,7 @@ export function ConflictPanel({ repoId, onDone }: Props) {
   const isCherryPick  = merge.kind === "cherry_pick";
   const conflicts     = merge.conflicted_paths;
   const hasConflicts  = conflicts.length > 0;
-  const disabled      = working || committing;
-  const canFinish     = !hasConflicts && message.trim().length > 0 && !committing;
+  const disabled      = working;
 
   // ── Whole-file resolution ─────────────────────────────────────────────────
 
@@ -99,34 +92,6 @@ export function ConflictPanel({ repoId, onDone }: Props) {
     try { await ipc.resolveTheirs(repoId, path); invalidate(); }
     catch (err) { setError(String(err)); }
     finally { setWorking(false); }
-  }
-
-  // ── Abort ─────────────────────────────────────────────────────────────────
-
-  async function handleAbort() {
-    setWorking(true);
-    setError(null);
-    try { await ipc.abortMerge(repoId); invalidate(); onDone(); }
-    catch (err) { setError(String(err)); }
-    finally { setWorking(false); }
-  }
-
-  // ── Finish (commit merge / cherry-pick) ───────────────────────────────────
-
-  async function handleFinish() {
-    const msg = message.trim();
-    if (!msg) return;
-    setCommitting(true);
-    setError(null);
-    try {
-      if (isCherryPick) {
-        await ipc.finishCherryPick(repoId, msg);
-      } else {
-        await ipc.finishMerge(repoId, msg);
-      }
-      onDone();
-    } catch (err) { setError(String(err)); }
-    finally { setCommitting(false); }
   }
 
   // ─────────────────────────────────────────────────────────────────────────
@@ -159,17 +124,13 @@ export function ConflictPanel({ repoId, onDone }: Props) {
           </button>
         </div>
 
-        <Button
-          size="sm"
-          variant="ghost"
-          className="h-6 px-2 text-xs text-destructive hover:text-destructive gap-1 shrink-0"
-          onClick={handleAbort}
-          disabled={disabled}
-        >
-          <X size={11} />
-          Abort
-        </Button>
       </div>
+
+      {error && (
+        <div className="shrink-0 px-3 py-1.5 text-[10px] text-destructive border-b border-destructive/20 bg-destructive/5">
+          {error}
+        </div>
+      )}
 
       {/* ── Body: file list + hunk editor ── */}
       <div className="flex flex-1 min-h-0 overflow-hidden">
@@ -259,7 +220,7 @@ export function ConflictPanel({ repoId, onDone }: Props) {
               <div>
                 <p className="text-sm font-medium text-foreground/80">All conflicts resolved</p>
                 <p className="text-xs text-muted-foreground/70 mt-0.5">
-                  Review the commit message below and finish the {isCherryPick ? "cherry-pick" : "merge"}.
+                  Review the commit message on the right and finish the {isCherryPick ? "cherry-pick" : "merge"}.
                 </p>
               </div>
             </div>
@@ -271,31 +232,122 @@ export function ConflictPanel({ repoId, onDone }: Props) {
         </div>
       </div>
 
-      {/* ── Footer: commit area ── */}
-      <div className="shrink-0 border-t border-border px-4 py-3 flex gap-3 items-end">
+    </div>
+  );
+}
+
+// ── Right-panel merge commit widget ──────────────────────────────────────────
+
+export function MergeCommitPanel({ repoId, onDone }: CommitPanelProps) {
+  const qc = useQueryClient();
+  const { data: merge } = useMergeStatus(repoId);
+
+  const [message,    setMessage]    = useState("");
+  const [committing, setCommitting] = useState(false);
+  const [aborting,   setAborting]   = useState(false);
+  const [error,      setError]      = useState<string | null>(null);
+
+  useEffect(() => {
+    if (merge?.default_message && !message) {
+      setMessage(merge.default_message);
+    }
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [merge?.default_message]);
+
+  if (!merge?.in_progress) return null;
+
+  const isCherryPick = merge.kind === "cherry_pick";
+  const conflicts    = merge.conflicted_paths;
+  const hasConflicts = conflicts.length > 0;
+  const busy         = committing || aborting;
+  const canFinish    = !hasConflicts && message.trim().length > 0 && !busy;
+
+  async function handleFinish() {
+    const msg = message.trim();
+    if (!msg) return;
+    setCommitting(true);
+    setError(null);
+    try {
+      if (isCherryPick) await ipc.finishCherryPick(repoId, msg);
+      else await ipc.finishMerge(repoId, msg);
+      onDone();
+    } catch (err) { setError(String(err)); }
+    finally { setCommitting(false); }
+  }
+
+  async function handleAbort() {
+    setAborting(true);
+    setError(null);
+    try {
+      await ipc.abortMerge(repoId);
+      qc.invalidateQueries({ queryKey: ["merge-status", repoId] });
+      qc.invalidateQueries({ queryKey: ["status",       repoId] });
+      onDone();
+    } catch (err) { setError(String(err)); }
+    finally { setAborting(false); }
+  }
+
+  return (
+    <div className="h-full flex flex-col overflow-hidden border-l border-border">
+      {/* Header */}
+      <div className="shrink-0 px-3 py-2 border-b border-border flex items-center gap-2">
+        <GitMerge size={13} className="text-orange-400 shrink-0" />
+        <span className="text-xs font-semibold text-orange-300 uppercase tracking-wide">
+          {isCherryPick ? "Cherry-pick" : "Merge"}
+        </span>
+      </div>
+
+      {/* Status badge */}
+      <div className="shrink-0 px-3 py-2.5 border-b border-border/50">
+        {hasConflicts ? (
+          <div className="flex items-center gap-2 text-xs text-orange-400">
+            <AlertTriangle size={12} className="shrink-0" />
+            <span>{conflicts.length} conflict{conflicts.length !== 1 ? "s" : ""} remaining</span>
+          </div>
+        ) : (
+          <div className="flex items-center gap-2 text-xs text-green-400">
+            <Check size={12} className="shrink-0" />
+            <span className="font-medium">All conflicts resolved</span>
+          </div>
+        )}
+      </div>
+
+      {/* Spacer */}
+      <div className="flex-1" />
+
+      {/* Commit section */}
+      <div className="shrink-0 px-3 py-3 flex flex-col gap-2 border-t border-border">
+        <span className="text-[10px] uppercase tracking-wide text-muted-foreground/65 font-medium">
+          Commit message
+        </span>
         <textarea
           value={message}
           onChange={(e) => setMessage(e.target.value)}
-          rows={2}
-          disabled={disabled}
-          className="flex-1 resize-none rounded border border-border bg-background px-2.5 py-1.5 text-xs text-foreground placeholder:text-muted-foreground focus:outline-none focus:ring-1 focus:ring-ring disabled:opacity-50"
+          rows={3}
+          disabled={busy}
+          className="resize-none rounded border border-border bg-background px-2.5 py-1.5 text-xs text-foreground placeholder:text-muted-foreground focus:outline-none focus:ring-1 focus:ring-ring disabled:opacity-50"
           placeholder={isCherryPick ? "Cherry-pick commit message…" : "Merge commit message…"}
         />
-
-        <div className="shrink-0 flex flex-col gap-2">
-          {error && <p className="text-[10px] text-destructive max-w-48 break-words">{error}</p>}
-          <Button
-            size="sm"
-            className="gap-1.5 whitespace-nowrap"
-            onClick={handleFinish}
-            disabled={!canFinish}
-          >
-            <GitMerge size={13} />
-            {hasConflicts
-              ? `${conflicts.length} conflict${conflicts.length !== 1 ? "s" : ""} remaining`
-              : isCherryPick ? "Commit Cherry-pick" : "Commit Merge"}
-          </Button>
-        </div>
+        {error && <p className="text-[10px] text-destructive break-words">{error}</p>}
+        <Button
+          size="sm"
+          className="w-full gap-1.5"
+          onClick={handleFinish}
+          disabled={!canFinish}
+        >
+          <GitMerge size={13} />
+          {committing ? "Committing…" : isCherryPick ? "Commit Cherry-pick" : "Commit Merge"}
+        </Button>
+        <Button
+          size="sm"
+          variant="ghost"
+          className="w-full h-6 text-xs text-muted-foreground hover:text-destructive gap-1"
+          onClick={handleAbort}
+          disabled={busy}
+        >
+          <X size={11} />
+          {aborting ? "Aborting…" : "Abort"}
+        </Button>
       </div>
     </div>
   );
