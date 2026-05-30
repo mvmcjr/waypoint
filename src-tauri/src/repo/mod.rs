@@ -1,6 +1,8 @@
 pub mod state;
+pub mod watcher_state;
 
 pub use state::RepoState;
+pub use watcher_state::WatcherState;
 
 use crate::error::{Error, Result};
 

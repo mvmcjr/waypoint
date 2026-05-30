@@ -3,7 +3,7 @@ mod error;
 mod graph;
 mod repo;
 
-use repo::RepoState;
+use repo::{RepoState, WatcherState};
 use std::sync::Mutex;
 
 pub struct StartupPath(Mutex<Option<String>>);
@@ -83,6 +83,7 @@ pub fn run() {
     tauri::Builder::default()
         .manage(StartupPath(Mutex::new(startup_path)))
         .manage(RepoState::default())
+        .manage(WatcherState::default())
         .plugin(tauri_plugin_global_shortcut::Builder::new().build())
         .plugin(tauri_plugin_opener::init())
         .plugin(tauri_plugin_dialog::init())

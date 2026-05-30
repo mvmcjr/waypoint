@@ -1,8 +1,11 @@
+use std::time::Duration;
+
+use notify_debouncer_mini::{new_debouncer, notify::RecursiveMode, DebounceEventResult};
 use serde::Serialize;
-use tauri::State;
+use tauri::{Emitter, State};
 
 use crate::error::{Error, Result};
-use crate::repo::RepoState;
+use crate::repo::{RepoState, WatcherState};
 
 #[derive(Debug, Serialize)]
 pub struct RefInfo {
@@ -24,12 +27,44 @@ pub enum RefKind {
 }
 
 #[tauri::command]
-pub fn open_repo(path: String, state: State<RepoState>) -> Result<String> {
+pub fn open_repo(
+    path: String,
+    app: tauri::AppHandle,
+    state: State<RepoState>,
+    watchers: State<WatcherState>,
+) -> Result<String> {
     let repo = git2::Repository::open(&path)
         .map_err(|_| Error::NotARepo(path.clone()))?;
 
     let id = path.clone();
     state.0.lock().unwrap().insert(id.clone(), repo);
+
+    // Watch .git/ for external changes (commits, branch moves, fetches, etc.).
+    // Skip .lock files (transient during any git op) and the index file
+    // (updated on every stage/unstage — handled by the frontend's own polling).
+    let git_dir = std::path::Path::new(&path).join(".git");
+    let repo_id = id.clone();
+    let app_handle = app.clone();
+
+    match new_debouncer(Duration::from_millis(300), move |res: DebounceEventResult| {
+        let Ok(events) = res else { return };
+        let relevant = events.iter().any(|e| {
+            e.path.file_name()
+                .and_then(|n| n.to_str())
+                .map(|n| !n.ends_with(".lock") && n != "index")
+                .unwrap_or(false)
+        });
+        if relevant {
+            let _ = app_handle.emit("repo-changed", &repo_id);
+        }
+    }) {
+        Ok(mut debouncer) => {
+            let _ = debouncer.watcher().watch(&git_dir, RecursiveMode::Recursive);
+            watchers.0.lock().unwrap().insert(id.clone(), debouncer);
+        }
+        Err(e) => eprintln!("FS watcher failed to start for {path}: {e}"),
+    }
+
     Ok(id)
 }
 
