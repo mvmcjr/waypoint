@@ -42,10 +42,12 @@ pub fn walk_commits(
             }
         }
     }
-    // Also push HEAD (covers detached HEAD).
+    // Also push HEAD (covers detached HEAD) and tag it in ref_map so the frontend
+    // can identify the current commit without a separate useHeadInfo call.
     if let Ok(head) = repo.head() {
         if let Some(oid) = head.target() {
             let _ = walk.push(oid);
+            ref_map.entry(oid.to_string()).or_default().push("HEAD".to_owned());
         }
     }
     // Push every stash reflog entry so all stash commits appear in the timeline.

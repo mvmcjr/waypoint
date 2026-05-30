@@ -29,6 +29,7 @@ export function CommitContextMenu({ item, onAction, children }: Props) {
   const short = oid.slice(0, 8);
   const { local_branches: localBranches, remote_branches: remoteBranches } = item.commit;
   const remoteOnlyBranches = remoteBranches.filter((rb) => !rb.endsWith("/HEAD"));
+  const isHead = item.commit.refs.includes("HEAD");
   // Prefer a local branch; fall back to any ref (remote/tag) for the merge label.
   const mergeLabel =
     localBranches[0] ??
@@ -76,17 +77,23 @@ export function CommitContextMenu({ item, onAction, children }: Props) {
 
         <ContextMenuSeparator />
 
-        <ContextMenuItem onClick={() => onAction({ kind: "merge", oid, label: mergeLabel })}>
-          Merge into current branch
-        </ContextMenuItem>
+        {!isHead && (
+          <ContextMenuItem onClick={() => onAction({ kind: "merge", oid, label: mergeLabel })}>
+            Merge into current branch
+          </ContextMenuItem>
+        )}
 
-        <ContextMenuItem onClick={() => onAction({ kind: "cherry-pick", oid, summary: item.commit.summary })}>
-          Cherry-pick onto current branch
-        </ContextMenuItem>
+        {!isHead && (
+          <ContextMenuItem onClick={() => onAction({ kind: "cherry-pick", oid, summary: item.commit.summary })}>
+            Cherry-pick onto current branch
+          </ContextMenuItem>
+        )}
 
-        <ContextMenuItem onClick={() => onAction({ kind: "rebase", oid })}>
-          Rebase current branch here
-        </ContextMenuItem>
+        {!isHead && (
+          <ContextMenuItem onClick={() => onAction({ kind: "rebase", oid })}>
+            Rebase current branch here
+          </ContextMenuItem>
+        )}
 
         <ContextMenuItem
           onClick={() => onAction({ kind: "reset", oid })}
