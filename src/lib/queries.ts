@@ -75,7 +75,6 @@ export function useStashes(repoId: string | null) {
     queryFn: () => ipc.listStashes(repoId!),
     enabled: !!repoId,
     staleTime: Infinity,
-    refetchOnWindowFocus: "always",
   });
 }
 

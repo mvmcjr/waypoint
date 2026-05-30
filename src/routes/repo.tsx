@@ -1,5 +1,6 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import { getCurrentWindow } from "@tauri-apps/api/window";
+import { listen } from "@tauri-apps/api/event";
 import { useStore } from "@/lib/store";
 import { useCommits, useHeadInfo, useRefreshRepo, useRemotes, useRepoStatus } from "@/lib/queries";
 import { Timeline, type TimelineHandle } from "@/components/timeline/Timeline";
@@ -199,13 +200,39 @@ export function RepoView() {
   // refetchOnWindowFocus won't work. Use the native Tauri focus event instead.
   useEffect(() => {
     let unlisten: (() => void) | undefined;
+    let cancelled = false;
     getCurrentWindow()
       .onFocusChanged(({ payload: focused }) => {
         if (focused) refresh();
       })
-      .then((fn) => { unlisten = fn; });
-    return () => { unlisten?.(); };
+      .then((fn) => {
+        if (cancelled) fn(); // cleanup already ran — unregister immediately
+        else unlisten = fn;
+      });
+    return () => { cancelled = true; unlisten?.(); };
   }, [refresh]);
+
+  // Listen for FS watcher events emitted by the Rust backend when an external
+  // git operation modifies the repo (commit from CLI, branch move, fetch, etc.).
+  useEffect(() => {
+    if (!repoId) return;
+    let unlisten: (() => void) | undefined;
+    let cancelled = false;
+    listen<string>('repo-changed', (event) => {
+      if (event.payload === repoId) refresh();
+    }).then((fn) => {
+      if (cancelled) fn();
+      else unlisten = fn;
+    });
+    return () => { cancelled = true; unlisten?.(); };
+  }, [repoId, refresh]);
+
+  // After amend or rebase, the selected commit's OID no longer exists in the
+  // new commit list. Clear the stale selection so the detail panel doesn't linger.
+  useEffect(() => {
+    if (!data || !selectedOid) return;
+    if (!data.some((c) => c.commit.oid === selectedOid)) selectCommit(null);
+  }, [data, selectedOid, selectCommit]);
 
   // Auto-open WIP panel when a merge with conflicts starts, or when the user
   // switches to a repo that already has a merge in progress.  repoId is in the

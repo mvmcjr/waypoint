@@ -305,6 +305,7 @@ export function StagingPanel({ repoId, onCommitSuccess, onFileClick }: Props) {
   function invalidate() {
     qc.invalidateQueries({ queryKey: ["staging", repoId] });
     qc.invalidateQueries({ queryKey: ["status", repoId] });
+    qc.invalidateQueries({ queryKey: ["workdir-diff", repoId] });
   }
 
   function toggleDir(path: string) {
@@ -315,8 +316,14 @@ export function StagingPanel({ repoId, onCommitSuccess, onFileClick }: Props) {
     });
   }
 
-  async function stageFile(path: string)   { await ipc.stageFile(repoId, path);   invalidate(); }
-  async function unstageFile(path: string) { await ipc.unstageFile(repoId, path); invalidate(); }
+  async function stageFile(path: string) {
+    try { await ipc.stageFile(repoId, path); invalidate(); }
+    catch (e) { setError(String(e)); }
+  }
+  async function unstageFile(path: string) {
+    try { await ipc.unstageFile(repoId, path); invalidate(); }
+    catch (e) { setError(String(e)); }
+  }
   async function discardFile(path: string) {
     setWorking(true);
     try { await ipc.discardFile(repoId, path); invalidate(); }
@@ -339,7 +346,12 @@ export function StagingPanel({ repoId, onCommitSuccess, onFileClick }: Props) {
     try { await ipc.unstagePaths(repoId, paths); invalidate(); } finally { setWorking(false); }
   }
 
-  async function handleStageAll() { await ipc.stageAll(repoId); invalidate(); }
+  async function handleStageAll() {
+    setWorking(true);
+    try { await ipc.stageAll(repoId); invalidate(); }
+    catch (e) { setError(String(e)); }
+    finally { setWorking(false); }
+  }
 
   async function handleStash() {
     setWorking(true);
