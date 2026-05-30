@@ -2,8 +2,7 @@ import { describe, it, expect, vi, beforeEach } from "vitest";
 import { render, screen, fireEvent, waitFor, act } from "@testing-library/react";
 import { StashList } from "./StashList";
 import { ipc } from "@/lib/ipc";
-import { useStashes } from "@/lib/queries";
-import { useQueryClient } from "@tanstack/react-query";
+import { useStashes, useRefreshRepo } from "@/lib/queries";
 
 vi.mock("@/lib/ipc", () => ({
   ipc: {
@@ -15,10 +14,7 @@ vi.mock("@/lib/ipc", () => ({
 
 vi.mock("@/lib/queries", () => ({
   useStashes: vi.fn(),
-}));
-
-vi.mock("@tanstack/react-query", () => ({
-  useQueryClient: vi.fn(),
+  useRefreshRepo: vi.fn(),
 }));
 
 const STASHES_REPO1 = [
@@ -30,14 +26,12 @@ const STASHES_REPO2 = [
   { index: 0, message: "WIP on feat: def5678 feat work" },
 ];
 
-function mockQc() {
-  vi.mocked(useQueryClient).mockReturnValue({ invalidateQueries: vi.fn() } as any);
-}
+const mockRefresh = vi.fn();
 
 describe("StashList", () => {
   beforeEach(() => {
     vi.clearAllMocks();
-    mockQc();
+    vi.mocked(useRefreshRepo).mockReturnValue(mockRefresh);
     vi.mocked(useStashes).mockReturnValue({ data: STASHES_REPO1 } as any);
   });
 

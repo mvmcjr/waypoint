@@ -1,5 +1,4 @@
 import { useState, useEffect, useRef } from "react";
-import { useQueryClient } from "@tanstack/react-query";
 import { Archive, ChevronRight } from "lucide-react";
 import {
   ContextMenu,
@@ -9,7 +8,7 @@ import {
   ContextMenuTrigger,
 } from "@/components/ui/context-menu";
 import { ipc } from "@/lib/ipc";
-import { useStashes } from "@/lib/queries";
+import { useStashes, useRefreshRepo } from "@/lib/queries";
 
 interface Props {
   repoId: string;
@@ -17,7 +16,7 @@ interface Props {
 }
 
 export function StashList({ repoId, onApplied }: Props) {
-  const qc = useQueryClient();
+  const refresh = useRefreshRepo(repoId);
   const { data: stashes = [] } = useStashes(repoId);
   const [open, setOpen] = useState(true);
   const [busy, setBusy] = useState(false);
@@ -38,16 +37,10 @@ export function StashList({ repoId, onApplied }: Props) {
 
   if (stashes.length === 0) return null;
 
-  function invalidate() {
-    qc.invalidateQueries({ queryKey: ["stashes", repoId] });
-    qc.invalidateQueries({ queryKey: ["status", repoId] });
-    qc.invalidateQueries({ queryKey: ["staging", repoId] });
-  }
-
   async function handlePop(index: number) {
     setBusy(true);
     opRepoRef.current = repoId;
-    try { await ipc.popStash(repoId, index); invalidate(); onApplied?.(); }
+    try { await ipc.popStash(repoId, index); refresh(); onApplied?.(); }
     catch (e) { console.error(e); }
     finally { opRepoRef.current = null; setBusy(false); }
   }
@@ -55,7 +48,7 @@ export function StashList({ repoId, onApplied }: Props) {
   async function handleApply(index: number) {
     setBusy(true);
     opRepoRef.current = repoId;
-    try { await ipc.applyStash(repoId, index); invalidate(); onApplied?.(); }
+    try { await ipc.applyStash(repoId, index); refresh(); onApplied?.(); }
     catch (e) { console.error(e); }
     finally { opRepoRef.current = null; setBusy(false); }
   }
@@ -63,7 +56,7 @@ export function StashList({ repoId, onApplied }: Props) {
   async function handleDrop(index: number) {
     setBusy(true);
     opRepoRef.current = repoId;
-    try { await ipc.dropStash(repoId, index); invalidate(); }
+    try { await ipc.dropStash(repoId, index); refresh(); }
     catch (e) { console.error(e); }
     finally { opRepoRef.current = null; setBusy(false); }
   }
