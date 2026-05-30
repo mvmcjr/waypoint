@@ -10,7 +10,7 @@ import {
 } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { ipc } from "@/lib/ipc";
-import { useMergeStatus } from "@/lib/queries";
+import { useMergeStatus, useRefreshRepo } from "@/lib/queries";
 import { ConflictHunkPicker, type ViewMode } from "./ConflictHunkPicker";
 
 interface Props {
@@ -25,6 +25,7 @@ interface CommitPanelProps {
 export function ConflictPanel({ repoId }: Props) {
   const qc = useQueryClient();
   const { data: merge } = useMergeStatus(repoId);
+  const refresh = useRefreshRepo(repoId);
 
   const [working,    setWorking]    = useState(false);
   const [error,      setError]      = useState<string | null>(null);
@@ -76,6 +77,16 @@ export function ConflictPanel({ repoId }: Props) {
   const hasConflicts  = conflicts.length > 0;
   const disabled      = working;
 
+  // ── Abort ────────────────────────────────────────────────────────────────
+
+  async function handleAbort() {
+    setWorking(true);
+    setError(null);
+    try { await ipc.abortMerge(repoId); refresh(); }
+    catch (err) { setError(String(err)); }
+    finally { setWorking(false); }
+  }
+
   // ── Whole-file resolution ─────────────────────────────────────────────────
 
   async function handleResolveOurs(path: string, e: React.MouseEvent) {
@@ -106,8 +117,19 @@ export function ConflictPanel({ repoId }: Props) {
           {isCherryPick ? "Cherry-pick in Progress" : "Merge in Progress"}
         </span>
 
+        <Button
+          size="sm"
+          variant="ghost"
+          className="ml-auto h-6 px-2 text-xs text-muted-foreground hover:text-destructive gap-1 shrink-0"
+          onClick={handleAbort}
+          disabled={disabled}
+        >
+          <X size={11} />
+          Abort
+        </Button>
+
         {/* View mode toggle */}
-        <div className="ml-auto flex items-center gap-0.5 rounded-md border border-border/50 p-0.5">
+        <div className="flex items-center gap-0.5 rounded-md border border-border/50 p-0.5">
           <button
             title="Stacked view"
             onClick={() => setViewMode("stacked")}

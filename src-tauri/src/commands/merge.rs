@@ -25,8 +25,10 @@ pub struct MergeStatus {
 
 #[derive(Debug, Serialize)]
 pub struct CherryPickResult {
-    /// "applied" | "conflicts"
+    /// "staged" | "conflicts"
     pub kind: String,
+    /// Pre-filled commit message (populated for both kinds).
+    pub message: String,
     pub conflicted: Vec<String>,
 }
 
@@ -347,21 +349,19 @@ fn cherry_pick_impl(repo: &git2::Repository, oid_str: &str) -> Result<CherryPick
     let mut index = repo.index()?;
     index.write()?;
 
+    let msg = commit.message().unwrap_or("").to_string();
+
     if index.has_conflicts() {
+        // libgit2 wrote CHERRY_PICK_HEAD but NOT CHERRY_PICK_MSG; write it so get_merge_status
+        // can return the default commit message for the MergeCommitPanel textarea.
         let conflicted = collect_conflict_paths(&index)?;
-        let git_dir = repo.path();
-        std::fs::write(git_dir.join("CHERRY_PICK_HEAD"), format!("{}\n", git_oid)).map_err(io_err)?;
-        let msg = commit.message().unwrap_or("").to_string();
-        std::fs::write(git_dir.join("CHERRY_PICK_MSG"), &msg).map_err(io_err)?;
-        Ok(CherryPickResult { kind: "conflicts".into(), conflicted })
+        std::fs::write(repo.path().join("CHERRY_PICK_MSG"), &msg).map_err(io_err)?;
+        Ok(CherryPickResult { kind: "conflicts".into(), conflicted, message: msg })
     } else {
-        let sig = repo.signature()?;
-        let head_commit = repo.head()?.peel_to_commit()?;
-        let tree_oid = index.write_tree()?;
-        let tree = repo.find_tree(tree_oid)?;
-        let message = commit.message().unwrap_or("cherry-picked commit");
-        repo.commit(Some("HEAD"), &sig, &sig, message, &tree, &[&head_commit])?;
-        Ok(CherryPickResult { kind: "applied".into(), conflicted: vec![] })
+        // Clean apply: libgit2 wrote CHERRY_PICK_HEAD but we don't want merge state.
+        // Remove it so the staging panel shows normally.
+        cleanup_merge_state(repo);
+        Ok(CherryPickResult { kind: "staged".into(), conflicted: vec![], message: msg })
     }
 }
 
@@ -381,7 +381,9 @@ pub fn cherry_pick(repo_id: String, oid: String, state: State<RepoState>) -> Res
         cherry_pick_impl(repo, &oid)?
     };
 
-    if autostashed && result.kind != "conflicts" {
+    // For a clean apply ("staged"), pop immediately — no merge state to preserve.
+    // For conflicts, the stash is popped in finish_cherry_pick after resolving.
+    if autostashed && result.kind == "staged" {
         let repo = repos.get_mut(&repo_id).ok_or_else(|| Error::RepoNotFound(repo_id.clone()))?;
         auto_pop(repo);
     }
@@ -439,8 +441,9 @@ pub fn finish_cherry_pick(repo_id: String, message: String, state: State<RepoSta
 
     {
         let repo = repos.get(&repo_id).ok_or_else(|| Error::RepoNotFound(repo_id.clone()))?;
-        finish_cherry_pick_impl(repo, &message)?;
+        let result = finish_cherry_pick_impl(repo, &message);
         cleanup_merge_state(repo);
+        result?;
     }
 
     let repo = repos.get_mut(&repo_id).ok_or_else(|| Error::RepoNotFound(repo_id.clone()))?;
@@ -509,10 +512,14 @@ mod tests {
 
         let result = cherry_pick_impl(&repo, &feat_oid.to_string()).unwrap();
 
-        assert_eq!(result.kind, "applied");
+        assert_eq!(result.kind, "staged");
         assert!(result.conflicted.is_empty());
+        assert_eq!(result.message, "feat: add feature");
+        // No merge-state files — staging panel shows normally.
+        assert!(!repo.path().join("CHERRY_PICK_HEAD").exists());
+        // HEAD must NOT have advanced — user commits via the dialog.
         let head = repo.head().unwrap().peel_to_commit().unwrap();
-        assert_eq!(head.message().unwrap(), "feat: add feature");
+        assert_eq!(head.message().unwrap(), "initial");
     }
 
     #[test]

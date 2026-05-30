@@ -518,11 +518,15 @@ interface CherryPickProps extends BaseProps {
   oid: string;
   summary: string;
   onConflicts: () => void;
+  onLeaveStaged: () => void;
 }
 
-export function CherryPickDialog({ repoId, oid, summary, onClose, onSuccess, onConflicts }: CherryPickProps) {
+export function CherryPickDialog({ repoId, oid, summary, onClose, onSuccess, onConflicts, onLeaveStaged }: CherryPickProps) {
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const [staged, setStaged] = useState<{ message: string } | null>(null);
+  const [commitMsg, setCommitMsg] = useState("");
+  const [committing, setCommitting] = useState(false);
 
   async function run() {
     setLoading(true);
@@ -532,13 +536,67 @@ export function CherryPickDialog({ repoId, oid, summary, onClose, onSuccess, onC
       if (result.kind === "conflicts") {
         onConflicts();
       } else {
-        onSuccess();
+        // Clean apply — ask user: commit now or leave staged.
+        setStaged({ message: result.message });
+        setCommitMsg(result.message);
       }
     } catch (e) {
       setError(String(e));
     } finally {
       setLoading(false);
     }
+  }
+
+  async function handleCommit() {
+    setCommitting(true);
+    setError(null);
+    try {
+      await ipc.doCommit(repoId, commitMsg.trim());
+      onSuccess();
+    } catch (e) {
+      setError(String(e));
+    } finally {
+      setCommitting(false);
+    }
+  }
+
+  function handleLeaveStaged() {
+    onLeaveStaged();
+  }
+
+  if (staged) {
+    return (
+      <Dialog open onOpenChange={(o) => !o && onClose()}>
+        <DialogContent>
+          <DialogHeader>
+            <DialogTitle>Cherry-pick applied cleanly</DialogTitle>
+            <DialogDescription>
+              Changes from <code className="font-mono">{short(oid)}</code> are staged.
+              Commit now or leave staged to review first.
+            </DialogDescription>
+          </DialogHeader>
+
+          <textarea
+            value={commitMsg}
+            onChange={(e) => setCommitMsg(e.target.value)}
+            rows={4}
+            className="w-full resize-none rounded border border-border bg-background px-2.5 py-2 text-xs text-foreground placeholder:text-muted-foreground focus:outline-none focus:ring-1 focus:ring-ring"
+            placeholder="Commit message…"
+          />
+
+          {error && <ErrorNote msg={error} />}
+
+          <DialogFooter>
+            <Button variant="outline" onClick={handleLeaveStaged} disabled={committing}>
+              Leave staged
+            </Button>
+            <Button onClick={handleCommit} disabled={committing || !commitMsg.trim()}>
+              {committing ? "Committing…" : "Commit Cherry-pick"}
+            </Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
+    );
   }
 
   return (

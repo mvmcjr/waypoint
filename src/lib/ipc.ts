@@ -85,8 +85,9 @@ export interface MergeStatus {
 }
 
 export interface CherryPickResult {
-  kind: "applied" | "conflicts";
+  kind: "staged" | "conflicts";
   conflicted: string[];
+  message: string;
 }
 
 export interface FileStatus {
@@ -220,6 +221,12 @@ export const ipc = {
 
   resolveWithContent: (repoId: string, path: string, content: string) =>
     invoke<void>("resolve_with_content", { repoId, path, content }),
+
+  discardFile: (repoId: string, path: string) =>
+    invoke<void>("discard_file", { repoId, path }),
+
+  discardPaths: (repoId: string, paths: string[]) =>
+    invoke<void>("discard_paths", { repoId, paths }),
 
   discardAll: (repoId: string) =>
     invoke<void>("discard_all", { repoId }),

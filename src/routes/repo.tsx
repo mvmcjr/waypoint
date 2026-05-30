@@ -531,6 +531,7 @@ export function RepoView() {
           onClose={() => setDialog({ kind: "none" })}
           onSuccess={handleSuccess}
           onConflicts={handleMergeConflicts}
+          onLeaveStaged={() => { setDialog({ kind: "none" }); setWipSelected(true); selectCommit(null); refresh(); }}
         />
       )}
       {repoId && dialog.kind === "delete-branch" && (

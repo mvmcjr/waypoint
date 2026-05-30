@@ -720,10 +720,10 @@ export function ConflictHunkPicker({ repoId, path, viewMode, onResolved }: Props
         <div className="flex-1 overflow-y-auto min-h-0">
           {segments.map((seg, segIdx) => {
             if (seg.kind === "context") {
-              return <ContextLines key={segIdx} lines={seg.lines} />;
+              return <ContextLines key={`ctx-${segIdx}`} lines={seg.lines} />;
             }
             return (
-              <div key={seg.idx} className="px-4 pt-3">
+              <div key={`conf-${seg.idx}`} className="px-4 pt-3">
                 {viewMode === "side-by-side" ? (
                   <SideBySideHunk
                     seg={seg} num={seg.idx + 1} total={conflicts.length}

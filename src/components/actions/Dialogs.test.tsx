@@ -8,6 +8,8 @@ vi.mock("@/lib/ipc", () => ({
     abortMerge: vi.fn(),
     pushBranch: vi.fn(),
     cherryPick: vi.fn(),
+    finishCherryPick: vi.fn(),
+    doCommit: vi.fn(),
   },
 }));
 
@@ -16,6 +18,7 @@ describe("Dialogs", () => {
   const mockOnSuccess = vi.fn();
   const mockOnAbort = vi.fn();
   const mockOnConflicts = vi.fn();
+  const mockOnLeaveStaged = vi.fn();
 
   beforeEach(() => {
     vi.clearAllMocks();
@@ -29,10 +32,11 @@ describe("Dialogs", () => {
       onClose: mockOnClose,
       onSuccess: mockOnSuccess,
       onConflicts: mockOnConflicts,
+      onLeaveStaged: mockOnLeaveStaged,
     };
 
     it("renders commit summary and short oid", () => {
-      vi.mocked(ipc.cherryPick).mockResolvedValue({ kind: "applied", conflicted: [] });
+      vi.mocked(ipc.cherryPick).mockResolvedValue({ kind: "staged", conflicted: [], message: "" });
       render(<CherryPickDialog {...defaultProps} />);
 
       expect(screen.getByRole("heading", { name: "Cherry-pick commit" })).toBeInTheDocument();
@@ -40,19 +44,48 @@ describe("Dialogs", () => {
       expect(screen.getByText("abc123de")).toBeInTheDocument();
     });
 
-    it("calls onSuccess when cherry-pick applies cleanly", async () => {
-      vi.mocked(ipc.cherryPick).mockResolvedValue({ kind: "applied", conflicted: [] });
+    it("shows staged dialog when cherry-pick applies cleanly", async () => {
+      vi.mocked(ipc.cherryPick).mockResolvedValue({ kind: "staged", conflicted: [], message: "feat: add new thing" });
       render(<CherryPickDialog {...defaultProps} />);
 
       fireEvent.click(screen.getByRole("button", { name: "Cherry-pick" }));
       expect(ipc.cherryPick).toHaveBeenCalledWith("repo1", "abc123def456");
 
+      await waitFor(() =>
+        expect(screen.getByRole("heading", { name: "Cherry-pick applied cleanly" })).toBeInTheDocument()
+      );
+      expect(mockOnSuccess).not.toHaveBeenCalled();
+      expect(mockOnConflicts).not.toHaveBeenCalled();
+    });
+
+    it("calls onSuccess after committing from staged dialog", async () => {
+      vi.mocked(ipc.cherryPick).mockResolvedValue({ kind: "staged", conflicted: [], message: "feat: add new thing" });
+      vi.mocked(ipc.doCommit).mockResolvedValue(undefined);
+      render(<CherryPickDialog {...defaultProps} />);
+
+      fireEvent.click(screen.getByRole("button", { name: "Cherry-pick" }));
+      await waitFor(() => screen.getByRole("heading", { name: "Cherry-pick applied cleanly" }));
+
+      fireEvent.click(screen.getByRole("button", { name: "Commit Cherry-pick" }));
       await waitFor(() => expect(mockOnSuccess).toHaveBeenCalled());
+      expect(ipc.doCommit).toHaveBeenCalledWith("repo1", "feat: add new thing");
+    });
+
+    it("calls onLeaveStaged when Leave staged is clicked", async () => {
+      vi.mocked(ipc.cherryPick).mockResolvedValue({ kind: "staged", conflicted: [], message: "feat: add new thing" });
+      render(<CherryPickDialog {...defaultProps} />);
+
+      fireEvent.click(screen.getByRole("button", { name: "Cherry-pick" }));
+      await waitFor(() => screen.getByRole("heading", { name: "Cherry-pick applied cleanly" }));
+
+      fireEvent.click(screen.getByRole("button", { name: "Leave staged" }));
+      expect(mockOnLeaveStaged).toHaveBeenCalled();
+      expect(mockOnSuccess).not.toHaveBeenCalled();
       expect(mockOnConflicts).not.toHaveBeenCalled();
     });
 
     it("calls onConflicts when cherry-pick produces conflicts", async () => {
-      vi.mocked(ipc.cherryPick).mockResolvedValue({ kind: "conflicts", conflicted: ["src/lib.rs"] });
+      vi.mocked(ipc.cherryPick).mockResolvedValue({ kind: "conflicts", conflicted: ["src/lib.rs"], message: "" });
       render(<CherryPickDialog {...defaultProps} />);
 
       fireEvent.click(screen.getByRole("button", { name: "Cherry-pick" }));
@@ -73,7 +106,7 @@ describe("Dialogs", () => {
     });
 
     it("disables both buttons while applying", async () => {
-      let resolve!: (r: { kind: string; conflicted: string[] }) => void;
+      let resolve!: (r: { kind: string; conflicted: string[]; message: string }) => void;
       vi.mocked(ipc.cherryPick).mockReturnValue(new Promise((res) => { resolve = res; }) as any);
 
       render(<CherryPickDialog {...defaultProps} />);
@@ -84,11 +117,11 @@ describe("Dialogs", () => {
         expect(screen.getByRole("button", { name: "Cancel" })).toBeDisabled();
       });
 
-      act(() => resolve({ kind: "applied", conflicted: [] }));
+      act(() => resolve({ kind: "staged", conflicted: [], message: "" }));
     });
 
     it("calls onClose when Cancel is clicked", () => {
-      vi.mocked(ipc.cherryPick).mockResolvedValue({ kind: "applied", conflicted: [] });
+      vi.mocked(ipc.cherryPick).mockResolvedValue({ kind: "staged", conflicted: [], message: "" });
       render(<CherryPickDialog {...defaultProps} />);
 
       fireEvent.click(screen.getByRole("button", { name: "Cancel" }));
