@@ -348,6 +348,81 @@ function makeCherryPickReady() {
 }
 
 /**
+ * CHERRY-PICK CLEAN
+ * A `donor` branch has an isolated commit that touches only a new file
+ * (src/analytics.js) — main never touches that file, so cherry-picking it
+ * onto main applies with zero conflicts.
+ *
+ * Open in Waypoint, right-click "feat: add analytics module" on the donor
+ * branch, and cherry-pick it.  The dialog should offer "Commit Cherry-pick"
+ * or "Leave staged" — no conflict panel should appear.
+ */
+function makeCherryPickClean() {
+  const dir = fresh('cherry-pick-clean');
+  initRepo(dir);
+
+  write(dir, 'README.md',
+    '# Cherry-pick Clean\n\n' +
+    'Right-click the **"feat: add analytics module"** commit on the `donor` branch\n' +
+    'and cherry-pick it onto `main`.\n\n' +
+    'There are no conflicts — the dialog should ask whether to commit now or leave staged.\n');
+
+  write(dir, 'src/app.js', [
+    'import { render } from "./render.js";',
+    '',
+    'render(document.getElementById("root"));',
+    '',
+  ].join('\n'));
+
+  write(dir, 'src/render.js', [
+    'export function render(el) {',
+    '  el.textContent = "Hello, Waypoint!";',
+    '}',
+    '',
+  ].join('\n'));
+
+  run('git add .', dir);
+  run('git commit -m "Initial commit: app skeleton"', dir);
+
+  // ── Main: adds a feature on its own file ────────────────────────────────
+  write(dir, 'src/router.js', [
+    'export function navigate(path) {',
+    '  window.history.pushState({}, "", path);',
+    '}',
+    '',
+  ].join('\n'));
+
+  run('git add .', dir);
+  run('git commit -m "feat: add client-side router"', dir);
+
+  // ── Donor: adds analytics — completely separate file from router.js ─────
+  run('git checkout -b donor', dir);
+
+  write(dir, 'src/analytics.js', [
+    'let _enabled = false;',
+    '',
+    'export function enableAnalytics() {',
+    '  _enabled = true;',
+    '}',
+    '',
+    'export function track(event, props = {}) {',
+    '  if (!_enabled) return;',
+    '  console.log("[analytics]", event, props);',
+    '}',
+    '',
+  ].join('\n'));
+
+  run('git add .', dir);
+  run('git commit -m "feat: add analytics module"', dir);
+
+  // ── Back to main ────────────────────────────────────────────────────────
+  run('git checkout main', dir);
+
+  log('cherry-pick-clean', dir,
+    '(right-click "feat: add analytics module" on donor → cherry-pick → no conflicts)');
+}
+
+/**
  * DETACHED HEAD
  * HEAD is checked out at a specific commit (not a branch).
  * Tests the amber "detached" indicator in the toolbar.
@@ -601,6 +676,7 @@ const SCENARIOS = [
   ['merge-conflict',       makeMergeConflict],
   ['cherry-pick-conflict', makeCherryPickConflict],
   ['cherry-pick-ready',    makeCherryPickReady],
+  ['cherry-pick-clean',    makeCherryPickClean],
   ['detached-head',        makeDetachedHead],
   ['ahead-of-remote',      makeAheadOfRemote],
   ['stash',                makeStash],
