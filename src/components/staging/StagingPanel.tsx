@@ -6,6 +6,12 @@ import {
   Archive, Trash2,
 } from "lucide-react";
 import { Button } from "@/components/ui/button";
+import {
+  ContextMenu,
+  ContextMenuContent,
+  ContextMenuItem,
+  ContextMenuTrigger,
+} from "@/components/ui/context-menu";
 import { ipc, type FileStatus } from "@/lib/ipc";
 import { useFileStatus, useHeadInfo, useRefs, useRefreshRepo } from "@/lib/queries";
 
@@ -81,12 +87,13 @@ const FALLBACK_STYLE = { label: "?", color: "text-muted-foreground" };
 // ── FileRow ──────────────────────────────────────────────────────────────────
 
 function FileRow({
-  file, statusKind, actionIcon, onAction, onRowClick, disabled, indent = 0, treeMode,
+  file, statusKind, actionIcon, onAction, onDiscard, onRowClick, disabled, indent = 0, treeMode,
 }: {
   file: FileStatus;
   statusKind: string | null;
   actionIcon: React.ReactNode;
   onAction: () => void;
+  onDiscard: () => void;
   onRowClick?: () => void;
   disabled: boolean;
   indent?: number;
@@ -98,70 +105,91 @@ function FileRow({
   const dir = !treeMode && parts.length > 1 ? parts.slice(0, -1).join("/") : "";
 
   return (
-    <div
-      className="group flex items-center gap-2 py-0.5 pr-3 hover:bg-white/5 rounded text-xs cursor-pointer"
-      style={{ paddingLeft: `${12 + indent * 16}px` }}
-      onClick={onRowClick}
-    >
-      <span className={`font-mono font-bold w-3 shrink-0 ${color}`}>{label}</span>
-      <span className="flex-1 min-w-0 truncate">
-        {treeMode ? (
-          <span className="text-foreground/90">{filename}</span>
-        ) : (
-          <>
-            <span className="text-foreground/90">{filename}</span>
-            {dir && <span className="text-muted-foreground ml-1.5 text-[10px]">{dir}</span>}
-          </>
-        )}
-      </span>
-      <button
-        onClick={(e) => { e.stopPropagation(); onAction(); }}
-        disabled={disabled}
-        className="opacity-0 group-hover:opacity-100 text-muted-foreground hover:text-foreground transition-opacity disabled:opacity-30"
-      >
-        {actionIcon}
-      </button>
-    </div>
+    <ContextMenu>
+      <ContextMenuTrigger>
+        <div
+          className="group flex items-center gap-2 py-0.5 pr-3 hover:bg-white/5 rounded text-xs cursor-pointer"
+          style={{ paddingLeft: `${12 + indent * 16}px` }}
+          onClick={onRowClick}
+        >
+          <span className={`font-mono font-bold w-3 shrink-0 ${color}`}>{label}</span>
+          <span className="flex-1 min-w-0 truncate">
+            {treeMode ? (
+              <span className="text-foreground/90">{filename}</span>
+            ) : (
+              <>
+                <span className="text-foreground/90">{filename}</span>
+                {dir && <span className="text-muted-foreground ml-1.5 text-[10px]">{dir}</span>}
+              </>
+            )}
+          </span>
+          <button
+            onClick={(e) => { e.stopPropagation(); onAction(); }}
+            disabled={disabled}
+            className="opacity-0 group-hover:opacity-100 text-muted-foreground hover:text-foreground transition-opacity disabled:opacity-30"
+          >
+            {actionIcon}
+          </button>
+        </div>
+      </ContextMenuTrigger>
+      <ContextMenuContent>
+        <ContextMenuItem variant="destructive" onClick={onDiscard} disabled={disabled}>
+          <Trash2 />
+          Discard changes
+        </ContextMenuItem>
+      </ContextMenuContent>
+    </ContextMenu>
   );
 }
 
 // ── DirRow ────────────────────────────────────────────────────────────────────
 
 function DirRow({
-  node, section, expanded, onToggle, onBatch, disabled, indent, children,
+  node, section, expanded, onToggle, onBatch, onDiscardBatch, disabled, indent, children,
 }: {
   node: DirNode;
   section: "staged" | "unstaged";
   expanded: boolean;
   onToggle: () => void;
   onBatch: (paths: string[]) => void;
+  onDiscardBatch: (paths: string[]) => void;
   disabled: boolean;
   indent: number;
   children: React.ReactNode;
 }) {
   return (
     <>
-      <div
-        className="group flex items-center gap-1.5 py-0.5 pr-3 hover:bg-white/5 rounded text-xs cursor-pointer select-none"
-        style={{ paddingLeft: `${12 + indent * 16}px` }}
-        onClick={onToggle}
-      >
-        {expanded
-          ? <ChevronDown size={11} className="text-muted-foreground shrink-0" />
-          : <ChevronRight size={11} className="text-muted-foreground shrink-0" />}
-        {expanded
-          ? <FolderOpen size={12} className="text-yellow-400/70 shrink-0" />
-          : <Folder size={12} className="text-yellow-400/70 shrink-0" />}
-        <span className="flex-1 text-foreground/75">{node.name}</span>
-        <button
-          onClick={(e) => { e.stopPropagation(); onBatch(collectPaths(node)); }}
-          disabled={disabled}
-          className="opacity-0 group-hover:opacity-100 text-muted-foreground hover:text-foreground transition-opacity disabled:opacity-30"
-          title={section === "staged" ? "Unstage folder" : "Stage folder"}
-        >
-          {section === "staged" ? <MinusCircle size={12} /> : <PlusCircle size={12} />}
-        </button>
-      </div>
+      <ContextMenu>
+        <ContextMenuTrigger>
+          <div
+            className="group flex items-center gap-1.5 py-0.5 pr-3 hover:bg-white/5 rounded text-xs cursor-pointer select-none"
+            style={{ paddingLeft: `${12 + indent * 16}px` }}
+            onClick={onToggle}
+          >
+            {expanded
+              ? <ChevronDown size={11} className="text-muted-foreground shrink-0" />
+              : <ChevronRight size={11} className="text-muted-foreground shrink-0" />}
+            {expanded
+              ? <FolderOpen size={12} className="text-yellow-400/70 shrink-0" />
+              : <Folder size={12} className="text-yellow-400/70 shrink-0" />}
+            <span className="flex-1 text-foreground/75">{node.name}</span>
+            <button
+              onClick={(e) => { e.stopPropagation(); onBatch(collectPaths(node)); }}
+              disabled={disabled}
+              className="opacity-0 group-hover:opacity-100 text-muted-foreground hover:text-foreground transition-opacity disabled:opacity-30"
+              title={section === "staged" ? "Unstage folder" : "Stage folder"}
+            >
+              {section === "staged" ? <MinusCircle size={12} /> : <PlusCircle size={12} />}
+            </button>
+          </div>
+        </ContextMenuTrigger>
+        <ContextMenuContent>
+          <ContextMenuItem variant="destructive" onClick={() => onDiscardBatch(collectPaths(node))} disabled={disabled}>
+            <Trash2 />
+            Discard folder changes
+          </ContextMenuItem>
+        </ContextMenuContent>
+      </ContextMenu>
       {expanded && children}
     </>
   );
@@ -170,7 +198,7 @@ function DirRow({
 // ── TreeNodes (recursive) ────────────────────────────────────────────────────
 
 function TreeNodes({
-  nodes, section, expandedDirs, toggleDir, onBatch, onSingleFile, onFileClick, disabled, indent = 0,
+  nodes, section, expandedDirs, toggleDir, onBatch, onSingleFile, onDiscard, onDiscardBatch, onFileClick, disabled, indent = 0,
 }: {
   nodes: TreeNode[];
   section: "staged" | "unstaged";
@@ -178,6 +206,8 @@ function TreeNodes({
   toggleDir: (p: string) => void;
   onBatch: (paths: string[]) => void;
   onSingleFile: (path: string) => void;
+  onDiscard: (path: string) => void;
+  onDiscardBatch: (paths: string[]) => void;
   onFileClick?: (path: string) => void;
   disabled: boolean;
   indent?: number;
@@ -194,6 +224,7 @@ function TreeNodes({
               statusKind={statusKind}
               actionIcon={section === "staged" ? <MinusCircle size={13} /> : <PlusCircle size={13} />}
               onAction={() => onSingleFile(node.file.path)}
+              onDiscard={() => onDiscard(node.file.path)}
               onRowClick={() => onFileClick?.(node.file.path)}
               disabled={disabled}
               indent={indent}
@@ -210,6 +241,7 @@ function TreeNodes({
             expanded={isExpanded}
             onToggle={() => toggleDir(node.path)}
             onBatch={onBatch}
+            onDiscardBatch={onDiscardBatch}
             disabled={disabled}
             indent={indent}
           >
@@ -220,6 +252,8 @@ function TreeNodes({
               toggleDir={toggleDir}
               onBatch={onBatch}
               onSingleFile={onSingleFile}
+              onDiscard={onDiscard}
+              onDiscardBatch={onDiscardBatch}
               onFileClick={onFileClick}
               disabled={disabled}
               indent={indent + 1}
@@ -283,6 +317,18 @@ export function StagingPanel({ repoId, onCommitSuccess, onFileClick }: Props) {
 
   async function stageFile(path: string)   { await ipc.stageFile(repoId, path);   invalidate(); }
   async function unstageFile(path: string) { await ipc.unstageFile(repoId, path); invalidate(); }
+  async function discardFile(path: string) {
+    setWorking(true);
+    try { await ipc.discardFile(repoId, path); invalidate(); }
+    catch (e) { setError(String(e)); }
+    finally { setWorking(false); }
+  }
+  async function discardBatch(paths: string[]) {
+    setWorking(true);
+    try { await ipc.discardPaths(repoId, paths); invalidate(); }
+    catch (e) { setError(String(e)); }
+    finally { setWorking(false); }
+  }
 
   async function stagePaths(paths: string[]) {
     setWorking(true);
@@ -298,11 +344,8 @@ export function StagingPanel({ repoId, onCommitSuccess, onFileClick }: Props) {
   async function handleStash() {
     setWorking(true);
     setError(null);
-    try {
-      await ipc.stashPush(repoId, "");
-      qc.invalidateQueries({ queryKey: ["stashes", repoId] });
-      invalidate();
-    } catch (e) { setError(String(e)); }
+    try { await ipc.stashPush(repoId, ""); refresh(); }
+    catch (e) { setError(String(e)); }
     finally { setWorking(false); }
   }
 
@@ -448,6 +491,7 @@ export function StagingPanel({ repoId, onCommitSuccess, onFileClick }: Props) {
                 file={f} statusKind={f.staged}
                 actionIcon={<MinusCircle size={13} />}
                 onAction={() => unstageFile(f.path)}
+                onDiscard={() => discardFile(f.path)}
                 onRowClick={() => onFileClick?.(f.path, "staged")}
                 disabled={disabled} treeMode={false}
               />
@@ -456,6 +500,7 @@ export function StagingPanel({ repoId, onCommitSuccess, onFileClick }: Props) {
                 nodes={stagedTree} section="staged"
                 expandedDirs={expandedDirs} toggleDir={toggleDir}
                 onBatch={unstagePaths} onSingleFile={unstageFile}
+                onDiscard={discardFile} onDiscardBatch={discardBatch}
                 onFileClick={(p) => onFileClick?.(p, "staged")}
                 disabled={disabled}
               />
@@ -474,6 +519,7 @@ export function StagingPanel({ repoId, onCommitSuccess, onFileClick }: Props) {
                 file={f} statusKind={f.unstaged}
                 actionIcon={<PlusCircle size={13} />}
                 onAction={() => stageFile(f.path)}
+                onDiscard={() => discardFile(f.path)}
                 onRowClick={() => onFileClick?.(f.path, "unstaged")}
                 disabled={disabled} treeMode={false}
               />
@@ -482,6 +528,7 @@ export function StagingPanel({ repoId, onCommitSuccess, onFileClick }: Props) {
                 nodes={unstagedTree} section="unstaged"
                 expandedDirs={expandedDirs} toggleDir={toggleDir}
                 onBatch={stagePaths} onSingleFile={stageFile}
+                onDiscard={discardFile} onDiscardBatch={discardBatch}
                 onFileClick={(p) => onFileClick?.(p, "unstaged")}
                 disabled={disabled}
               />

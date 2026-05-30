@@ -214,6 +214,114 @@ pub fn unstage_paths(repo_id: String, paths: Vec<String>, state: State<RepoState
     Ok(())
 }
 
+/// Discard all changes (staged and unstaged) for a single file.
+///
+/// - Tracked file (exists in HEAD): restores index entry and working-tree file to HEAD.
+/// - New/untracked file (not in HEAD): removes the file from disk and from the index.
+#[tauri::command]
+pub fn discard_file(repo_id: String, path: String, state: State<RepoState>) -> Result<()> {
+    let repos = state.0.lock().unwrap();
+    let repo = repos.get(&repo_id).ok_or_else(|| Error::RepoNotFound(repo_id.clone()))?;
+    let workdir = crate::repo::workdir(repo)?;
+    let mut index = repo.index()?;
+
+    let head_tree: Option<git2::Tree> = match repo.head() {
+        Ok(head) => Some(head.peel_to_tree()?),
+        Err(_) => None,
+    };
+    let in_head = head_tree.as_ref()
+        .map(|t| t.get_path(Path::new(&path)).is_ok())
+        .unwrap_or(false);
+
+    if in_head {
+        let tree_entry = head_tree.as_ref().unwrap().get_path(Path::new(&path))?;
+        let entry = git2::IndexEntry {
+            ctime: git2::IndexTime::new(0, 0),
+            mtime: git2::IndexTime::new(0, 0),
+            dev: 0, ino: 0,
+            mode: tree_entry.filemode() as u32,
+            uid: 0, gid: 0, file_size: 0,
+            id: tree_entry.id(),
+            flags: 0, flags_extended: 0,
+            path: path.clone().into_bytes(),
+        };
+        index.add(&entry)?;
+        index.write()?;
+
+        // Restore working-tree file from the now-updated index.
+        let mut co = git2::build::CheckoutBuilder::new();
+        co.path(path.as_str()).force().update_index(false);
+        repo.checkout_index(Some(&mut index), Some(&mut co))?;
+    } else {
+        // New file with no HEAD version: delete from disk and remove from index.
+        let _ = index.remove_path(Path::new(&path));
+        index.write()?;
+        let full = workdir.join(&path);
+        if full.exists() {
+            std::fs::remove_file(&full)
+                .map_err(|e| Error::InvalidArg(e.to_string()))?;
+        }
+    }
+
+    Ok(())
+}
+
+/// Discard all changes for a set of paths at once (e.g. a whole directory).
+/// Same rules as `discard_file` applied per-path in one index write.
+#[tauri::command]
+pub fn discard_paths(repo_id: String, paths: Vec<String>, state: State<RepoState>) -> Result<()> {
+    let repos = state.0.lock().unwrap();
+    let repo = repos.get(&repo_id).ok_or_else(|| Error::RepoNotFound(repo_id.clone()))?;
+    let workdir = crate::repo::workdir(repo)?;
+    let mut index = repo.index()?;
+
+    let head_tree = match repo.head() {
+        Ok(head) => Some(head.peel_to_tree()?),
+        Err(_) => None,
+    };
+
+    let mut tracked: Vec<String> = Vec::new();
+
+    for path in &paths {
+        let in_head = head_tree.as_ref()
+            .map(|t| t.get_path(Path::new(path)).is_ok())
+            .unwrap_or(false);
+
+        if in_head {
+            let tree_entry = head_tree.as_ref().unwrap().get_path(Path::new(path))?;
+            let entry = git2::IndexEntry {
+                ctime: git2::IndexTime::new(0, 0),
+                mtime: git2::IndexTime::new(0, 0),
+                dev: 0, ino: 0,
+                mode: tree_entry.filemode() as u32,
+                uid: 0, gid: 0, file_size: 0,
+                id: tree_entry.id(),
+                flags: 0, flags_extended: 0,
+                path: path.clone().into_bytes(),
+            };
+            index.add(&entry)?;
+            tracked.push(path.clone());
+        } else {
+            let _ = index.remove_path(Path::new(path));
+            let full = workdir.join(path);
+            if full.exists() {
+                std::fs::remove_file(&full).map_err(|e| Error::InvalidArg(e.to_string()))?;
+            }
+        }
+    }
+
+    index.write()?;
+
+    if !tracked.is_empty() {
+        let mut co = git2::build::CheckoutBuilder::new();
+        for p in &tracked { co.path(p.as_str()); }
+        co.force().update_index(false);
+        repo.checkout_index(Some(&mut index), Some(&mut co))?;
+    }
+
+    Ok(())
+}
+
 /// Discard all staged and unstaged changes to tracked files (hard reset to HEAD).
 /// Untracked files are left untouched.
 #[tauri::command]
