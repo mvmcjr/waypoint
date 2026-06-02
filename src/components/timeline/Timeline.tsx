@@ -59,6 +59,11 @@ export const Timeline = forwardRef<TimelineHandle, Props>(function Timeline(
   );
   const stashOids = useMemo(() => new Set(stashes.map((s) => s.oid)), [stashes]);
 
+  const mergeInProgress = !!status?.merge_in_progress;
+  const hasWip = !!status && ((status.staged_count + status.unstaged_count) > 0 || mergeInProgress);
+  // WIP row is virtual index 0 when visible; commits are offset by this amount.
+  const wipOffset = hasWip && !searchActive ? 1 : 0;
+
   const [refsWidth, setRefsWidth] = useState(() =>
     readStored(LS_REFS_WIDTH, REFS_COL_WIDTH, REFS_WIDTH_MIN, REFS_WIDTH_MAX),
   );
@@ -114,7 +119,7 @@ export const Timeline = forwardRef<TimelineHandle, Props>(function Timeline(
   );
 
   const rowVirtualizer = useVirtualizer({
-    count: commits.length,
+    count: commits.length + wipOffset,
     getScrollElement: () => parentRef.current,
     estimateSize: () => ROW_HEIGHT,
     overscan: 20,
@@ -123,17 +128,19 @@ export const Timeline = forwardRef<TimelineHandle, Props>(function Timeline(
   useImperativeHandle(ref, () => ({
     scrollToOid(oid: string) {
       const idx = commits.findIndex((c) => c.commit.oid === oid);
-      if (idx !== -1) rowVirtualizer.scrollToIndex(idx, { align: "center" });
+      if (idx !== -1) rowVirtualizer.scrollToIndex(idx + wipOffset, { align: "center" });
     },
-  }));
+  }), [commits, rowVirtualizer, wipOffset]);
 
   const maxLanes = useMemo(() => commits.reduce((m, c) => {
     let n = Math.max(m, c.lane + 1);
     for (const e of c.edges) n = Math.max(n, e.from_lane + 1, e.to_lane + 1);
     return n;
   }, 1), [commits]);
-  const headItem = useMemo(() => commits.find((c) => c.commit.oid === headOid), [commits, headOid]);
-
+  const headCommit = useMemo(
+    () => commits.find((c) => c.commit.oid === headOid) ?? null,
+    [commits, headOid],
+  );
   if (commits.length === 0) {
     return (
       <div className="flex-1 flex items-center justify-center text-muted-foreground text-sm">
@@ -145,32 +152,12 @@ export const Timeline = forwardRef<TimelineHandle, Props>(function Timeline(
   const naturalGraphWidth = searchActive ? 0 : maxLanes * LANE_WIDTH + LANE_WIDTH;
   const graphColWidth = searchActive ? 0 : naturalGraphWidth + graphExtra;
 
-  const mergeInProgress = !!status?.merge_in_progress;
-  const hasWip = !!status && ((status.staged_count + status.unstaged_count) > 0 || mergeInProgress);
-  const headLane = headItem?.lane ?? 0;
-  const headColorIdx = headItem?.color_idx ?? 0;
-
   const virtualItems = rowVirtualizer.getVirtualItems();
   const startRow = virtualItems.length > 0 ? virtualItems[0].index : 0;
   const visibleRows = virtualItems.length;
 
   return (
     <div className="flex-1 flex flex-col overflow-hidden relative">
-      {/* WIP row — pinned above the scroll area, shown only when dirty */}
-      {hasWip && !searchActive && (
-        <WipRow
-          lane={headLane}
-          colorIdx={headColorIdx}
-          refsWidth={refsWidth}
-          graphWidth={graphColWidth}
-          stagedCount={status!.staged_count}
-          unstagedCount={status!.unstaged_count}
-          mergeInProgress={mergeInProgress}
-          isSelected={wipSelected}
-          onClick={onWipClick}
-        />
-      )}
-
       <div ref={parentRef} className="flex-1 overflow-auto relative" style={{ contain: "strict" }}>
         <div style={{ height: rowVirtualizer.getTotalSize(), position: "relative" }}>
           {/* SVG graph layer — offset by the refs column so it sits between refs and message */}
@@ -192,13 +179,15 @@ export const Timeline = forwardRef<TimelineHandle, Props>(function Timeline(
                 onSelectOid={stableSelectOid}
                 selectedOid={selectedOid}
                 headOid={headOid}
-                hasWip={hasWip}
+                headCommit={headCommit}
+                wipOffset={wipOffset}
+                mergeInProgress={mergeInProgress}
                 stashOids={stashOids}
               />
             </div>
           )}
 
-          {/* Commit rows */}
+          {/* Commit rows (+ WIP row at virtual index 0 when dirty) */}
           <div
             style={{
               position: "absolute",
@@ -208,7 +197,21 @@ export const Timeline = forwardRef<TimelineHandle, Props>(function Timeline(
             }}
           >
             {virtualItems.map((virtualItem) => {
-              const item = commits[virtualItem.index];
+              if (wipOffset > 0 && virtualItem.index === 0) {
+                return (
+                  <WipRow
+                    key="wip"
+                    refsWidth={refsWidth}
+                    graphWidth={graphColWidth}
+                    stagedCount={status!.staged_count}
+                    unstagedCount={status!.unstaged_count}
+                    mergeInProgress={mergeInProgress}
+                    isSelected={wipSelected}
+                    onClick={onWipClick}
+                  />
+                );
+              }
+              const item = commits[virtualItem.index - wipOffset];
               const isStash = isStashCommit(item.commit.oid, item.commit.summary, stashOids);
               return (
                 <CommitContextMenu

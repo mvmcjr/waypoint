@@ -25,8 +25,8 @@ export function laneColor(idx: number) {
 function cx(lane: number) {
   return lane * LANE_WIDTH + LANE_WIDTH / 2;
 }
-function cy(row: number, startRow: number) {
-  return (row - startRow) * ROW_HEIGHT + ROW_HEIGHT / 2;
+function cy(row: number, startRow: number, wipOffset: number = 0) {
+  return (row + wipOffset - startRow) * ROW_HEIGHT + ROW_HEIGHT / 2;
 }
 
 /**
@@ -81,33 +81,38 @@ interface Props {
   onSelectOid: (oid: string) => void;
   selectedOid: string | null;
   headOid: string | null;
-  hasWip?: boolean;
+  /** Pre-computed HEAD commit — avoids O(n) find on every scroll re-render. */
+  headCommit?: PositionedCommit | null;
+  wipOffset?: number;
+  mergeInProgress?: boolean;
   stashOids?: Set<string>;
 }
 
-export function GraphLayer({ commits, startRow, visibleRows, width, onSelectOid, selectedOid, headOid, hasWip, stashOids = EMPTY_STASH_OIDS }: Props) {
+export function GraphLayer({ commits, startRow, visibleRows, width, onSelectOid, selectedOid, headOid, headCommit, wipOffset = 0, mergeInProgress, stashOids = EMPTY_STASH_OIDS }: Props) {
   const endRow = startRow + visibleRows;
   const svgHeight = visibleRows * ROW_HEIGHT;
 
   const edges: { fromX: number; fromY: number; toX: number; toY: number; color: string; isDashed: boolean }[] = [];
 
   for (const item of commits) {
-    if (item.row >= endRow) break; // commits are row-ordered; nothing past here can enter the viewport
+    if (item.row + wipOffset >= endRow) break; // commits are row-ordered; nothing past here can enter the viewport
     let dashed: boolean | null = null;
     for (const e of item.edges) {
-      if (e.from_row >= endRow || e.to_row < startRow) continue;
+      if (e.from_row + wipOffset >= endRow || e.to_row + wipOffset < startRow) continue;
 
       if (dashed === null) dashed = isStashCommit(item.commit.oid, item.commit.summary, stashOids);
       const fX = cx(e.from_lane);
-      const fY = cy(e.from_row, startRow);
+      const fY = cy(e.from_row, startRow, wipOffset);
       const tX = cx(e.to_lane);
-      const tY = cy(e.to_row, startRow);
+      const tY = cy(e.to_row, startRow, wipOffset);
 
       edges.push({ fromX: fX, fromY: fY, toX: tX, toY: tY, color: laneColor(e.color_idx), isDashed: dashed });
     }
   }
 
-  const visible = commits.slice(startRow, Math.min(endRow, commits.length));
+  const commitStart = Math.max(0, startRow - wipOffset);
+  const commitEnd = Math.max(0, endRow - wipOffset);
+  const visible = commits.slice(commitStart, Math.min(commitEnd, commits.length));
 
   return (
     <svg
@@ -129,27 +134,35 @@ export function GraphLayer({ commits, startRow, visibleRows, width, onSelectOid,
         />
       ))}
 
-      {/* Extension line from top of SVG to HEAD dot when a WIP row sits above */}
-      {hasWip && startRow === 0 && (() => {
-        const h = commits.find((c) => c.commit.oid === headOid);
+      {/* WIP dot + connection line to HEAD (rendered here so x aligns with commit dots) */}
+      {wipOffset > 0 && (() => {
+        const h = headCommit ?? commits.find((c) => c.commit.oid === headOid);
         if (!h) return null;
         const x = cx(h.lane);
+        const color = laneColor(h.color_idx);
+        const headY = cy(h.row, startRow, wipOffset);
+        if (headY < 0 || headY > svgHeight + ROW_HEIGHT) return null;
+        // WIP is virtual row 0; reuse cy() so this stays consistent with commit dot math.
+        const wipY = cy(-1, startRow, wipOffset);
+        const lineY1 = Math.max(0, wipY);
         return (
-          <line
-            key="wip-ext"
-            x1={x} y1={0}
-            x2={x} y2={ROW_HEIGHT / 2}
-            stroke={laneColor(h.color_idx)}
-            strokeWidth={1.5}
-            opacity={0.75}
-          />
+          <>
+            <line key="wip-line" x1={x} y1={lineY1} x2={x} y2={headY}
+              stroke={color} strokeWidth={1.5} opacity={0.6} />
+            {wipY >= 0 && wipY <= svgHeight && (
+              <circle key="wip-dot" cx={x} cy={wipY} r={4.5}
+                fill="none"
+                stroke={mergeInProgress ? "#fb923c" : color}
+                strokeWidth={1.5} strokeDasharray="3 2" opacity={0.85} />
+            )}
+          </>
         );
       })()}
 
       {/* Commit dots — drawn on top of edges */}
       {visible.map((item) => {
         const x = cx(item.lane);
-        const y = cy(item.row, startRow);
+        const y = cy(item.row, startRow, wipOffset);
         const color = laneColor(item.color_idx);
         const isSelected = item.commit.oid === selectedOid;
         const isHead = item.commit.oid === headOid;

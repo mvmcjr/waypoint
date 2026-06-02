@@ -1,9 +1,7 @@
 import { Pencil, GitMerge } from "lucide-react";
-import { ROW_HEIGHT, LANE_WIDTH, laneColor } from "./GraphLayer";
+import { ROW_HEIGHT } from "./GraphLayer";
 
 interface Props {
-  lane: number;
-  colorIdx: number;
   refsWidth: number;
   graphWidth: number;
   stagedCount: number;
@@ -13,10 +11,8 @@ interface Props {
   onClick: () => void;
 }
 
-export function WipRow({ lane, colorIdx, refsWidth, graphWidth, stagedCount, unstagedCount, mergeInProgress, isSelected, onClick }: Props) {
+export function WipRow({ refsWidth, graphWidth, stagedCount, unstagedCount, mergeInProgress, isSelected, onClick }: Props) {
   const total = stagedCount + unstagedCount;
-  const dotX = lane * LANE_WIDTH + LANE_WIDTH / 2;
-  const color = laneColor(colorIdx);
 
   return (
     <div
@@ -29,28 +25,8 @@ export function WipRow({ lane, colorIdx, refsWidth, graphWidth, stagedCount, uns
           : "border-l-transparent hover:bg-white/[0.04]",
       ].join(" ")}
     >
-      {/* Refs column — empty for WIP */}
-      <div style={{ width: refsWidth, flexShrink: 0 }} />
-
-      {/* Graph: dashed dot + connector line */}
-      <div style={{ width: graphWidth, flexShrink: 0 }}>
-        <svg width={graphWidth} height={ROW_HEIGHT} style={{ display: "block" }}>
-          <line
-            x1={dotX} y1={ROW_HEIGHT / 2}
-            x2={dotX} y2={ROW_HEIGHT}
-            stroke={color} strokeWidth={1.5} opacity={0.6}
-          />
-          <circle
-            cx={dotX} cy={ROW_HEIGHT / 2}
-            r={4.5}
-            fill="none"
-            stroke={mergeInProgress ? "#fb923c" : color}
-            strokeWidth={1.5}
-            strokeDasharray="3 2"
-            opacity={0.85}
-          />
-        </svg>
-      </div>
+      {/* Spacer matching refs + graph columns — dot is rendered by GraphLayer */}
+      <div style={{ width: refsWidth + graphWidth, flexShrink: 0 }} />
 
       {/* Content */}
       <div className="flex-1 min-w-0 flex items-center gap-2.5 pl-2 pr-3">
