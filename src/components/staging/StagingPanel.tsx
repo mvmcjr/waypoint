@@ -565,6 +565,9 @@ export function StagingPanel({ repoId, onCommitSuccess, onFileClick }: Props) {
           placeholder="Summary (required)"
           maxLength={72}
           className="w-full rounded border border-border bg-background px-2 py-1.5 text-xs text-foreground placeholder:text-muted-foreground focus:outline-none focus:ring-1 focus:ring-ring"
+          autoCorrect="off"
+          autoComplete="off"
+          spellCheck={false}
         />
         <textarea
           value={description}
@@ -573,6 +576,9 @@ export function StagingPanel({ repoId, onCommitSuccess, onFileClick }: Props) {
           placeholder="Description (optional)…"
           rows={2}
           className="w-full resize-none rounded border border-border bg-background px-2 py-1.5 text-xs text-foreground placeholder:text-muted-foreground focus:outline-none focus:ring-1 focus:ring-ring"
+          autoCorrect="off"
+          autoComplete="off"
+          spellCheck={false}
         />
         <label className="flex items-center gap-1.5 text-xs text-muted-foreground cursor-pointer select-none hover:text-foreground transition-colors">
           <input

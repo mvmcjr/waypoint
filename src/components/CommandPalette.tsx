@@ -220,6 +220,9 @@ export function CommandPalette({ open, onClose }: Props) {
               onChange={(e) => setQuery(e.target.value)}
               placeholder={mode === "commands" ? "Type a command…" : "Filter recent repos…"}
               className="flex-1 bg-transparent py-3 text-sm text-foreground outline-none placeholder:text-muted-foreground/40"
+              autoCorrect="off"
+              autoComplete="off"
+              spellCheck={false}
             />
           </div>
 

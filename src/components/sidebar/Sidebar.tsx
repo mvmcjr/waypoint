@@ -38,6 +38,9 @@ export function Sidebar({ repoId, onSelectRef, onRefAction }: Props) {
               onChange={(e) => setFilter(e.target.value)}
               placeholder="Filter…"
               className="flex-1 bg-transparent text-[11px] text-foreground/70 placeholder:text-muted-foreground/35 outline-none min-w-0"
+              autoCorrect="off"
+              autoComplete="off"
+              spellCheck={false}
             />
           </div>
         </div>
