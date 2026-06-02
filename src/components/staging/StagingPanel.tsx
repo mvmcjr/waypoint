@@ -14,6 +14,7 @@ import {
 } from "@/components/ui/context-menu";
 import { ipc, type FileStatus } from "@/lib/ipc";
 import { useFileStatus, useHeadInfo, useRefs, useRefreshRepo } from "@/lib/queries";
+import { buildFileTree, type TreeNode, type DirNode } from "@/lib/fileTree";
 
 interface Props {
   repoId: string;
@@ -21,54 +22,9 @@ interface Props {
   onFileClick?: (path: string, section: "staged" | "unstaged") => void;
 }
 
-// ── Tree data model ──────────────────────────────────────────────────────────
+// ── Tree helpers ─────────────────────────────────────────────────────────────
 
-type FileNode = { kind: "file"; file: FileStatus };
-type DirNode  = { kind: "dir";  name: string; path: string; children: TreeNode[] };
-type TreeNode = FileNode | DirNode;
-
-function buildTree(files: FileStatus[]): TreeNode[] {
-  const dirMap = new Map<string, DirNode>();
-  const roots: TreeNode[] = [];
-  const sorted = [...files].sort((a, b) => a.path.localeCompare(b.path));
-
-  function getOrCreateDir(parts: string[], depth: number): DirNode {
-    const path = parts.slice(0, depth).join("/");
-    if (dirMap.has(path)) return dirMap.get(path)!;
-    const node: DirNode = { kind: "dir", name: parts[depth - 1], path, children: [] };
-    dirMap.set(path, node);
-    if (depth === 1) {
-      roots.push(node);
-    } else {
-      getOrCreateDir(parts, depth - 1).children.push(node);
-    }
-    return node;
-  }
-
-  for (const file of sorted) {
-    const parts = file.path.split("/");
-    if (parts.length === 1) {
-      roots.push({ kind: "file", file });
-    } else {
-      getOrCreateDir(parts.slice(0, -1), parts.length - 1).children.push({ kind: "file", file });
-    }
-  }
-
-  function sort(nodes: TreeNode[]): TreeNode[] {
-    nodes.sort((a, b) => {
-      if (a.kind !== b.kind) return a.kind === "dir" ? -1 : 1;
-      if (a.kind === "dir" && b.kind === "dir") return a.name.localeCompare(b.name);
-      if (a.kind === "file" && b.kind === "file") return a.file.path.localeCompare(b.file.path);
-      return 0;
-    });
-    for (const n of nodes) if (n.kind === "dir") sort(n.children);
-    return nodes;
-  }
-
-  return sort(roots);
-}
-
-function collectPaths(node: TreeNode): string[] {
+function collectPaths(node: TreeNode<FileStatus>): string[] {
   if (node.kind === "file") return [node.file.path];
   return node.children.flatMap(collectPaths);
 }
@@ -147,7 +103,7 @@ function FileRow({
 function DirRow({
   node, section, expanded, onToggle, onBatch, onDiscardBatch, disabled, indent, children,
 }: {
-  node: DirNode;
+  node: DirNode<FileStatus>;
   section: "staged" | "unstaged";
   expanded: boolean;
   onToggle: () => void;
@@ -200,7 +156,7 @@ function DirRow({
 function TreeNodes({
   nodes, section, expandedDirs, toggleDir, onBatch, onSingleFile, onDiscard, onDiscardBatch, onFileClick, disabled, indent = 0,
 }: {
-  nodes: TreeNode[];
+  nodes: TreeNode<FileStatus>[];
   section: "staged" | "unstaged";
   expandedDirs: Set<string>;
   toggleDir: (p: string) => void;
@@ -297,8 +253,8 @@ export function StagingPanel({ repoId, onCommitSuccess, onFileClick }: Props) {
 
   const staged   = files.filter((f) => f.staged !== null);
   const unstaged = files.filter((f) => f.unstaged !== null);
-  const stagedTree   = useMemo(() => buildTree(staged),   [staged]);
-  const unstagedTree = useMemo(() => buildTree(unstaged), [unstaged]);
+  const stagedTree   = useMemo(() => buildFileTree(staged),   [staged]);
+  const unstagedTree = useMemo(() => buildFileTree(unstaged), [unstaged]);
 
   const disabled = committing || working;
 

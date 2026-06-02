@@ -1,20 +1,12 @@
 import { ArrowLeft } from "lucide-react";
 import type { FileDiff, Hunk, DiffLine } from "@/lib/ipc";
+import { DIFF_STATUS_COLOR } from "@/lib/ipc";
 
 interface Props {
   file: FileDiff;
   commitSummary: string;
   onClose: () => void;
 }
-
-const STATUS_COLOR: Record<FileDiff["status"], string> = {
-  added: "text-green-400",
-  deleted: "text-red-400",
-  modified: "text-yellow-400",
-  renamed: "text-blue-400",
-  copied: "text-cyan-400",
-  other: "text-muted-foreground",
-};
 
 function parseHunkStart(header: string): { oldStart: number; newStart: number } {
   const m = header.match(/@@ -(\d+)(?:,\d+)? \+(\d+)(?:,\d+)? @@/);
@@ -110,7 +102,7 @@ export function FileDiffPanel({ file, commitSummary, onClose }: Props) {
 
         <span className="text-muted-foreground/40 text-xs">|</span>
 
-        <span className={`text-xs font-bold uppercase ${STATUS_COLOR[file.status]}`}>
+        <span className={`text-xs font-bold uppercase ${DIFF_STATUS_COLOR[file.status]}`}>
           {file.status[0].toUpperCase()}
         </span>
 

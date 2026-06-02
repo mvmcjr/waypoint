@@ -44,6 +44,15 @@ export interface FileDiff {
   hunks: Hunk[];
 }
 
+export const DIFF_STATUS_COLOR: Record<FileDiff["status"], string> = {
+  added:    "text-green-400",
+  deleted:  "text-red-400",
+  modified: "text-yellow-400",
+  renamed:  "text-blue-400",
+  copied:   "text-cyan-400",
+  other:    "text-muted-foreground",
+};
+
 export interface Hunk {
   header: string;
   lines: DiffLine[];
