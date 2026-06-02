@@ -78,6 +78,10 @@ export function RepoView() {
   const repoIdRef = useRef(repoId);
   repoIdRef.current = repoId;
 
+  // Tracks whether the working directory was dirty in the previous status poll,
+  // so we can detect the dirty→clean transition caused by an external commit.
+  const wasWorkingDirDirtyRef = useRef(false);
+
   const [dialog, setDialog] = useState<DialogState>({ kind: "none" });
   const [wipSelected, setWipSelected] = useState(false);
   const [focusedFile, setFocusedFile] = useState<FileDiff | null>(null);
@@ -194,6 +198,7 @@ export function RepoView() {
     setIsFetching(false);
     setIsPulling(false);
     setIsPushing(false);
+    wasWorkingDirDirtyRef.current = false;
   }, [repoId]);
 
   // Tauri's WebView doesn't fire browser focus/visibilitychange events, so
@@ -226,6 +231,21 @@ export function RepoView() {
     });
     return () => { cancelled = true; unlisten?.(); };
   }, [repoId, refresh]);
+
+  // Fallback for when the FS watcher fires mid-commit (before git has finished
+  // writing refs). The watcher's per-path leading-edge timer can deliver the
+  // first object-write event 300 ms early; React Query deduplicates the second
+  // watcher fire against the in-flight request, so walk_commits runs with stale
+  // refs and the result is stored as fresh. Status polling is immune because it
+  // runs on its own independent interval, well after the commit is fully on disk.
+  // When status goes dirty→clean, the commit is guaranteed complete: refresh commits.
+  useEffect(() => {
+    if (!status) return;
+    const isDirty = status.staged_count > 0 || status.unstaged_count > 0 || status.merge_in_progress;
+    const wasDirty = wasWorkingDirDirtyRef.current;
+    wasWorkingDirDirtyRef.current = isDirty;
+    if (wasDirty && !isDirty) refresh();
+  }, [status, refresh]);
 
   // After amend or rebase, the selected commit's OID no longer exists in the
   // new commit list. Clear the stale selection so the detail panel doesn't linger.
