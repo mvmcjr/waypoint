@@ -219,17 +219,30 @@ export function RepoView() {
 
   // Listen for FS watcher events emitted by the Rust backend when an external
   // git operation modifies the repo (commit from CLI, branch move, fetch, etc.).
+  // A second refresh fires 800 ms later to handle the race where the debounce
+  // triggers before git finishes writing refs: the first walk_commits runs with
+  // stale refs and React Query deduplicates the second watcher fire against the
+  // in-flight request, caching the stale result. The delayed retry ensures a
+  // correct re-fetch after all writes are guaranteed on disk.
   useEffect(() => {
     if (!repoId) return;
     let unlisten: (() => void) | undefined;
+    let retryTimer: ReturnType<typeof setTimeout> | null = null;
     let cancelled = false;
     listen<string>('repo-changed', (event) => {
-      if (event.payload === repoId) refresh();
+      if (event.payload !== repoId) return;
+      refresh();
+      if (retryTimer !== null) clearTimeout(retryTimer);
+      retryTimer = setTimeout(() => { retryTimer = null; refresh(); }, 800);
     }).then((fn) => {
       if (cancelled) fn();
       else unlisten = fn;
     });
-    return () => { cancelled = true; unlisten?.(); };
+    return () => {
+      cancelled = true;
+      unlisten?.();
+      if (retryTimer !== null) clearTimeout(retryTimer);
+    };
   }, [repoId, refresh]);
 
   // Fallback for when the FS watcher fires mid-commit (before git has finished
