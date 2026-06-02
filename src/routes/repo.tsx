@@ -377,6 +377,7 @@ export function RepoView() {
 
   function handleCommitSuccess() {
     setWipSelected(false);
+    setFocusedStagingFile(null);
     refresh();
   }
 
