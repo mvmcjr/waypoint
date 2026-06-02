@@ -226,6 +226,7 @@ export const Timeline = forwardRef<TimelineHandle, Props>(function Timeline(
                     pushedTagNames={pushedTagNames}
                     isStash={isStash}
                     onRefAction={stableRefAction}
+                    onCommitAction={stableCommitAction}
                     onSelect={stableSelectOid}
                   />
                 </CommitContextMenu>

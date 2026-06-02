@@ -3,6 +3,7 @@ import { formatDistanceToNow } from "date-fns";
 import type { PositionedCommit } from "@/lib/ipc";
 import { RefBadge, groupRefs, type RefAction } from "./RefBadge";
 import { ROW_HEIGHT } from "./GraphLayer";
+import type { CommitAction } from "./CommitContextMenu";
 
 interface Props {
   item: PositionedCommit;
@@ -14,10 +15,11 @@ interface Props {
   pushedTagNames?: Set<string>;
   isStash?: boolean;
   onRefAction?: (action: RefAction) => void;
+  onCommitAction?: (action: CommitAction) => void;
   onSelect: (oid: string) => void;
 }
 
-export const CommitRow = memo(function CommitRow({ item, refsWidth, graphWidth, isSelected, isHead, headBranch, pushedTagNames, isStash, onRefAction, onSelect }: Props) {
+export const CommitRow = memo(function CommitRow({ item, refsWidth, graphWidth, isSelected, isHead, headBranch, pushedTagNames, isStash, onRefAction, onCommitAction, onSelect }: Props) {
   const { commit } = item;
   const relative = formatDistanceToNow(new Date(commit.timestamp * 1000), { addSuffix: true });
   const refGroups = groupRefs(commit.refs, item.commit.local_branches, item.commit.remote_branches, headBranch, pushedTagNames);
@@ -47,7 +49,7 @@ export const CommitRow = memo(function CommitRow({ item, refsWidth, graphWidth, 
         className="flex items-center gap-0.5 px-2 overflow-hidden"
       >
         {visibleRefs.map((g) => (
-          <RefBadge key={g.name} {...g} oid={commit.oid} onAction={onRefAction} />
+          <RefBadge key={g.name} {...g} oid={commit.oid} onAction={onRefAction} onCommitAction={onCommitAction} commitSummary={commit.summary} />
         ))}
         {hiddenCount > 0 && (
           <span className="text-[9px] font-mono text-muted-foreground/40 shrink-0 pl-0.5">+{hiddenCount}</span>

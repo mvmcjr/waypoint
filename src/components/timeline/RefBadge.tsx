@@ -6,6 +6,8 @@ import {
   ContextMenuSeparator,
   ContextMenuTrigger,
 } from "@/components/ui/context-menu";
+import type { CommitAction } from "./CommitContextMenu";
+import { CommitMenuItems } from "./CommitMenuItems";
 
 // Shared action type — also re-exported from RefTree for sidebar use.
 export type RefAction =
@@ -77,63 +79,93 @@ export function groupRefs(
 interface Props extends RefGroup {
   /** OID of the commit this badge sits on — enables checkout / merge / rebase actions. */
   oid?: string;
-  /** When provided, the context menu shows the full set of ref actions. */
+  /** Ref-specific actions (push, delete, checkout-tag). */
   onAction?: (action: RefAction) => void;
+  /** Commit-level actions shared with the row context menu. */
+  onCommitAction?: (action: CommitAction) => void;
+  /** Commit summary — needed for cherry-pick label. */
+  commitSummary?: string;
 }
 
 function BadgeMenu({
   name, trackingName, hasLocal, isHead, isTag,
-  oid, onAction, children,
+  oid, onAction, onCommitAction, commitSummary, children,
 }: Props & { children: React.ReactNode }) {
-  const act = onAction; // alias for brevity
+  const act = onAction;
+  const ca  = onCommitAction;
 
-  let menuItems: React.ReactNode;
-
-  if (isHead) {
-    menuItems = (
-      <>
-        <ContextMenuItem disabled className="text-muted-foreground text-xs">
-          Current branch
-        </ContextMenuItem>
-        <ContextMenuSeparator />
-        <ContextMenuItem onClick={() => navigator.clipboard.writeText(name)}>
-          Copy name
-        </ContextMenuItem>
-        {act && (
-          <>
-            <ContextMenuSeparator />
-            {oid && (
-              <ContextMenuItem onClick={() => act({ kind: "create-tag", oid })}>
-                Create tag here…
-              </ContextMenuItem>
-            )}
-            <ContextMenuItem onClick={() => act({ kind: "push", branchName: name })}>
-              Push…
+  // Build the checkout item scoped to this specific badge's branch/tag.
+  const checkoutSlot: React.ReactNode = isHead ? null
+    : isTag ? (
+        oid && ca
+          ? <ContextMenuItem onClick={() => ca({ kind: "checkout-detached", oid })}>Checkout (detached)</ContextMenuItem>
+          : null
+      )
+    : hasLocal ? (
+        ca
+          ? <ContextMenuItem onClick={() => ca({ kind: "checkout-branch", branchName: name })}>
+              Checkout <span className="ml-auto font-mono text-xs text-muted-foreground">{name}</span>
             </ContextMenuItem>
-          </>
-        )}
-      </>
-    );
-  } else if (isTag) {
-    menuItems = (
-      <>
-        {act && oid && (
-          <ContextMenuItem onClick={() => act({ kind: "checkout-tag", oid })}>
-            Checkout (detached)
+          : null
+      )
+    : (ca && trackingName
+        ? <ContextMenuItem onClick={() => ca({ kind: "checkout-remote-branch", remoteBranch: trackingName })}>
+            Checkout <span className="ml-auto font-mono text-xs text-muted-foreground">{name}</span>
+          </ContextMenuItem>
+        : null);
+
+  return (
+    <ContextMenu>
+      <ContextMenuTrigger render={<span />}>{children}</ContextMenuTrigger>
+      <ContextMenuContent className="w-56">
+
+        {/* ── Shared commit-level items ─────────────────────────── */}
+        {oid && ca ? (
+          <CommitMenuItems
+            oid={oid}
+            isHead={isHead}
+            mergeLabel={name}
+            commitSummary={commitSummary}
+            onAction={ca}
+            extraCopyItems={
+              <ContextMenuItem onClick={() => navigator.clipboard.writeText(name)}>
+                Copy name
+              </ContextMenuItem>
+            }
+            checkoutSlot={checkoutSlot}
+            hideCreateTag={isTag}
+            hideMergeRebase={isTag}
+            hideReset={isHead}
+          />
+        ) : (
+          <ContextMenuItem onClick={() => navigator.clipboard.writeText(name)}>
+            Copy name
           </ContextMenuItem>
         )}
-        {act && (
-          <>
-            <ContextMenuItem onClick={() => act({ kind: "push-tag", tagName: name })}>
-              Push tag…
-            </ContextMenuItem>
-          </>
-        )}
-        <ContextMenuSeparator />
-        <ContextMenuItem onClick={() => navigator.clipboard.writeText(name)}>
-          Copy name
-        </ContextMenuItem>
-        {act && (
+
+        {/* ── Badge-specific: push ──────────────────────────────── */}
+        {isTag
+          ? act && (
+              <>
+                <ContextMenuSeparator />
+                <ContextMenuItem onClick={() => act({ kind: "push-tag", tagName: name })}>
+                  Push tag…
+                </ContextMenuItem>
+              </>
+            )
+          : hasLocal
+          ? act && (
+              <>
+                <ContextMenuSeparator />
+                <ContextMenuItem onClick={() => act({ kind: "push", branchName: name })}>
+                  Push…
+                </ContextMenuItem>
+              </>
+            )
+          : null}
+
+        {/* ── Badge-specific: delete ────────────────────────────── */}
+        {isTag && act && (
           <>
             <ContextMenuSeparator />
             <ContextMenuItem
@@ -144,43 +176,8 @@ function BadgeMenu({
             </ContextMenuItem>
           </>
         )}
-      </>
-    );
-  } else if (hasLocal) {
-    // Local branch (non-HEAD)
-    menuItems = (
-      <>
-        {act && (
-          <ContextMenuItem onClick={() => act({ kind: "checkout-branch", branchName: name })}>
-            Checkout {name}
-          </ContextMenuItem>
-        )}
-        {act && oid && (
+        {!isTag && hasLocal && !isHead && act && (
           <>
-            <ContextMenuSeparator />
-            <ContextMenuItem onClick={() => act({ kind: "merge", oid, label: name })}>
-              Merge into current
-            </ContextMenuItem>
-            <ContextMenuItem onClick={() => act({ kind: "rebase", oid })}>
-              Rebase current onto {name}
-            </ContextMenuItem>
-          </>
-        )}
-        <ContextMenuSeparator />
-        <ContextMenuItem onClick={() => navigator.clipboard.writeText(name)}>
-          Copy name
-        </ContextMenuItem>
-        {act && oid && (
-          <ContextMenuItem onClick={() => act({ kind: "create-tag", oid })}>
-            Create tag here…
-          </ContextMenuItem>
-        )}
-        {act && (
-          <>
-            <ContextMenuSeparator />
-            <ContextMenuItem onClick={() => act({ kind: "push", branchName: name })}>
-              Push…
-            </ContextMenuItem>
             <ContextMenuSeparator />
             <ContextMenuItem
               onClick={() => act({ kind: "delete-branch", branchName: name })}
@@ -190,50 +187,13 @@ function BadgeMenu({
             </ContextMenuItem>
           </>
         )}
-      </>
-    );
-  } else {
-    // Remote-only branch
-    menuItems = (
-      <>
-        {act && trackingName && (
-          <ContextMenuItem onClick={() => act({ kind: "checkout-remote-branch", remoteBranch: trackingName })}>
-            Checkout {name}
-          </ContextMenuItem>
-        )}
-        {act && oid && (
-          <>
-            <ContextMenuSeparator />
-            <ContextMenuItem onClick={() => act({ kind: "merge", oid, label: name })}>
-              Merge into current
-            </ContextMenuItem>
-            <ContextMenuItem onClick={() => act({ kind: "rebase", oid })}>
-              Rebase current onto {name}
-            </ContextMenuItem>
-          </>
-        )}
-        <ContextMenuSeparator />
-        <ContextMenuItem onClick={() => navigator.clipboard.writeText(name)}>
-          Copy name
-        </ContextMenuItem>
-        {act && oid && (
-          <ContextMenuItem onClick={() => act({ kind: "create-tag", oid })}>
-            Create tag here…
-          </ContextMenuItem>
-        )}
-      </>
-    );
-  }
 
-  return (
-    <ContextMenu>
-      <ContextMenuTrigger render={<span />}>{children}</ContextMenuTrigger>
-      <ContextMenuContent>{menuItems}</ContextMenuContent>
+      </ContextMenuContent>
     </ContextMenu>
   );
 }
 
-export function RefBadge({ name, trackingName, hasLocal, hasRemote, isHead, isTag, oid, onAction }: Props) {
+export function RefBadge({ name, trackingName, hasLocal, hasRemote, isHead, isTag, oid, onAction, onCommitAction, commitSummary }: Props) {
   const base = "inline-flex items-center gap-0.5 px-1.5 py-px rounded text-[10px] font-mono min-w-0 max-w-[124px]";
 
   let badge: React.ReactNode;
@@ -280,6 +240,7 @@ export function RefBadge({ name, trackingName, hasLocal, hasRemote, isHead, isTa
       hasLocal={hasLocal} hasRemote={hasRemote}
       isHead={isHead} isTag={isTag}
       oid={oid} onAction={onAction}
+      onCommitAction={onCommitAction} commitSummary={commitSummary}
     >
       {badge}
     </BadgeMenu>
