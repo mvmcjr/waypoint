@@ -1,6 +1,6 @@
 import { useState, useRef, useEffect } from "react";
 import { format } from "date-fns";
-import { Copy, Check } from "lucide-react";
+import { Copy, Check, ChevronLeft, ChevronRight } from "lucide-react";
 import { useCommitDiff } from "@/lib/queries";
 import type { FileDiff, PositionedCommit } from "@/lib/ipc";
 import { DiffViewer } from "./DiffViewer";
@@ -16,12 +16,16 @@ export function CommitDetail({ repoId, item, onFileClick }: Props) {
   const { commit } = item;
   const { data: diff, isLoading } = useCommitDiff(repoId, commit.oid);
   const [copied, setCopied] = useState(false);
+  const [collapsed, setCollapsed] = useState(false);
   const copyTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
 
   // Clear the reset-timer if the component unmounts before it fires.
   useEffect(() => () => {
     if (copyTimerRef.current !== null) clearTimeout(copyTimerRef.current);
   }, []);
+
+  // Re-expand when the user selects a different commit.
+  useEffect(() => { setCollapsed(false); }, [commit.oid]);
 
   const date = new Date(commit.timestamp * 1000);
 
@@ -36,11 +40,32 @@ export function CommitDetail({ repoId, item, onFileClick }: Props) {
     }
   }
 
+  if (collapsed) {
+    return (
+      <aside className="w-8 shrink-0 border-l border-border flex flex-col bg-card items-center pt-2 overflow-hidden">
+        <button
+          onClick={() => setCollapsed(false)}
+          className="p-1 rounded hover:bg-white/10 text-muted-foreground hover:text-foreground transition-colors"
+          title="Expand commit detail"
+        >
+          <ChevronLeft size={14} />
+        </button>
+      </aside>
+    );
+  }
+
   return (
     <aside className="w-80 shrink-0 border-l border-border flex flex-col bg-card overflow-hidden">
       {/* Header */}
-      <div className="px-3 py-2 border-b border-border text-xs font-semibold text-muted-foreground uppercase tracking-wider">
-        Commit
+      <div className="px-3 py-2 border-b border-border flex items-center justify-between">
+        <span className="text-xs font-semibold text-muted-foreground uppercase tracking-wider">Commit</span>
+        <button
+          onClick={() => setCollapsed(true)}
+          className="p-0.5 rounded hover:bg-white/10 text-muted-foreground hover:text-foreground transition-colors"
+          title="Collapse"
+        >
+          <ChevronRight size={14} />
+        </button>
       </div>
 
       {/* Meta */}
