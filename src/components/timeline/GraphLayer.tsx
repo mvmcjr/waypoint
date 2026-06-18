@@ -141,15 +141,19 @@ export function GraphLayer({ commits, startRow, visibleRows, width, onSelectOid,
         const x = cx(h.lane);
         const color = laneColor(h.color_idx);
         const headY = cy(h.row, startRow, wipOffset);
-        if (headY < 0 || headY > svgHeight + ROW_HEIGHT) return null;
         // WIP is virtual row 0; reuse cy() so this stays consistent with commit dot math.
         const wipY = cy(-1, startRow, wipOffset);
         const lineY1 = Math.max(0, wipY);
+        const headInView = headY >= 0 && headY <= svgHeight + ROW_HEIGHT;
+        const wipInView = wipY >= 0 && wipY <= svgHeight;
+        if (!headInView && !wipInView) return null;
         return (
           <>
-            <line key="wip-line" x1={x} y1={lineY1} x2={x} y2={headY}
-              stroke={color} strokeWidth={1.5} opacity={0.6} />
-            {wipY >= 0 && wipY <= svgHeight && (
+            {headInView && (
+              <line key="wip-line" x1={x} y1={lineY1} x2={x} y2={headY}
+                stroke={color} strokeWidth={1.5} opacity={0.6} />
+            )}
+            {wipInView && (
               <circle key="wip-dot" cx={x} cy={wipY} r={4.5}
                 fill="none"
                 stroke={mergeInProgress ? "#fb923c" : color}

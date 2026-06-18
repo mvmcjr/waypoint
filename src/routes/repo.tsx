@@ -35,6 +35,9 @@ import { RefreshCw, ArrowDown, ArrowUp } from "lucide-react";
 import { toast } from "sonner";
 import { Button } from "@/components/ui/button";
 
+const AUTO_FETCH_INTERVAL_MS = 5 * 60 * 1000;
+const FOCUS_FETCH_COOLDOWN_MS = 60 * 1000;
+
 function getDefaultRemote(remotes: RemoteInfo[]): string {
   return remotes.find((r) => r.name === "origin")?.name ?? remotes[0]?.name ?? "";
 }
@@ -90,8 +93,44 @@ export function RepoView() {
   const [focusedStagingFile, setFocusedStagingFile] = useState<{ repoId: string; path: string; section: "staged" | "unstaged" } | null>(null);
   const [isFetching, setIsFetching] = useState(false);
 
+  // Refs kept current each render so async callbacks and intervals always read
+  // up-to-date values without closing over stale state.
+  const remotesRef = useRef(remotes);
+  remotesRef.current = remotes;
+  const isFetchingRef = useRef(isFetching);
+  isFetchingRef.current = isFetching;
+  const refreshRef = useRef(refresh);
+  refreshRef.current = refresh;
+  const lastAutoFetchRef = useRef<number>(0);
+  const autoFetchInFlightRef = useRef(false);
+
+  async function silentFetch(forRepoId: string, remoteName: string) {
+    if (autoFetchInFlightRef.current || isFetchingRef.current) return;
+    autoFetchInFlightRef.current = true;
+    lastAutoFetchRef.current = Date.now();
+    try {
+      await ipc.fetchRemote(forRepoId, remoteName);
+      if (repoIdRef.current !== forRepoId) return;
+      refreshRef.current();
+    } catch {
+      // silent — user can manually fetch if needed
+    } finally {
+      autoFetchInFlightRef.current = false;
+    }
+  }
+
+  function tryAutoFetch() {
+    const r = remotesRef.current;
+    const id = repoIdRef.current;
+    if (!id || !r || r.length === 0) return;
+    const remoteName = getDefaultRemote(r);
+    if (!remoteName) return;
+    void silentFetch(id, remoteName);
+  }
+
   async function handleFetch() {
     if (!remotes || remotes.length === 0 || !repoId) return;
+    if (autoFetchInFlightRef.current) return;
     const remoteName = getDefaultRemote(remotes);
     if (!remoteName) return;
     const myRepoId = repoId;
@@ -203,18 +242,26 @@ export function RepoView() {
 
   // Tauri's WebView doesn't fire browser focus/visibilitychange events, so
   // refetchOnWindowFocus won't work. Use the native Tauri focus event instead.
+  // Also auto-fetch on focus (with a cooldown so rapid alt-tabs don't spam).
   useEffect(() => {
     let unlisten: (() => void) | undefined;
     let cancelled = false;
     getCurrentWindow()
       .onFocusChanged(({ payload: focused }) => {
-        if (focused) refresh();
+        if (focused) {
+          refresh();
+          if (Date.now() - lastAutoFetchRef.current > FOCUS_FETCH_COOLDOWN_MS) {
+            tryAutoFetch();
+          }
+        }
       })
       .then((fn) => {
         if (cancelled) fn(); // cleanup already ran — unregister immediately
         else unlisten = fn;
       });
     return () => { cancelled = true; unlisten?.(); };
+  // tryAutoFetch reads from refs — safe to omit from deps
+  // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [refresh]);
 
   // Listen for FS watcher events emitted by the Rust backend when an external
@@ -259,6 +306,25 @@ export function RepoView() {
     wasWorkingDirDirtyRef.current = isDirty;
     if (wasDirty && !isDirty) refresh();
   }, [status, refresh]);
+
+  // Auto-fetch once when a repo is opened. 2 s delay lets the remotes query
+  // complete before tryAutoFetch checks remotesRef.
+  useEffect(() => {
+    if (!repoId) return;
+    const timer = setTimeout(tryAutoFetch, 2000);
+    return () => clearTimeout(timer);
+  // tryAutoFetch reads from refs — intentionally only fires on repo open
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [repoId]);
+
+  // Auto-fetch every 5 minutes in the background.
+  useEffect(() => {
+    if (!repoId) return;
+    const timer = setInterval(tryAutoFetch, AUTO_FETCH_INTERVAL_MS);
+    return () => clearInterval(timer);
+  // tryAutoFetch reads from refs — repoId dep resets the interval on tab switch
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [repoId]);
 
   // After amend or rebase, the selected commit's OID no longer exists in the
   // new commit list. Clear the stale selection so the detail panel doesn't linger.
