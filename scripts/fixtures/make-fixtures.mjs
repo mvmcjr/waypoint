@@ -469,6 +469,43 @@ function makeSquashable() {
 }
 
 /**
+ * MANY-REFS
+ * A single commit carrying many branches and tags — more than the timeline
+ * shows inline (MAX_REFS = 3). Tests the "+N" overflow badge: hovering it
+ * should reveal every ref in a wrapped, scrollable hover card.
+ */
+function makeManyRefs() {
+  const dir = fresh('many-refs');
+  initRepo(dir);
+
+  write(dir, 'README.md', '# Many Refs\n\nOne commit, lots of branches and tags. Hover the "+N" badge in the timeline.\n');
+  run('git add .', dir);
+  run('git commit -m "Initial commit"', dir);
+
+  write(dir, 'src/index.js', 'export const APP = "many-refs";\n');
+  run('git add .', dir);
+  run('git commit -m "Add app entrypoint"', dir);
+
+  // Pile a dozen branches onto the current HEAD without moving it.
+  const branches = [
+    'feature/login', 'feature/signup', 'feature/dashboard', 'feature/settings',
+    'bugfix/header', 'bugfix/footer', 'release/v2', 'release/v3',
+    'experiment/dark-mode', 'experiment/new-nav', 'hotfix/crash', 'chore/deps',
+  ];
+  for (const b of branches) {
+    run(`git branch ${b}`, dir);
+  }
+
+  // A few tags on the same commit for good measure.
+  run('git tag v2.0.0', dir);
+  run('git tag -a v2.0.0-rc1 -m "release candidate"', dir);
+  run('git tag latest', dir);
+
+  // Stay on main so HEAD shares the commit with all the above.
+  log('many-refs', dir, `(${branches.length} branches + 3 tags on one commit → hover "+N")`);
+}
+
+/**
  * DETACHED HEAD
  * HEAD is checked out at a specific commit (not a branch).
  * Tests the amber "detached" indicator in the toolbar.
@@ -724,6 +761,7 @@ const SCENARIOS = [
   ['cherry-pick-ready',    makeCherryPickReady],
   ['cherry-pick-clean',    makeCherryPickClean],
   ['squashable',           makeSquashable],
+  ['many-refs',            makeManyRefs],
   ['detached-head',        makeDetachedHead],
   ['ahead-of-remote',      makeAheadOfRemote],
   ['stash',                makeStash],
