@@ -423,6 +423,52 @@ function makeCherryPickClean() {
 }
 
 /**
+ * SQUASHABLE
+ * A `feature` branch with a linear chain of small WIP commits on top of a
+ * shared base. Right-click the first feature commit ("wip: scaffold parser")
+ * and choose "Squash up to HEAD…" — the four feature commits collapse into one.
+ *
+ * Stays purely linear (no merges) so the squash range is unambiguous, and the
+ * base commit has a single parent so it can become the squashed commit's parent.
+ */
+function makeSquashable() {
+  const dir = fresh('squashable');
+  initRepo(dir);
+
+  // ── Shared baseline on main ───────────────────────────────────────────────
+  write(dir, 'README.md', '# Squashable\n\nRight-click "wip: scaffold parser" on the `feature` branch and choose "Squash up to HEAD…".\n');
+  write(dir, 'src/index.js', 'console.log("app start");\n');
+  run('git add .', dir);
+  run('git commit -m "Initial commit"', dir);
+
+  write(dir, 'src/index.js', 'import "./parser.js";\nconsole.log("app start");\n');
+  run('git add .', dir);
+  run('git commit -m "Wire parser entrypoint"', dir);
+
+  // ── Feature branch: a chain of small commits begging to be squashed ───────
+  run('git checkout -b feature', dir);
+
+  write(dir, 'src/parser.js', 'export function parse() {\n  // TODO\n}\n');
+  run('git add .', dir);
+  run('git commit -m "wip: scaffold parser"', dir);
+
+  write(dir, 'src/parser.js', 'export function parse(input) {\n  return input.split(" ");\n}\n');
+  run('git add .', dir);
+  run('git commit -m "wip: tokenize on spaces"', dir);
+
+  write(dir, 'src/parser.js', 'export function parse(input) {\n  return input.trim().split(/\\s+/);\n}\n');
+  run('git add .', dir);
+  run('git commit -m "fix: handle extra whitespace"', dir);
+
+  write(dir, 'src/parser.test.js', 'import { parse } from "./parser.js";\nconsole.assert(parse(" a  b ").length === 2);\n');
+  run('git add .', dir);
+  run('git commit -m "test: add parser smoke test"', dir);
+
+  log('squashable', dir,
+    '(right-click "wip: scaffold parser" on feature → Squash up to HEAD → 4 commits become 1)');
+}
+
+/**
  * DETACHED HEAD
  * HEAD is checked out at a specific commit (not a branch).
  * Tests the amber "detached" indicator in the toolbar.
@@ -677,6 +723,7 @@ const SCENARIOS = [
   ['cherry-pick-conflict', makeCherryPickConflict],
   ['cherry-pick-ready',    makeCherryPickReady],
   ['cherry-pick-clean',    makeCherryPickClean],
+  ['squashable',           makeSquashable],
   ['detached-head',        makeDetachedHead],
   ['ahead-of-remote',      makeAheadOfRemote],
   ['stash',                makeStash],
