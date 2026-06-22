@@ -23,10 +23,17 @@ pub struct PullResult {
 /// Uses `tokio::process::Command` so the wait is non-blocking: the Tauri async
 /// runtime can keep the UI responsive while git is running over the network.
 async fn run_git(workdir: &std::path::Path, args: &[&str]) -> Result<()> {
-    let output = tokio::process::Command::new("git")
-        .current_dir(workdir)
-        .args(args)
-        .output()
+    let mut cmd = tokio::process::Command::new("git");
+    cmd.current_dir(workdir)
+        .args(args);
+
+    #[cfg(target_os = "windows")]
+    {
+        const CREATE_NO_WINDOW: u32 = 0x08000000;
+        cmd.creation_flags(CREATE_NO_WINDOW);
+    }
+
+    let output = cmd.output()
         .await
         .map_err(|e| Error::InvalidArg(format!("failed to run git: {}", e)))?;
 
