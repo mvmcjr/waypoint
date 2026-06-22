@@ -105,6 +105,8 @@ pub fn run() {
             commands::actions::create_branch_at,
             commands::actions::reset_head,
             commands::actions::rebase_onto,
+            commands::actions::get_squash_preview,
+            commands::actions::squash_commits,
             commands::actions::delete_branch,
             commands::actions::get_repo_status,
             commands::staging::list_status,

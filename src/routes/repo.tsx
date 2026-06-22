@@ -19,6 +19,7 @@ import {
   DeleteBranchDialog,
   ResetDialog,
   RebaseDialog,
+  SquashDialog,
   MergeDialog,
   CherryPickDialog,
   PullConflictsDialog,
@@ -53,6 +54,7 @@ type DialogState =
   | { kind: "delete-branch"; branchName: string }
   | { kind: "reset"; oid: string }
   | { kind: "rebase"; oid: string }
+  | { kind: "squash"; oids: string[] }
   | { kind: "merge"; oid: string; label: string }
   | { kind: "cherry-pick"; oid: string; summary: string }
   | { kind: "pull-conflicts" }
@@ -65,8 +67,10 @@ type DialogState =
 // ─── Main view ─────────────────────────────────────────────────────────────
 
 export function RepoView() {
-  const { activeTabId: repoId, commits, selectedOid, searchFilter, setCommits, selectCommit, setSearchFilter } =
+  const { activeTabId: repoId, commits, selectedOid, multiSelectedOids, searchFilter, setCommits, selectCommit, setMultiSelected, setSearchFilter } =
     useStore();
+  // Anchor commit for shift-click range selection (oid of the last plain/ctrl click).
+  const selectionAnchorRef = useRef<string | null>(null);
 
   const { data, isLoading, error } = useCommits(repoId);
   const { data: head } = useHeadInfo(repoId);
@@ -345,10 +349,49 @@ export function RepoView() {
     }
   }, [status?.merge_in_progress, repoId, selectCommit]);
 
-  function handleSelectCommit(oid: string) {
+  function handleSelectCommit(oid: string, mods: { ctrl: boolean; shift: boolean }) {
     setWipSelected(false);
     setFocusedFile(null);
     setFocusedStagingFile(null);
+
+    // Shift-click: select the contiguous range from the anchor to this commit.
+    if (mods.shift && selectionAnchorRef.current) {
+      const order = filteredCommits.map((c) => c.commit.oid);
+      const a = order.indexOf(selectionAnchorRef.current);
+      const b = order.indexOf(oid);
+      if (a !== -1 && b !== -1) {
+        const [lo, hi] = a <= b ? [a, b] : [b, a];
+        selectCommit(oid); // detail panel follows the clicked commit (also resets multi)
+        setMultiSelected(order.slice(lo, hi + 1)); // re-apply the full range
+        return;
+      }
+    }
+
+    // Ctrl/Cmd-click: toggle this commit in the selection.
+    if (mods.ctrl) {
+      const set = new Set(multiSelectedOids);
+      const added = !set.has(oid);
+      if (added) set.add(oid);
+      else set.delete(oid);
+      const next = [...set];
+
+      if (next.length === 0) {
+        // Removed the last selected commit — clear selection entirely.
+        selectionAnchorRef.current = null;
+        selectCommit(null);
+        return;
+      }
+      // Detail panel follows the toggled commit when adding, otherwise falls
+      // back to another still-selected commit (never the one just removed).
+      const detailOid = added ? oid : next[next.length - 1];
+      selectionAnchorRef.current = detailOid;
+      selectCommit(detailOid); // also resets multi to [detailOid]
+      setMultiSelected(next);  // re-apply the full set
+      return;
+    }
+
+    // Plain click: single selection.
+    selectionAnchorRef.current = oid;
     selectCommit(oid);
   }
 
@@ -378,7 +421,7 @@ export function RepoView() {
 
   function handleRefSelect(ref: RefInfo) {
     if (!ref.target_oid) return;
-    handleSelectCommit(ref.target_oid);
+    handleSelectCommit(ref.target_oid, { ctrl: false, shift: false });
     // Defer scroll until after React re-renders the selection
     setTimeout(() => timelineRef.current?.scrollToOid(ref.target_oid!), 0);
   }
@@ -422,6 +465,8 @@ export function RepoView() {
       setDialog({ kind: "reset", oid: action.oid });
     } else if (action.kind === "rebase") {
       setDialog({ kind: "rebase", oid: action.oid });
+    } else if (action.kind === "squash") {
+      setDialog({ kind: "squash", oids: action.oids });
     } else if (action.kind === "merge") {
       setDialog({ kind: "merge", oid: action.oid, label: action.label });
     } else if (action.kind === "cherry-pick") {
@@ -554,6 +599,7 @@ export function RepoView() {
               repoId={repoId}
               commits={filteredCommits}
               selectedOid={selectedOid}
+              multiSelectedOids={multiSelectedOids}
               headOid={head?.oid ?? null}
               headBranch={head?.branch ?? null}
               onSelectOid={handleSelectCommit}
@@ -637,6 +683,14 @@ export function RepoView() {
           currentBranch={head?.branch ?? null}
           onClose={() => setDialog({ kind: "none" })}
           onSuccess={handleSuccess}
+        />
+      )}
+      {repoId && dialog.kind === "squash" && (
+        <SquashDialog
+          repoId={repoId}
+          oids={dialog.oids}
+          onClose={() => setDialog({ kind: "none" })}
+          onSuccess={() => { setDialog({ kind: "none" }); selectCommit(null); refresh(); }}
         />
       )}
       {repoId && dialog.kind === "merge" && (

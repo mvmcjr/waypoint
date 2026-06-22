@@ -13,6 +13,7 @@ export type CommitAction =
   | { kind: "create-tag"; oid: string }
   | { kind: "reset"; oid: string }
   | { kind: "rebase"; oid: string }
+  | { kind: "squash"; oids: string[] }
   | { kind: "merge"; oid: string; label: string }
   | { kind: "cherry-pick"; oid: string; summary: string };
 
@@ -34,13 +35,19 @@ export interface CommitMenuItemsProps {
   hideMergeRebase?: boolean;
   /** Pass true to hide "Reset HEAD here…" — e.g. on HEAD badges where reset is a no-op. */
   hideReset?: boolean;
+  /** Active multi-selection. When this oid is part of a ≥2 selection, a "Squash N commits…" item appears. */
+  selectedOids?: string[];
 }
 
 export function CommitMenuItems({
   oid, isHead, mergeLabel, commitSummary, onAction,
-  extraCopyItems, checkoutSlot, hideCreateTag, hideMergeRebase, hideReset,
+  extraCopyItems, checkoutSlot, hideCreateTag, hideMergeRebase, hideReset, selectedOids,
 }: CommitMenuItemsProps) {
   const short = oid.slice(0, 8);
+  // Offer squash only when right-clicking inside a multi-selection of 2+ commits.
+  const squashOids = selectedOids && selectedOids.length >= 2 && selectedOids.includes(oid)
+    ? selectedOids
+    : null;
 
   return (
     <>
@@ -85,6 +92,16 @@ export function CommitMenuItems({
           )}
           <ContextMenuItem onClick={() => onAction({ kind: "rebase", oid })}>
             Rebase current branch here
+          </ContextMenuItem>
+        </>
+      )}
+
+      {/* ── Squash selected (multi-selection of 2+) ───────────── */}
+      {!hideMergeRebase && squashOids && (
+        <>
+          <ContextMenuSeparator />
+          <ContextMenuItem onClick={() => onAction({ kind: "squash", oids: squashOids })}>
+            Squash {squashOids.length} commits…
           </ContextMenuItem>
         </>
       )}

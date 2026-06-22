@@ -4,6 +4,7 @@ import type { PositionedCommit } from "@/lib/ipc";
 import { RefBadge, groupRefs, type RefAction } from "./RefBadge";
 import { ROW_HEIGHT } from "./GraphLayer";
 import type { CommitAction } from "./CommitContextMenu";
+import { HoverCard, HoverCardTrigger, HoverCardContent } from "@/components/ui/hover-card";
 
 interface Props {
   item: PositionedCommit;
@@ -16,7 +17,7 @@ interface Props {
   isStash?: boolean;
   onRefAction?: (action: RefAction) => void;
   onCommitAction?: (action: CommitAction) => void;
-  onSelect: (oid: string) => void;
+  onSelect: (oid: string, mods: { ctrl: boolean; shift: boolean }) => void;
 }
 
 export const CommitRow = memo(function CommitRow({ item, refsWidth, graphWidth, isSelected, isHead, headBranch, pushedTagNames, isStash, onRefAction, onCommitAction, onSelect }: Props) {
@@ -41,7 +42,11 @@ export const CommitRow = memo(function CommitRow({ item, refsWidth, graphWidth, 
   ].join(" ");
 
   return (
-    <div onClick={() => onSelect(commit.oid)} style={{ height: ROW_HEIGHT }} className={rowClass}>
+    <div
+      onClick={(e) => onSelect(commit.oid, { ctrl: e.ctrlKey || e.metaKey, shift: e.shiftKey })}
+      style={{ height: ROW_HEIGHT }}
+      className={rowClass}
+    >
 
       {/* Left: refs column */}
       <div
@@ -52,7 +57,36 @@ export const CommitRow = memo(function CommitRow({ item, refsWidth, graphWidth, 
           <RefBadge key={g.name} {...g} oid={commit.oid} onAction={onRefAction} onCommitAction={onCommitAction} commitSummary={commit.summary} />
         ))}
         {hiddenCount > 0 && (
-          <span className="text-[9px] font-mono text-muted-foreground/40 shrink-0 pl-0.5">+{hiddenCount}</span>
+          <HoverCard>
+            <HoverCardTrigger
+              render={
+                <span
+                  className="text-[9px] font-mono text-muted-foreground/50 shrink-0 pl-0.5 cursor-default rounded px-1 hover:bg-white/10 hover:text-foreground/80 transition-colors"
+                  onClick={(e) => e.stopPropagation()}
+                />
+              }
+            >
+              +{hiddenCount}
+            </HoverCardTrigger>
+            <HoverCardContent
+              align="start"
+              className="w-auto max-w-sm max-h-64 overflow-y-auto"
+              onClick={(e) => e.stopPropagation()}
+            >
+              <div className="flex flex-wrap gap-1">
+                {refGroups.map((g) => (
+                  <RefBadge
+                    key={g.name}
+                    {...g}
+                    oid={commit.oid}
+                    onAction={onRefAction}
+                    onCommitAction={onCommitAction}
+                    commitSummary={commit.summary}
+                  />
+                ))}
+              </div>
+            </HoverCardContent>
+          </HoverCard>
         )}
       </div>
 

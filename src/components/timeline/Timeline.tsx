@@ -35,9 +35,10 @@ interface Props {
   repoId: string | null;
   commits: PositionedCommit[];
   selectedOid: string | null;
+  multiSelectedOids: string[];
   headOid: string | null;
   headBranch: string | null;
-  onSelectOid: (oid: string) => void;
+  onSelectOid: (oid: string, mods: { ctrl: boolean; shift: boolean }) => void;
   onCommitAction: (action: CommitAction) => void;
   onRefAction?: (action: RefAction) => void;
   onWipClick: () => void;
@@ -46,9 +47,10 @@ interface Props {
 }
 
 export const Timeline = forwardRef<TimelineHandle, Props>(function Timeline(
-  { repoId, commits, selectedOid, headOid, headBranch, onSelectOid, onCommitAction, onRefAction, onWipClick, wipSelected, searchActive }: Props,
+  { repoId, commits, selectedOid, multiSelectedOids, headOid, headBranch, onSelectOid, onCommitAction, onRefAction, onWipClick, wipSelected, searchActive }: Props,
   ref
 ) {
+  const multiSelectedSet = useMemo(() => new Set(multiSelectedOids), [multiSelectedOids]);
   const parentRef = useRef<HTMLDivElement>(null);
   const { data: status } = useRepoStatus(repoId);
   const { data: stashes = [] } = useStashes(repoId);
@@ -74,7 +76,12 @@ export const Timeline = forwardRef<TimelineHandle, Props>(function Timeline(
   // Stable callbacks — ref pattern so CommitRow.memo never sees a changed function reference.
   const onSelectOidRef = useRef(onSelectOid);
   onSelectOidRef.current = onSelectOid;
-  const stableSelectOid = useCallback((oid: string) => onSelectOidRef.current(oid), []);
+  const stableSelectOid = useCallback(
+    (oid: string, mods: { ctrl: boolean; shift: boolean }) => onSelectOidRef.current(oid, mods),
+    [],
+  );
+  // GraphLayer selects a single node (no modifier semantics).
+  const stableSelectNode = useCallback((oid: string) => onSelectOidRef.current(oid, { ctrl: false, shift: false }), []);
 
   const onCommitActionRef = useRef(onCommitAction);
   onCommitActionRef.current = onCommitAction;
@@ -176,7 +183,7 @@ export const Timeline = forwardRef<TimelineHandle, Props>(function Timeline(
                 startRow={startRow}
                 visibleRows={visibleRows}
                 width={naturalGraphWidth}
-                onSelectOid={stableSelectOid}
+                onSelectOid={stableSelectNode}
                 selectedOid={selectedOid}
                 headOid={headOid}
                 headCommit={headCommit}
@@ -218,12 +225,13 @@ export const Timeline = forwardRef<TimelineHandle, Props>(function Timeline(
                   key={item.commit.oid}
                   item={item}
                   onAction={stableCommitAction}
+                  selectedOids={multiSelectedOids}
                 >
                   <CommitRow
                     item={item}
                     refsWidth={refsWidth}
                     graphWidth={graphColWidth}
-                    isSelected={item.commit.oid === selectedOid}
+                    isSelected={item.commit.oid === selectedOid || multiSelectedSet.has(item.commit.oid)}
                     isHead={item.commit.oid === headOid}
                     headBranch={headBranch}
                     pushedTagNames={pushedTagNames}

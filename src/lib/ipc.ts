@@ -4,6 +4,8 @@ export interface CommitNode {
   oid: string;
   parent_oids: string[];
   summary: string;
+  /** Commit message body (everything after the summary line), trimmed. Empty when none. */
+  body: string;
   author_name: string;
   author_email: string;
   timestamp: number;
@@ -117,6 +119,12 @@ export interface CliShimInfo {
   path_was_updated: boolean;
 }
 
+export interface SquashPreview {
+  count: number;
+  default_subject: string;
+  default_body: string;
+}
+
 export interface PullResult {
   kind: "up_to_date" | "fast_forward" | "merged" | "conflicts";
   conflicted: string[];
@@ -170,6 +178,12 @@ export const ipc = {
 
   rebaseOnto: (repoId: string, ontoOid: string) =>
     invoke<void>("rebase_onto", { repoId, ontoOid }),
+
+  getSquashPreview: (repoId: string, oids: string[]) =>
+    invoke<SquashPreview>("get_squash_preview", { repoId, oids }),
+
+  squashCommits: (repoId: string, oids: string[], message: string) =>
+    invoke<void>("squash_commits", { repoId, oids, message }),
 
   deleteBranch: (repoId: string, name: string) =>
     invoke<void>("delete_branch", { repoId, name }),

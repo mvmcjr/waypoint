@@ -13,10 +13,12 @@ export type { CommitAction } from "./CommitMenuItems";
 interface Props {
   item: PositionedCommit;
   onAction: (action: import("./CommitMenuItems").CommitAction) => void;
+  /** Active multi-selection — enables the "Squash N commits…" item. */
+  selectedOids?: string[];
   children: React.ReactNode;
 }
 
-export function CommitContextMenu({ item, onAction, children }: Props) {
+export function CommitContextMenu({ item, onAction, selectedOids, children }: Props) {
   const oid = item.commit.oid;
   const { local_branches: localBranches, remote_branches: remoteBranches } = item.commit;
   const remoteOnlyBranches = remoteBranches.filter((rb) => !rb.endsWith("/HEAD"));
@@ -65,6 +67,7 @@ export function CommitContextMenu({ item, onAction, children }: Props) {
           commitSummary={item.commit.summary}
           onAction={onAction}
           checkoutSlot={checkoutSlot}
+          selectedOids={selectedOids}
         />
       </ContextMenuContent>
     </ContextMenu>
