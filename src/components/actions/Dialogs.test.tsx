@@ -1,6 +1,6 @@
 import { describe, it, expect, vi, beforeEach } from "vitest";
 import { render, screen, fireEvent, waitFor, act } from "@testing-library/react";
-import { CherryPickDialog, PullConflictsDialog, PushRejectedDialog } from "./Dialogs";
+import { CherryPickDialog, PullConflictsDialog, PushRejectedDialog, SquashDialog } from "./Dialogs";
 import { ipc } from "@/lib/ipc";
 
 vi.mock("@/lib/ipc", () => ({
@@ -10,6 +10,8 @@ vi.mock("@/lib/ipc", () => ({
     cherryPick: vi.fn(),
     finishCherryPick: vi.fn(),
     doCommit: vi.fn(),
+    getSquashPreview: vi.fn(),
+    squashCommits: vi.fn(),
   },
 }));
 
@@ -127,6 +129,92 @@ describe("Dialogs", () => {
       fireEvent.click(screen.getByRole("button", { name: "Cancel" }));
       expect(mockOnClose).toHaveBeenCalled();
       expect(ipc.cherryPick).not.toHaveBeenCalled();
+    });
+  });
+
+  describe("SquashDialog", () => {
+    const oids = ["abc123def456", "def456abc789"];
+    const defaultProps = {
+      repoId: "repo1",
+      oids,
+      onClose: mockOnClose,
+      onSuccess: mockOnSuccess,
+    };
+
+    it("loads preview: shows count and suggested subject/body", async () => {
+      vi.mocked(ipc.getSquashPreview).mockResolvedValue({ count: 3, default_subject: "feat: combined", default_body: "details here" });
+      render(<SquashDialog {...defaultProps} />);
+
+      expect(ipc.getSquashPreview).toHaveBeenCalledWith("repo1", oids);
+      await waitFor(() => expect(screen.getByText("3")).toBeInTheDocument());
+      expect(screen.getByDisplayValue("feat: combined")).toBeInTheDocument();
+      expect(screen.getByDisplayValue("details here")).toBeInTheDocument();
+    });
+
+    it("composes subject + body into a single message and calls onSuccess", async () => {
+      vi.mocked(ipc.getSquashPreview).mockResolvedValue({ count: 2, default_subject: "subj", default_body: "body text" });
+      vi.mocked(ipc.squashCommits).mockResolvedValue(undefined);
+      render(<SquashDialog {...defaultProps} />);
+
+      await screen.findByDisplayValue("subj");
+      fireEvent.click(screen.getByRole("button", { name: "Squash" }));
+
+      expect(ipc.squashCommits).toHaveBeenCalledWith("repo1", oids, "subj\n\nbody text");
+      await waitFor(() => expect(mockOnSuccess).toHaveBeenCalled());
+    });
+
+    it("omits the blank line when body is empty", async () => {
+      vi.mocked(ipc.getSquashPreview).mockResolvedValue({ count: 2, default_subject: "only subject", default_body: "" });
+      vi.mocked(ipc.squashCommits).mockResolvedValue(undefined);
+      render(<SquashDialog {...defaultProps} />);
+
+      await screen.findByDisplayValue("only subject");
+      fireEvent.click(screen.getByRole("button", { name: "Squash" }));
+
+      expect(ipc.squashCommits).toHaveBeenCalledWith("repo1", oids, "only subject");
+      await waitFor(() => expect(mockOnSuccess).toHaveBeenCalled());
+    });
+
+    it("shows preview error and disables Squash when preview fails", async () => {
+      vi.mocked(ipc.getSquashPreview).mockRejectedValue(new Error("Cannot squash across a merge commit."));
+      render(<SquashDialog {...defaultProps} />);
+
+      await waitFor(() =>
+        expect(screen.getByText("Error: Cannot squash across a merge commit.")).toBeInTheDocument()
+      );
+      expect(screen.getByRole("button", { name: "Squash" })).toBeDisabled();
+      expect(ipc.squashCommits).not.toHaveBeenCalled();
+    });
+
+    it("shows error when ipc.squashCommits throws", async () => {
+      vi.mocked(ipc.getSquashPreview).mockResolvedValue({ count: 2, default_subject: "subj", default_body: "" });
+      vi.mocked(ipc.squashCommits).mockRejectedValue(new Error("HEAD is detached"));
+      render(<SquashDialog {...defaultProps} />);
+
+      await screen.findByDisplayValue("subj");
+      fireEvent.click(screen.getByRole("button", { name: "Squash" }));
+
+      await waitFor(() => expect(screen.getByText("Error: HEAD is detached")).toBeInTheDocument());
+      expect(mockOnSuccess).not.toHaveBeenCalled();
+    });
+
+    it("disables Squash when the subject is empty", async () => {
+      vi.mocked(ipc.getSquashPreview).mockResolvedValue({ count: 2, default_subject: "subj", default_body: "" });
+      render(<SquashDialog {...defaultProps} />);
+
+      const box = await screen.findByDisplayValue("subj");
+      fireEvent.change(box, { target: { value: "   " } });
+      expect(screen.getByRole("button", { name: "Squash" })).toBeDisabled();
+    });
+
+    it("calls onClose when Cancel is clicked without squashing", async () => {
+      vi.mocked(ipc.getSquashPreview).mockResolvedValue({ count: 2, default_subject: "subj", default_body: "" });
+      render(<SquashDialog {...defaultProps} />);
+
+      await screen.findByDisplayValue("subj");
+      fireEvent.click(screen.getByRole("button", { name: "Cancel" }));
+      expect(mockOnClose).toHaveBeenCalled();
+      expect(ipc.squashCommits).not.toHaveBeenCalled();
     });
   });
 

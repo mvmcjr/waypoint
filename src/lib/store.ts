@@ -16,6 +16,8 @@ interface AppState {
   activeTabId: string | null;
   commits: PositionedCommit[];
   selectedOid: string | null;
+  /** Multi-selection for range operations (e.g. squash). Always contains selectedOid when non-empty. */
+  multiSelectedOids: string[];
   searchFilter: string;
   settingsOpen: boolean;
 
@@ -24,11 +26,12 @@ interface AppState {
   switchTab: (id: string) => void;
   setCommits: (commits: PositionedCommit[]) => void;
   selectCommit: (oid: string | null) => void;
+  setMultiSelected: (oids: string[]) => void;
   setSearchFilter: (filter: string) => void;
   setSettingsOpen: (open: boolean) => void;
 }
 
-const BLANK_VIEW = { commits: [], selectedOid: null, searchFilter: "" };
+const BLANK_VIEW = { commits: [], selectedOid: null, multiSelectedOids: [], searchFilter: "" };
 
 export const useStore = create<AppState>((set) => ({
   tabs: [],
@@ -65,7 +68,9 @@ export const useStore = create<AppState>((set) => ({
   ),
 
   setCommits: (commits) => set({ commits }),
-  selectCommit: (selectedOid) => set({ selectedOid }),
+  selectCommit: (selectedOid) =>
+    set({ selectedOid, multiSelectedOids: selectedOid ? [selectedOid] : [] }),
+  setMultiSelected: (multiSelectedOids) => set({ multiSelectedOids }),
   setSearchFilter: (searchFilter) => set({ searchFilter }),
   setSettingsOpen: (settingsOpen) => set({ settingsOpen }),
 }));

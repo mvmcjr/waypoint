@@ -16,7 +16,7 @@ interface Props {
   isStash?: boolean;
   onRefAction?: (action: RefAction) => void;
   onCommitAction?: (action: CommitAction) => void;
-  onSelect: (oid: string) => void;
+  onSelect: (oid: string, mods: { ctrl: boolean; shift: boolean }) => void;
 }
 
 export const CommitRow = memo(function CommitRow({ item, refsWidth, graphWidth, isSelected, isHead, headBranch, pushedTagNames, isStash, onRefAction, onCommitAction, onSelect }: Props) {
@@ -41,7 +41,11 @@ export const CommitRow = memo(function CommitRow({ item, refsWidth, graphWidth, 
   ].join(" ");
 
   return (
-    <div onClick={() => onSelect(commit.oid)} style={{ height: ROW_HEIGHT }} className={rowClass}>
+    <div
+      onClick={(e) => onSelect(commit.oid, { ctrl: e.ctrlKey || e.metaKey, shift: e.shiftKey })}
+      style={{ height: ROW_HEIGHT }}
+      className={rowClass}
+    >
 
       {/* Left: refs column */}
       <div

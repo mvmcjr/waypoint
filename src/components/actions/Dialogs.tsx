@@ -1,6 +1,7 @@
-import { useState } from "react";
+import { useEffect, useState } from "react";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
+import { Textarea } from "@/components/ui/textarea";
 import {
   Dialog,
   DialogContent,
@@ -716,6 +717,111 @@ export function RebaseDialog({ repoId, ontoOid, currentBranch, onClose, onSucces
           <Button variant="outline" onClick={onClose} disabled={loading}>Cancel</Button>
           <Button variant="destructive" onClick={run} disabled={loading}>
             {loading ? "Rebasing…" : "Rebase"}
+          </Button>
+        </DialogFooter>
+      </DialogContent>
+    </Dialog>
+  );
+}
+
+// ─── Squash commits ─────────────────────────────────────────────────────────
+
+interface SquashProps extends BaseProps {
+  /** The selected commits to combine (contiguous range). */
+  oids: string[];
+}
+
+export function SquashDialog({ repoId, oids, onClose, onSuccess }: SquashProps) {
+  const [subject, setSubject] = useState("");
+  const [body, setBody] = useState("");
+  const [count, setCount] = useState<number | null>(null);
+  const [loading, setLoading] = useState(false);
+  const [previewError, setPreviewError] = useState<string | null>(null);
+  const [error, setError] = useState<string | null>(null);
+
+  // Load the suggested subject/body and commit count once on open.
+  useEffect(() => {
+    let cancelled = false;
+    ipc
+      .getSquashPreview(repoId, oids)
+      .then((p) => {
+        if (cancelled) return;
+        setCount(p.count);
+        setSubject(p.default_subject);
+        setBody(p.default_body);
+      })
+      .catch((e) => !cancelled && setPreviewError(String(e)));
+    return () => {
+      cancelled = true;
+    };
+  }, [repoId, oids]);
+
+  async function run() {
+    const trimmedSubject = subject.trim();
+    if (!trimmedSubject) return;
+    const trimmedBody = body.trim();
+    const message = trimmedBody ? `${trimmedSubject}\n\n${trimmedBody}` : trimmedSubject;
+    setLoading(true);
+    setError(null);
+    try {
+      await ipc.squashCommits(repoId, oids, message);
+      onSuccess();
+    } catch (e) {
+      setError(String(e));
+    } finally {
+      setLoading(false);
+    }
+  }
+
+  return (
+    <Dialog open onOpenChange={(o) => !o && onClose()}>
+      <DialogContent>
+        <DialogHeader>
+          <DialogTitle>Squash commits</DialogTitle>
+          <DialogDescription>
+            Combine{" "}
+            <strong>{count ?? oids.length}</strong>{" "}
+            selected commits into one. This rewrites commit history.
+          </DialogDescription>
+        </DialogHeader>
+
+        {previewError ? (
+          <ErrorNote msg={previewError} />
+        ) : (
+          <div className="flex flex-col gap-3">
+            <div className="flex flex-col gap-1">
+              <label className="text-xs text-muted-foreground">Summary</label>
+              <Input
+                value={subject}
+                onChange={(e) => setSubject(e.target.value)}
+                className="font-mono text-sm"
+                placeholder="Summary line"
+                autoFocus
+              />
+            </div>
+            <div className="flex flex-col gap-1">
+              <label className="text-xs text-muted-foreground">Description</label>
+              <Textarea
+                value={body}
+                onChange={(e) => setBody(e.target.value)}
+                rows={7}
+                className="font-mono text-sm resize-none"
+                placeholder="Extended description (optional)"
+              />
+            </div>
+          </div>
+        )}
+
+        {error && <ErrorNote msg={error} />}
+
+        <DialogFooter>
+          <Button variant="outline" onClick={onClose} disabled={loading}>Cancel</Button>
+          <Button
+            variant="destructive"
+            onClick={run}
+            disabled={loading || !!previewError || !subject.trim()}
+          >
+            {loading ? "Squashing…" : "Squash"}
           </Button>
         </DialogFooter>
       </DialogContent>

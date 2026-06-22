@@ -25,7 +25,10 @@ vi.mock("./GraphLayer", () => ({
 
 vi.mock("./CommitRow", () => ({
   CommitRow: vi.fn((props) => (
-    <div data-testid={`commit-row-${props.item.commit.oid}`} onClick={props.onClick}>
+    <div
+      data-testid={`commit-row-${props.item.commit.oid}`}
+      onClick={(e: any) => props.onSelect(props.item.commit.oid, { ctrl: e.ctrlKey || e.metaKey, shift: e.shiftKey })}
+    >
       {props.item.commit.summary}
     </div>
   )),
@@ -69,6 +72,7 @@ describe("Timeline", () => {
       author_email: "test@test.com",
       timestamp: 0,
       summary: "First commit",
+      body: "",
       refs: [],
       local_branches: [],
       remote_branches: [],
@@ -79,6 +83,7 @@ describe("Timeline", () => {
     repoId: "repo1",
     commits: [dummyCommit],
     selectedOid: null,
+    multiSelectedOids: [],
     headOid: "c1",
     headBranch: "main",
     onSelectOid: mockOnSelectOid,
@@ -126,7 +131,7 @@ describe("Timeline", () => {
     render(<Timeline {...defaultProps} />);
     const row = screen.getByTestId("commit-row-c1");
     fireEvent.click(row);
-    expect(mockOnSelectOid).toHaveBeenCalledWith("c1");
+    expect(mockOnSelectOid).toHaveBeenCalledWith("c1", { ctrl: false, shift: false });
   });
 
   it("renders the GraphLayer when search is inactive", () => {
