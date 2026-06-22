@@ -335,10 +335,8 @@ export function StagingPanel({ repoId, onCommitSuccess, onFileClick }: Props) {
       try {
         const head = await ipc.getHeadInfo(repoId);
         const commit = await ipc.getCommit(repoId, head.oid);
-        const fullMsg = commit.summary; // get_commit returns the full message here
-        const sepIdx = fullMsg.indexOf("\n\n");
-        setSummary(sepIdx >= 0 ? fullMsg.slice(0, sepIdx) : fullMsg.trimEnd());
-        setDescription(sepIdx >= 0 ? fullMsg.slice(sepIdx + 2).trimEnd() : "");
+        setSummary(commit.summary);
+        setDescription(commit.body);
         setAmend(true);
       } catch (e) {
         setError(`Cannot enable amend: ${String(e)}`);

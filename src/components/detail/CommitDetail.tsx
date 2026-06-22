@@ -71,6 +71,11 @@ export function CommitDetail({ repoId, item, onFileClick }: Props) {
       {/* Meta */}
       <div className="p-3 space-y-2 text-sm shrink-0">
         <p className="font-medium text-foreground leading-snug">{commit.summary}</p>
+        {commit.body && (
+          <p className="text-xs text-muted-foreground leading-relaxed whitespace-pre-wrap break-words max-h-40 overflow-y-auto">
+            {commit.body}
+          </p>
+        )}
         <Separator />
         <div className="space-y-1 text-xs text-muted-foreground">
           <div className="flex gap-2 items-center">
