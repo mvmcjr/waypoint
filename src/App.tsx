@@ -9,6 +9,8 @@ import { RepoView } from "@/routes/repo";
 import { CommandPalette } from "@/components/CommandPalette";
 import { SettingsDialog } from "@/components/SettingsDialog";
 import { Toaster } from "@/components/ui/sonner";
+import { PluginRunnerProvider } from "@/components/plugins/PluginRunnerProvider";
+import { usePluginRegistry } from "@/lib/plugins/registry";
 import { load } from "@tauri-apps/plugin-store";
 import { ipc } from "@/lib/ipc";
 import {
@@ -30,6 +32,10 @@ function Inner() {
   const [showConsentDialog, setShowConsentDialog] = useState(false);
 
   const togglePalette = useCallback(() => setPaletteOpen((v) => !v), []);
+
+  // Load installed plugins once on startup.
+  const loadPlugins = usePluginRegistry((s) => s.load);
+  useEffect(() => { loadPlugins().catch(console.error); }, [loadPlugins]);
 
   const handleConsentChoice = async (confirmed: boolean) => {
     setShowConsentDialog(false);
@@ -135,9 +141,11 @@ export default function App() {
   return (
     <QueryClientProvider client={queryClient}>
       <TooltipProvider>
-        <div className="h-screen w-screen flex flex-col bg-background text-foreground dark overflow-hidden">
-          <Inner />
-        </div>
+        <PluginRunnerProvider>
+          <div className="h-screen w-screen flex flex-col bg-background text-foreground dark overflow-hidden">
+            <Inner />
+          </div>
+        </PluginRunnerProvider>
       </TooltipProvider>
     </QueryClientProvider>
   );
