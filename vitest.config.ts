@@ -1,4 +1,4 @@
-import { defineConfig } from "vitest/config";
+import { defineConfig, configDefaults } from "vitest/config";
 import react from "@vitejs/plugin-react";
 import path from "path";
 
@@ -13,5 +13,8 @@ export default defineConfig({
     environment: "jsdom",
     globals: true,
     setupFiles: ["./vitest.setup.ts"],
+    // Fixture repos under scripts/fixtures/repos/ ship their own *.test.js files
+    // that simulate real projects — they are not our tests.
+    exclude: [...configDefaults.exclude, "scripts/fixtures/**"],
   },
 });

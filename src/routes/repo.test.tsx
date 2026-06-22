@@ -12,6 +12,12 @@ vi.mock("@tauri-apps/api/window", () => ({
   })),
 }));
 
+// Mock Tauri event API — the "repo-changed" listener effect otherwise reaches
+// the real core (no Tauri runtime under vitest) and rejects with transformCallback.
+vi.mock("@tauri-apps/api/event", () => ({
+  listen: vi.fn(() => Promise.resolve(() => {})),
+}));
+
 // Mock IPC (needed for fetch/pull/push tests)
 vi.mock("@/lib/ipc", () => ({
   ipc: {
