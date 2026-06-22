@@ -73,6 +73,7 @@ export function ConflictPanel({ repoId }: Props) {
   if (!merge?.in_progress) return null;
 
   const isCherryPick  = merge.kind === "cherry_pick";
+  const isRevert      = merge.kind === "revert";
   const conflicts     = merge.conflicted_paths;
   const hasConflicts  = conflicts.length > 0;
   const disabled      = working;
@@ -114,7 +115,7 @@ export function ConflictPanel({ repoId }: Props) {
       <div className="shrink-0 flex items-center gap-2 px-3 py-2 border-b border-border">
         <GitMerge size={14} className="text-orange-400 shrink-0" />
         <span className="font-semibold text-orange-300 text-xs uppercase tracking-wide">
-          {isCherryPick ? "Cherry-pick in Progress" : "Merge in Progress"}
+          {isRevert ? "Revert in Progress" : isCherryPick ? "Cherry-pick in Progress" : "Merge in Progress"}
         </span>
 
         <Button
@@ -242,7 +243,7 @@ export function ConflictPanel({ repoId }: Props) {
               <div>
                 <p className="text-sm font-medium text-foreground/80">All conflicts resolved</p>
                 <p className="text-xs text-muted-foreground/70 mt-0.5">
-                  Review the commit message on the right and finish the {isCherryPick ? "cherry-pick" : "merge"}.
+                  Review the commit message on the right and finish the {isRevert ? "revert" : isCherryPick ? "cherry-pick" : "merge"}.
                 </p>
               </div>
             </div>
@@ -279,6 +280,7 @@ export function MergeCommitPanel({ repoId, onDone }: CommitPanelProps) {
   if (!merge?.in_progress) return null;
 
   const isCherryPick = merge.kind === "cherry_pick";
+  const isRevert     = merge.kind === "revert";
   const conflicts    = merge.conflicted_paths;
   const hasConflicts = conflicts.length > 0;
   const busy         = committing || aborting;
@@ -290,7 +292,8 @@ export function MergeCommitPanel({ repoId, onDone }: CommitPanelProps) {
     setCommitting(true);
     setError(null);
     try {
-      if (isCherryPick) await ipc.finishCherryPick(repoId, msg);
+      if (isRevert) await ipc.finishRevert(repoId, msg);
+      else if (isCherryPick) await ipc.finishCherryPick(repoId, msg);
       else await ipc.finishMerge(repoId, msg);
       onDone();
     } catch (err) { setError(String(err)); }
@@ -315,7 +318,7 @@ export function MergeCommitPanel({ repoId, onDone }: CommitPanelProps) {
       <div className="shrink-0 px-3 py-2 border-b border-border flex items-center gap-2">
         <GitMerge size={13} className="text-orange-400 shrink-0" />
         <span className="text-xs font-semibold text-orange-300 uppercase tracking-wide">
-          {isCherryPick ? "Cherry-pick" : "Merge"}
+          {isRevert ? "Revert" : isCherryPick ? "Cherry-pick" : "Merge"}
         </span>
       </div>
 
@@ -348,7 +351,7 @@ export function MergeCommitPanel({ repoId, onDone }: CommitPanelProps) {
           rows={3}
           disabled={busy}
           className="resize-none rounded border border-border bg-background px-2.5 py-1.5 text-xs text-foreground placeholder:text-muted-foreground focus:outline-none focus:ring-1 focus:ring-ring disabled:opacity-50"
-          placeholder={isCherryPick ? "Cherry-pick commit message…" : "Merge commit message…"}
+          placeholder={isRevert ? "Revert commit message…" : isCherryPick ? "Cherry-pick commit message…" : "Merge commit message…"}
         />
         {error && <p className="text-[10px] text-destructive break-words">{error}</p>}
         <Button
@@ -358,7 +361,7 @@ export function MergeCommitPanel({ repoId, onDone }: CommitPanelProps) {
           disabled={!canFinish}
         >
           <GitMerge size={13} />
-          {committing ? "Committing…" : isCherryPick ? "Commit Cherry-pick" : "Commit Merge"}
+          {committing ? "Committing…" : isRevert ? "Commit Revert" : isCherryPick ? "Commit Cherry-pick" : "Commit Merge"}
         </Button>
         <Button
           size="sm"

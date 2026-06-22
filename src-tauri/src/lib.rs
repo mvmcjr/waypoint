@@ -125,6 +125,8 @@ pub fn run() {
             commands::merge::abort_merge,
             commands::merge::cherry_pick,
             commands::merge::finish_cherry_pick,
+            commands::merge::revert_commit,
+            commands::merge::finish_revert,
             commands::merge::get_conflict_content,
             commands::merge::resolve_with_content,
             commands::staging::discard_file,

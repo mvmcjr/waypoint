@@ -18,7 +18,8 @@ export type CommitAction =
   | { kind: "rebase"; oid: string }
   | { kind: "squash"; oids: string[] }
   | { kind: "merge"; oid: string; label: string }
-  | { kind: "cherry-pick"; oid: string; summary: string };
+  | { kind: "cherry-pick"; oid: string; summary: string }
+  | { kind: "revert"; oid: string; summary: string };
 
 export interface CommitMenuItemsProps {
   oid: string;
@@ -87,23 +88,34 @@ export function CommitMenuItems({
         </ContextMenuItem>
       )}
 
-      {/* ── Merge / cherry-pick / rebase (non-HEAD only) ──────── */}
-      {!isHead && !hideMergeRebase && (
+      {/* ── Merge / cherry-pick / rebase / revert ──────── */}
+      {!hideMergeRebase && (
         <>
-          <ContextMenuSeparator />
-          <ContextMenuItem onClick={() => onAction({ kind: "merge", oid, label: mergeLabel })}>
-            Merge into current branch
-          </ContextMenuItem>
-          {commitSummary !== undefined && (
+          {(!isHead || commitSummary !== undefined) && <ContextMenuSeparator />}
+          {!isHead && (
+            <ContextMenuItem onClick={() => onAction({ kind: "merge", oid, label: mergeLabel })}>
+              Merge into current branch
+            </ContextMenuItem>
+          )}
+          {!isHead && commitSummary !== undefined && (
             <ContextMenuItem
               onClick={() => onAction({ kind: "cherry-pick", oid, summary: commitSummary })}
             >
               Cherry-pick onto current branch
             </ContextMenuItem>
           )}
-          <ContextMenuItem onClick={() => onAction({ kind: "rebase", oid })}>
-            Rebase current branch here
-          </ContextMenuItem>
+          {commitSummary !== undefined && (
+            <ContextMenuItem
+              onClick={() => onAction({ kind: "revert", oid, summary: commitSummary })}
+            >
+              Revert commit…
+            </ContextMenuItem>
+          )}
+          {!isHead && (
+            <ContextMenuItem onClick={() => onAction({ kind: "rebase", oid })}>
+              Rebase current branch here
+            </ContextMenuItem>
+          )}
         </>
       )}
 

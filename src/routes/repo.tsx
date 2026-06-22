@@ -22,6 +22,7 @@ import {
   SquashDialog,
   MergeDialog,
   CherryPickDialog,
+  RevertDialog,
   PullConflictsDialog,
   PushRejectedDialog,
   RemoteErrorDialog,
@@ -59,6 +60,7 @@ type DialogState =
   | { kind: "squash"; oids: string[] }
   | { kind: "merge"; oid: string; label: string }
   | { kind: "cherry-pick"; oid: string; summary: string }
+  | { kind: "revert"; oid: string; summary: string }
   | { kind: "pull-conflicts" }
   | { kind: "push-rejected"; branchName: string; remoteName: string }
   | { kind: "remote-error"; message: string }
@@ -473,6 +475,8 @@ export function RepoView() {
       setDialog({ kind: "merge", oid: action.oid, label: action.label });
     } else if (action.kind === "cherry-pick") {
       setDialog({ kind: "cherry-pick", oid: action.oid, summary: action.summary });
+    } else if (action.kind === "revert") {
+      setDialog({ kind: "revert", oid: action.oid, summary: action.summary });
     }
   }
 
@@ -726,6 +730,17 @@ export function RepoView() {
       )}
       {repoId && dialog.kind === "cherry-pick" && (
         <CherryPickDialog
+          repoId={repoId}
+          oid={dialog.oid}
+          summary={dialog.summary}
+          onClose={() => setDialog({ kind: "none" })}
+          onSuccess={handleSuccess}
+          onConflicts={handleMergeConflicts}
+          onLeaveStaged={() => { setDialog({ kind: "none" }); setWipSelected(true); selectCommit(null); refresh(); }}
+        />
+      )}
+      {repoId && dialog.kind === "revert" && (
+        <RevertDialog
           repoId={repoId}
           oid={dialog.oid}
           summary={dialog.summary}

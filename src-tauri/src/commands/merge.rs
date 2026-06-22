@@ -39,7 +39,8 @@ fn io_err(e: std::io::Error) -> Error {
 pub(crate) fn cleanup_merge_state(repo: &git2::Repository) {
     let git_dir = repo.path();
     for name in &["MERGE_HEAD", "MERGE_MSG", "MERGE_MODE",
-                  "CHERRY_PICK_HEAD", "CHERRY_PICK_MSG"] {
+                  "CHERRY_PICK_HEAD", "CHERRY_PICK_MSG",
+                  "REVERT_HEAD", "REVERT_MSG"] {
         let _ = std::fs::remove_file(git_dir.join(name));
     }
 }
@@ -191,11 +192,14 @@ pub fn get_merge_status(repo_id: String, state: State<RepoState>) -> Result<Merg
     let git_dir = repo.path();
     let merge_head_path = git_dir.join("MERGE_HEAD");
     let cherry_pick_head_path = git_dir.join("CHERRY_PICK_HEAD");
+    let revert_head_path = git_dir.join("REVERT_HEAD");
 
     let (kind, head_path, msg_file) = if merge_head_path.exists() {
         ("merge", merge_head_path, "MERGE_MSG")
     } else if cherry_pick_head_path.exists() {
         ("cherry_pick", cherry_pick_head_path, "CHERRY_PICK_MSG")
+    } else if revert_head_path.exists() {
+        ("revert", revert_head_path, "REVERT_MSG")
     } else {
         return Ok(MergeStatus {
             in_progress: false,
@@ -451,6 +455,69 @@ pub fn finish_cherry_pick(repo_id: String, message: String, state: State<RepoSta
     Ok(())
 }
 
+fn revert_impl(repo: &git2::Repository, oid_str: &str) -> Result<CherryPickResult> {
+    let git_oid = git2::Oid::from_str(oid_str).map_err(|_| Error::CommitNotFound(oid_str.to_string()))?;
+    let commit = repo.find_commit(git_oid).map_err(|_| Error::CommitNotFound(oid_str.to_string()))?;
+
+    repo.revert(&commit, None)?;
+
+    let mut index = repo.index()?;
+    index.write()?;
+
+    let summary = commit.summary().unwrap_or("");
+    let msg = format!("revert: {}\n\nThis reverts commit {}.", summary, oid_str);
+
+    if index.has_conflicts() {
+        let conflicted = collect_conflict_paths(&index)?;
+        std::fs::write(repo.path().join("REVERT_MSG"), &msg).map_err(io_err)?;
+        Ok(CherryPickResult { kind: "conflicts".into(), conflicted, message: msg })
+    } else {
+        cleanup_merge_state(repo);
+        Ok(CherryPickResult { kind: "staged".into(), conflicted: vec![], message: msg })
+    }
+}
+
+/// Revert the given commit.
+/// Returns `kind = "staged"` on success or `kind = "conflicts"` with the conflicted paths.
+#[tauri::command]
+pub fn revert_commit(repo_id: String, oid: String, state: State<RepoState>) -> Result<CherryPickResult> {
+    let mut repos = state.0.lock().unwrap();
+
+    let autostashed = {
+        let repo = repos.get_mut(&repo_id).ok_or_else(|| Error::RepoNotFound(repo_id.clone()))?;
+        auto_stash(repo)?
+    };
+
+    let result = {
+        let repo = repos.get(&repo_id).ok_or_else(|| Error::RepoNotFound(repo_id.clone()))?;
+        revert_impl(repo, &oid)?
+    };
+
+    if autostashed && result.kind == "staged" {
+        let repo = repos.get_mut(&repo_id).ok_or_else(|| Error::RepoNotFound(repo_id.clone()))?;
+        auto_pop(repo);
+    }
+
+    Ok(result)
+}
+
+/// Create the revert commit after all conflicts are resolved (single-parent).
+#[tauri::command]
+pub fn finish_revert(repo_id: String, message: String, state: State<RepoState>) -> Result<()> {
+    let mut repos = state.0.lock().unwrap();
+
+    {
+        let repo = repos.get(&repo_id).ok_or_else(|| Error::RepoNotFound(repo_id.clone()))?;
+        let result = finish_cherry_pick_impl(repo, &message);
+        cleanup_merge_state(repo);
+        result?;
+    }
+
+    let repo = repos.get_mut(&repo_id).ok_or_else(|| Error::RepoNotFound(repo_id.clone()))?;
+    auto_pop(repo);
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -605,5 +672,42 @@ mod tests {
         let head = repo.head().unwrap().peel_to_commit().unwrap();
         assert_eq!(head.message().unwrap(), "cherry-pick: resolved");
         assert_eq!(head.parent_count(), 1);
+    }
+
+    #[test]
+    fn revert_applies_clean_commit() {
+        let (_dir, repo) = make_repo();
+        let _root = write_commit(&repo, "shared.txt", "line 1\n", "initial");
+
+        let feat_oid = write_commit(&repo, "shared.txt", "line 1\nline 2\n", "feat: add line 2");
+
+        let result = revert_impl(&repo, &feat_oid.to_string()).unwrap();
+
+        assert_eq!(result.kind, "staged");
+        assert!(result.conflicted.is_empty());
+        assert!(result.message.contains("revert: feat: add line 2"));
+        assert!(!repo.path().join("REVERT_HEAD").exists());
+    }
+
+    #[test]
+    fn revert_detects_conflicts() {
+        let (_dir, repo) = make_repo();
+        let root = write_commit(&repo, "shared.txt", "original\n", "initial");
+        let root_commit = repo.find_commit(root).unwrap();
+        let main_ref = repo.head().unwrap().name().unwrap().to_string();
+
+        repo.branch("feat", &root_commit, false).unwrap();
+        checkout(&repo, "refs/heads/feat");
+        let feat_oid = write_commit(&repo, "shared.txt", "feat change\n", "feat commit");
+
+        checkout(&repo, &main_ref);
+        let _ = write_commit(&repo, "shared.txt", "main change\n", "main commit");
+
+        let result = revert_impl(&repo, &feat_oid.to_string()).unwrap();
+
+        assert_eq!(result.kind, "conflicts");
+        assert!(result.conflicted.iter().any(|p| p == "shared.txt"));
+        assert!(repo.path().join("REVERT_HEAD").exists());
+        assert!(repo.path().join("REVERT_MSG").exists());
     }
 }

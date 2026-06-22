@@ -1,6 +1,6 @@
 import { describe, it, expect, vi, beforeEach } from "vitest";
 import { render, screen, fireEvent, waitFor, act } from "@testing-library/react";
-import { CherryPickDialog, PullConflictsDialog, PushRejectedDialog, SquashDialog } from "./Dialogs";
+import { CherryPickDialog, RevertDialog, PullConflictsDialog, PushRejectedDialog, SquashDialog } from "./Dialogs";
 import { ipc } from "@/lib/ipc";
 
 vi.mock("@/lib/ipc", () => ({
@@ -9,6 +9,8 @@ vi.mock("@/lib/ipc", () => ({
     pushBranch: vi.fn(),
     cherryPick: vi.fn(),
     finishCherryPick: vi.fn(),
+    revertCommit: vi.fn(),
+    finishRevert: vi.fn(),
     doCommit: vi.fn(),
     getSquashPreview: vi.fn(),
     squashCommits: vi.fn(),
@@ -129,6 +131,112 @@ describe("Dialogs", () => {
       fireEvent.click(screen.getByRole("button", { name: "Cancel" }));
       expect(mockOnClose).toHaveBeenCalled();
       expect(ipc.cherryPick).not.toHaveBeenCalled();
+    });
+  });
+
+  describe("RevertDialog", () => {
+    const defaultProps = {
+      repoId: "repo1",
+      oid: "abc123def456",
+      summary: "feat: add new thing",
+      onClose: mockOnClose,
+      onSuccess: mockOnSuccess,
+      onConflicts: mockOnConflicts,
+      onLeaveStaged: mockOnLeaveStaged,
+    };
+
+    it("renders commit summary and short oid", () => {
+      vi.mocked(ipc.revertCommit).mockResolvedValue({ kind: "staged", conflicted: [], message: "" });
+      render(<RevertDialog {...defaultProps} />);
+
+      expect(screen.getByRole("heading", { name: "Revert commit" })).toBeInTheDocument();
+      expect(screen.getByText(/"revert: feat: add new thing"/)).toBeInTheDocument();
+      expect(screen.getByText("abc123de")).toBeInTheDocument();
+    });
+
+    it("shows staged dialog when revert applies cleanly", async () => {
+      vi.mocked(ipc.revertCommit).mockResolvedValue({ kind: "staged", conflicted: [], message: "revert: feat: add new thing" });
+      render(<RevertDialog {...defaultProps} />);
+
+      fireEvent.click(screen.getByRole("button", { name: "Revert" }));
+      expect(ipc.revertCommit).toHaveBeenCalledWith("repo1", "abc123def456");
+
+      await waitFor(() =>
+        expect(screen.getByRole("heading", { name: "Revert applied cleanly" })).toBeInTheDocument()
+      );
+      expect(mockOnSuccess).not.toHaveBeenCalled();
+      expect(mockOnConflicts).not.toHaveBeenCalled();
+    });
+
+    it("calls onSuccess after committing from staged dialog", async () => {
+      vi.mocked(ipc.revertCommit).mockResolvedValue({ kind: "staged", conflicted: [], message: "revert: feat: add new thing" });
+      vi.mocked(ipc.doCommit).mockResolvedValue(undefined);
+      render(<RevertDialog {...defaultProps} />);
+
+      fireEvent.click(screen.getByRole("button", { name: "Revert" }));
+      await waitFor(() => screen.getByRole("heading", { name: "Revert applied cleanly" }));
+
+      fireEvent.click(screen.getByRole("button", { name: "Commit Revert" }));
+      await waitFor(() => expect(mockOnSuccess).toHaveBeenCalled());
+      expect(ipc.doCommit).toHaveBeenCalledWith("repo1", "revert: feat: add new thing");
+    });
+
+    it("calls onLeaveStaged when Leave staged is clicked", async () => {
+      vi.mocked(ipc.revertCommit).mockResolvedValue({ kind: "staged", conflicted: [], message: "revert: feat: add new thing" });
+      render(<RevertDialog {...defaultProps} />);
+
+      fireEvent.click(screen.getByRole("button", { name: "Revert" }));
+      await waitFor(() => screen.getByRole("heading", { name: "Revert applied cleanly" }));
+
+      fireEvent.click(screen.getByRole("button", { name: "Leave staged" }));
+      expect(mockOnLeaveStaged).toHaveBeenCalled();
+      expect(mockOnSuccess).not.toHaveBeenCalled();
+      expect(mockOnConflicts).not.toHaveBeenCalled();
+    });
+
+    it("calls onConflicts when revert produces conflicts", async () => {
+      vi.mocked(ipc.revertCommit).mockResolvedValue({ kind: "conflicts", conflicted: ["src/lib.rs"], message: "" });
+      render(<RevertDialog {...defaultProps} />);
+
+      fireEvent.click(screen.getByRole("button", { name: "Revert" }));
+
+      await waitFor(() => expect(mockOnConflicts).toHaveBeenCalled());
+      expect(mockOnSuccess).not.toHaveBeenCalled();
+    });
+
+    it("shows error message when ipc.revertCommit throws", async () => {
+      vi.mocked(ipc.revertCommit).mockRejectedValue(new Error("repo not found"));
+      render(<RevertDialog {...defaultProps} />);
+
+      fireEvent.click(screen.getByRole("button", { name: "Revert" }));
+
+      await waitFor(() => expect(screen.getByText("Error: repo not found")).toBeInTheDocument());
+      expect(mockOnSuccess).not.toHaveBeenCalled();
+      expect(mockOnConflicts).not.toHaveBeenCalled();
+    });
+
+    it("disables both buttons while reverting", async () => {
+      let resolve!: (r: { kind: string; conflicted: string[]; message: string }) => void;
+      vi.mocked(ipc.revertCommit).mockReturnValue(new Promise((res) => { resolve = res; }) as any);
+
+      render(<RevertDialog {...defaultProps} />);
+      fireEvent.click(screen.getByRole("button", { name: "Revert" }));
+
+      await waitFor(() => {
+        expect(screen.getByRole("button", { name: "Reverting…" })).toBeDisabled();
+        expect(screen.getByRole("button", { name: "Cancel" })).toBeDisabled();
+      });
+
+      act(() => resolve({ kind: "staged", conflicted: [], message: "" }));
+    });
+
+    it("calls onClose when Cancel is clicked", () => {
+      vi.mocked(ipc.revertCommit).mockResolvedValue({ kind: "staged", conflicted: [], message: "" });
+      render(<RevertDialog {...defaultProps} />);
+
+      fireEvent.click(screen.getByRole("button", { name: "Cancel" }));
+      expect(mockOnClose).toHaveBeenCalled();
+      expect(ipc.revertCommit).not.toHaveBeenCalled();
     });
   });
 

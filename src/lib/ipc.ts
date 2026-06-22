@@ -89,7 +89,7 @@ export interface MergeResult {
 
 export interface MergeStatus {
   in_progress: boolean;
-  kind: "merge" | "cherry_pick" | "";
+  kind: "merge" | "cherry_pick" | "revert" | "";
   conflicted_paths: string[];
   merge_head_oid: string | null;
   default_message: string;
@@ -238,6 +238,12 @@ export const ipc = {
 
   finishCherryPick: (repoId: string, message: string) =>
     invoke<void>("finish_cherry_pick", { repoId, message }),
+
+  revertCommit: (repoId: string, oid: string) =>
+    invoke<CherryPickResult>("revert_commit", { repoId, oid }),
+
+  finishRevert: (repoId: string, message: string) =>
+    invoke<void>("finish_revert", { repoId, message }),
 
   getConflictContent: (repoId: string, path: string) =>
     invoke<string>("get_conflict_content", { repoId, path }),
