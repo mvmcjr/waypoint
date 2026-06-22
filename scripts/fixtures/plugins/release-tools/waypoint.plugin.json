@@ -1,0 +1,25 @@
+{
+  "name": "release-tools",
+  "version": "1.0.0",
+  "description": "Create the next versioned release branch (release/vX.Y.Z).",
+  "entry": "plugin.js",
+  "contributes": {
+    "commands": [
+      {
+        "id": "create-release",
+        "title": "Create Release",
+        "icon": "Tag",
+        "surfaces": ["commandPalette", "branchContextMenu", "toolbar"],
+        "inputs": [
+          {
+            "id": "bump",
+            "type": "select",
+            "label": "Version bump",
+            "options": ["patch", "minor", "major"],
+            "default": "patch"
+          }
+        ]
+      }
+    ]
+  }
+}
