@@ -127,6 +127,7 @@ All methods are async (return a Promise). Git methods operate on `ctx.repoId`.
 | `getHead()` | `{ oid, branch }`. |
 | `getCommit(oid)` | `{ oid, summary, body, author_name, author_email, timestamp, parent_oids }`. |
 | `listStatus()` | working-dir file statuses. |
+| `listRemotes()` | `RemoteInfo[]` — each `{ name, url }`. |
 
 ### Writes
 
@@ -134,6 +135,7 @@ All methods are async (return a Promise). Git methods operate on `ctx.repoId`.
 | --- | --- |
 | `createBranch(name, oid, checkout = false)` | Create a branch at `oid`; optionally check it out. |
 | `createTag(name, oid, message = "")` | Create a tag (annotated when `message` is set). |
+| `pushTag(remote, tag)` | Push a tag to a remote. |
 | `checkoutBranch(name, force = false)` | Check out a local branch. |
 | `checkoutCommit(oid, force = false)` | Detached checkout. |
 | `commit(message)` | Commit the staged index. |

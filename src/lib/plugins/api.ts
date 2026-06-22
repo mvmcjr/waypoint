@@ -21,12 +21,14 @@ export function buildApiHandlers(
     getHead: () => ipc.getHeadInfo(repoId),
     listStatus: () => ipc.listStatus(repoId),
     getCommit: (oid: string) => ipc.getCommit(repoId, oid),
+    listRemotes: () => ipc.listRemotes(repoId),
 
     // ── writes ─────────────────────────────────────────────
     createBranch: (name: string, oid: string, checkout = false) =>
       ipc.createBranchAt(repoId, name, oid, checkout),
     createTag: (name: string, oid: string, message = "") =>
       ipc.createTag(repoId, name, oid, message),
+    pushTag: (remote: string, tag: string) => ipc.pushTag(repoId, remote, tag),
     checkoutBranch: (name: string, force = false) => ipc.checkoutBranch(repoId, name, force),
     checkoutCommit: (oid: string, force = false) => ipc.checkoutCommit(repoId, oid, force),
     commit: (message: string) => ipc.doCommit(repoId, message),
