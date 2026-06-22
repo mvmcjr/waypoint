@@ -102,15 +102,9 @@ jobs:
           # Export a Developer ID Application certificate as a .p12, base64-encode
           # it, and store the result in APPLE_CERTIFICATE. Leave all six secrets
           # unset to produce an unsigned build (useful for forks / CI testing).
-          # Leave the cert secrets unset to produce an ad-hoc-signed build: no
-          # Apple Developer account required, and the stable ad-hoc signature
-          # prevents macOS Gatekeeper "App Translocation" (which otherwise makes
-          # unsigned bundles launch to a dock icon with no window). Users still
-          # see an "unidentified developer" prompt — see the README install note.
           APPLE_CERTIFICATE: ${{ secrets.APPLE_CERTIFICATE }}
           APPLE_CERTIFICATE_PASSWORD: ${{ secrets.APPLE_CERTIFICATE_PASSWORD }}
-          # Falls back to "-" (ad-hoc) when no real Developer ID is configured.
-          APPLE_SIGNING_IDENTITY: ${{ secrets.APPLE_SIGNING_IDENTITY || '-' }}
+          APPLE_SIGNING_IDENTITY: ${{ secrets.APPLE_SIGNING_IDENTITY }}
           APPLE_ID: ${{ secrets.APPLE_ID }}
           APPLE_PASSWORD: ${{ secrets.APPLE_PASSWORD }}
           APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
@@ -136,4 +130,4 @@ jobs:
           releaseDraft: true
           # Tags containing a hyphen (e.g. v1.0.0-beta.1) are pre-releases.
           prerelease: ${{ contains(github.ref_name, '-') }}
-          args: ${{ matrix.args }}
+          args: ${{ matrix.args }}${{ matrix.platform == 'macos-latest' && !secrets.APPLE_CERTIFICATE && ' --no-sign' || '' }}
