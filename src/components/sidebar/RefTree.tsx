@@ -9,8 +9,31 @@ import {
   ContextMenuTrigger,
 } from "@/components/ui/context-menu";
 import type { RefAction } from "@/components/timeline/RefBadge";
+import { usePluginRegistry, commandsForSurface } from "@/lib/plugins/registry";
+import { usePluginRunner } from "@/components/plugins/PluginRunnerProvider";
 
 export type { RefAction };
+
+/** Plugin commands contributed to the branch context menu. */
+function BranchPluginItems({ branchName }: { branchName: string }) {
+  const runner = usePluginRunner();
+  const plugins = usePluginRegistry((s) => s.plugins);
+  const cmds = commandsForSurface(plugins, "branchContextMenu");
+  if (cmds.length === 0) return null;
+  return (
+    <>
+      <ContextMenuSeparator />
+      {cmds.map(({ pluginId, command }) => (
+        <ContextMenuItem
+          key={`${pluginId}:${command.id}`}
+          onClick={() => runner.run(pluginId, command, "branchContextMenu", { branchName })}
+        >
+          {command.title}
+        </ContextMenuItem>
+      ))}
+    </>
+  );
+}
 
 const GROUP_META = {
   Branches: { icon: GitBranch },
@@ -95,7 +118,10 @@ function RefGroup({ label, refs, filter, onSelect, onRefAction }: GroupProps) {
               <li key={ref.name}>
                 <ContextMenu>
                   <ContextMenuTrigger>{btn}</ContextMenuTrigger>
-                  <ContextMenuContent>{menuContent}</ContextMenuContent>
+                  <ContextMenuContent>
+                    {menuContent}
+                    {label === "Branches" && <BranchPluginItems branchName={ref.shorthand} />}
+                  </ContextMenuContent>
                 </ContextMenu>
               </li>
             );

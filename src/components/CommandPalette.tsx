@@ -1,6 +1,6 @@
 import { useState, useEffect, useRef, useCallback } from "react";
 import { Dialog as DialogPrimitive } from "@base-ui/react/dialog";
-import { FolderOpen, Search, ArrowLeft, ExternalLink, Download, Settings } from "lucide-react";
+import { FolderOpen, Search, ArrowLeft, ExternalLink, Download, Settings, Puzzle } from "lucide-react";
 import { open as openDialog } from "@tauri-apps/plugin-dialog";
 import { revealItemInDir } from "@tauri-apps/plugin-opener";
 import { cn, repoLabel, truncatePath } from "@/lib/utils";
@@ -8,6 +8,8 @@ import { ipc } from "@/lib/ipc";
 import { useStore } from "@/lib/store";
 import { useOpenRepo } from "@/lib/useOpenRepo";
 import { getRecentRepos, addManyToRecentRepos } from "@/lib/recentRepos";
+import { usePluginRegistry, commandsForSurface } from "@/lib/plugins/registry";
+import { usePluginRunner } from "@/components/plugins/PluginRunnerProvider";
 
 interface Props {
   open: boolean;
@@ -41,6 +43,8 @@ export function CommandPalette({ open, onClose }: Props) {
 
   const activeTab = useStore((s) => s.tabs.find((t) => t.id === s.activeTabId));
   const openRepoAndRecent = useOpenRepo();
+  const pluginList = usePluginRegistry((s) => s.plugins);
+  const runner = usePluginRunner();
 
   useEffect(() => {
     if (open) {
@@ -153,7 +157,19 @@ export function CommandPalette({ open, onClose }: Props) {
     },
   ];
 
-  const filteredCommands = commands.filter(
+  const pluginCommands: CommandDef[] = commandsForSurface(pluginList, "commandPalette").map(
+    ({ pluginId, command }) => ({
+      id: `plugin:${pluginId}:${command.id}`,
+      label: command.title,
+      icon: Puzzle,
+      execute: () => {
+        onClose();
+        runner.run(pluginId, command, "commandPalette");
+      },
+    })
+  );
+
+  const filteredCommands = [...commands, ...pluginCommands].filter(
     (c) => !query || c.label.toLowerCase().includes(query.toLowerCase())
   );
 

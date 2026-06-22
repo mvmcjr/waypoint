@@ -2,6 +2,9 @@ import {
   ContextMenuItem,
   ContextMenuSeparator,
 } from "@/components/ui/context-menu";
+import { usePluginRegistry, commandsForSurface } from "@/lib/plugins/registry";
+import { usePluginRunner } from "@/components/plugins/PluginRunnerProvider";
+import type { PluginContext, Surface } from "@/lib/plugins/types";
 
 // Defined here (not in CommitContextMenu) so both CommitContextMenu and
 // BadgeMenu can import the type without a circular dependency.
@@ -37,13 +40,21 @@ export interface CommitMenuItemsProps {
   hideReset?: boolean;
   /** Active multi-selection. When this oid is part of a ≥2 selection, a "Squash N commits…" item appears. */
   selectedOids?: string[];
+  /** When set, plugin commands for the given surface are appended to the menu. */
+  pluginContext?: { surface: Surface; extra: Partial<PluginContext> };
 }
 
 export function CommitMenuItems({
   oid, isHead, mergeLabel, commitSummary, onAction,
   extraCopyItems, checkoutSlot, hideCreateTag, hideMergeRebase, hideReset, selectedOids,
+  pluginContext,
 }: CommitMenuItemsProps) {
   const short = oid.slice(0, 8);
+  const runner = usePluginRunner();
+  const plugins = usePluginRegistry((s) => s.plugins);
+  const pluginCmds = pluginContext
+    ? commandsForSurface(plugins, pluginContext.surface)
+    : [];
   // Offer squash only when right-clicking inside a multi-selection of 2+ commits.
   const squashOids = selectedOids && selectedOids.length >= 2 && selectedOids.includes(oid)
     ? selectedOids
@@ -103,6 +114,21 @@ export function CommitMenuItems({
           <ContextMenuItem onClick={() => onAction({ kind: "squash", oids: squashOids })}>
             Squash {squashOids.length} commits…
           </ContextMenuItem>
+        </>
+      )}
+
+      {/* ── Plugin commands ───────────────────────────────────── */}
+      {pluginContext && pluginCmds.length > 0 && (
+        <>
+          <ContextMenuSeparator />
+          {pluginCmds.map(({ pluginId, command }) => (
+            <ContextMenuItem
+              key={`${pluginId}:${command.id}`}
+              onClick={() => runner.run(pluginId, command, pluginContext.surface, pluginContext.extra)}
+            >
+              {command.title}
+            </ContextMenuItem>
+          ))}
         </>
       )}
 

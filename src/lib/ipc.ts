@@ -296,6 +296,9 @@ export const ipc = {
   scanForGitRepos: (path: string) =>
     invoke<string[]>("scan_for_git_repos", { path }),
 
+  readLocalPlugin: (path: string) =>
+    invoke<{ manifest: string; code: string }>("read_local_plugin", { path }),
+
   registerCliShim: () =>
     invoke<CliShimInfo>("register_cli_shim"),
 

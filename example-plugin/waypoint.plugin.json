@@ -1,0 +1,30 @@
+{
+  "name": "example-plugin",
+  "version": "1.0.0",
+  "description": "A reference plugin demonstrating every surface and several api calls.",
+  "entry": "plugin.js",
+  "contributes": {
+    "commands": [
+      {
+        "id": "branch-from-commit",
+        "title": "Branch from here…",
+        "icon": "GitBranch",
+        "surfaces": ["commitContextMenu"],
+        "inputs": [
+          { "id": "name", "type": "text", "label": "New branch name", "placeholder": "feature/my-thing" },
+          { "id": "checkout", "type": "confirm", "label": "Check out after creating", "default": true }
+        ]
+      },
+      {
+        "id": "show-branch-slug",
+        "title": "Show branch as slug",
+        "surfaces": ["branchContextMenu"]
+      },
+      {
+        "id": "github-rate-limit",
+        "title": "GitHub: rate limit",
+        "surfaces": ["commandPalette", "toolbar"]
+      }
+    ]
+  }
+}

@@ -32,7 +32,9 @@ import {
 import type { CommitAction } from "@/components/timeline/CommitContextMenu";
 import type { RefAction } from "@/components/sidebar/RefTree";
 import { ipc, type FileDiff, type RefInfo, type RemoteInfo } from "@/lib/ipc";
-import { RefreshCw, ArrowDown, ArrowUp } from "lucide-react";
+import { RefreshCw, ArrowDown, ArrowUp, Puzzle } from "lucide-react";
+import { usePluginRegistry, commandsForSurface } from "@/lib/plugins/registry";
+import { usePluginRunner } from "@/components/plugins/PluginRunnerProvider";
 import { toast } from "sonner";
 import { Button } from "@/components/ui/button";
 
@@ -496,6 +498,10 @@ export function RepoView() {
   const mergeInProgress = !!status?.merge_in_progress;
   const hasRemotes = (remotes?.length ?? 0) > 0;
 
+  const pluginList = usePluginRegistry((s) => s.plugins);
+  const pluginRunner = usePluginRunner();
+  const toolbarCmds = commandsForSurface(pluginList, "toolbar");
+
   return (
     <div className="flex h-full overflow-hidden">
       <Sidebar
@@ -567,6 +573,20 @@ export function RepoView() {
                 <div className="w-px h-3.5 bg-border mx-0.5" />
               </>
             )}
+            {toolbarCmds.map(({ pluginId, command }) => (
+              <Button
+                key={`${pluginId}:${command.id}`}
+                variant="ghost"
+                size="sm"
+                className="h-6 px-2 text-xs gap-1"
+                onClick={() => pluginRunner.run(pluginId, command, "toolbar")}
+                title={command.title}
+              >
+                <Puzzle size={11} />
+                {command.title}
+              </Button>
+            ))}
+            {toolbarCmds.length > 0 && <div className="w-px h-3.5 bg-border mx-0.5" />}
             <span className="text-xs text-muted-foreground">
               {searchActive
                 ? `${filteredCommits.length} / ${commits.length} commits`

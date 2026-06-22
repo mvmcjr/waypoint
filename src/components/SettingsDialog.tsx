@@ -6,9 +6,10 @@ import {
   Dialog,
   DialogContent,
 } from "@/components/ui/dialog";
-import { Sliders, HelpCircle, Terminal, RefreshCw, AlertCircle } from "lucide-react";
+import { Sliders, HelpCircle, Terminal, RefreshCw, AlertCircle, Puzzle } from "lucide-react";
+import { PluginsSettings } from "@/components/plugins/PluginsSettings";
 
-type SettingsTab = "general" | "integrations" | "about";
+type SettingsTab = "general" | "integrations" | "plugins" | "about";
 
 export function SettingsDialog() {
   const settingsOpen = useStore((s) => s.settingsOpen);
@@ -149,6 +150,17 @@ export function SettingsDialog() {
               Integrations
             </button>
             <button
+              onClick={() => setActiveTab("plugins")}
+              className={`w-full flex items-center gap-2 px-3 py-1.5 rounded-lg text-xs font-medium text-left cursor-pointer transition-colors ${
+                activeTab === "plugins"
+                  ? "bg-muted text-foreground"
+                  : "text-muted-foreground hover:text-foreground hover:bg-muted/10"
+              }`}
+            >
+              <Puzzle className="size-3.5" />
+              Plugins
+            </button>
+            <button
               onClick={() => setActiveTab("about")}
               className={`w-full flex items-center gap-2 px-3 py-1.5 rounded-lg text-xs font-medium text-left cursor-pointer transition-colors ${
                 activeTab === "about"
@@ -279,6 +291,8 @@ export function SettingsDialog() {
               </div>
             </div>
           )}
+
+          {activeTab === "plugins" && <PluginsSettings />}
 
           {activeTab === "about" && (
             <div className="space-y-6 flex flex-col h-full animate-in fade-in-50 duration-150">
