@@ -81,3 +81,45 @@ pub fn drop_stash(repo_id: String, index: usize, state: State<RepoState>) -> Res
     repo.stash_drop(index)?;
     Ok(())
 }
+
+/// Rename the stash at `index` by rewriting its message in the refs/stash reflog.
+/// Git has no native stash-rename, so we edit the reflog entry's message in place
+/// (preserving the stash's oids, order, and index).
+#[tauri::command]
+pub fn rename_stash(repo_id: String, index: usize, message: String, state: State<RepoState>) -> Result<()> {
+    let repos = state.0.lock().unwrap();
+    let repo = repos.get(&repo_id).ok_or_else(|| Error::RepoNotFound(repo_id.clone()))?;
+
+    let new_message = message.trim();
+    if new_message.is_empty() {
+        return Err(Error::InvalidArg("Stash name cannot be empty.".into()));
+    }
+    if new_message.contains('\n') {
+        return Err(Error::InvalidArg("Stash name cannot contain newlines.".into()));
+    }
+
+    // The reflog file is chronological (oldest first); stash@{0} is the last line.
+    // Use the common dir (not repo.path()) so this also works in linked worktrees,
+    // where refs/stash lives in the shared git directory.
+    let path = repo.commondir().join("logs").join("refs").join("stash");
+    let content = std::fs::read_to_string(&path)
+        .map_err(|e| Error::InvalidArg(format!("Cannot read stash reflog: {}", e)))?;
+
+    let mut lines: Vec<String> = content.lines().map(|l| l.to_owned()).collect();
+    let target = lines
+        .len()
+        .checked_sub(index + 1)
+        .ok_or_else(|| Error::InvalidArg(format!("No stash at index {}", index)))?;
+
+    // Each line is "<old> <new> <name> <email> <time> <tz>\t<message>".
+    let tab = lines[target]
+        .find('\t')
+        .ok_or_else(|| Error::InvalidArg("Malformed stash reflog entry.".into()))?;
+    lines[target] = format!("{}\t{}", &lines[target][..tab], new_message);
+
+    let mut out = lines.join("\n");
+    out.push('\n');
+    std::fs::write(&path, out)
+        .map_err(|e| Error::InvalidArg(format!("Cannot write stash reflog: {}", e)))?;
+    Ok(())
+}

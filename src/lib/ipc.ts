@@ -269,6 +269,9 @@ export const ipc = {
   dropStash: (repoId: string, index: number) =>
     invoke<void>("drop_stash", { repoId, index }),
 
+  renameStash: (repoId: string, index: number, message: string) =>
+    invoke<void>("rename_stash", { repoId, index, message }),
+
   listRemotes: (repoId: string) =>
     invoke<RemoteInfo[]>("list_remotes", { repoId }),
 

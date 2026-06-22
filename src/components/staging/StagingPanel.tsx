@@ -6,6 +6,15 @@ import {
   Archive, Trash2,
 } from "lucide-react";
 import { Button } from "@/components/ui/button";
+import { Input } from "@/components/ui/input";
+import {
+  Dialog,
+  DialogContent,
+  DialogDescription,
+  DialogFooter,
+  DialogHeader,
+  DialogTitle,
+} from "@/components/ui/dialog";
 import {
   ContextMenu,
   ContextMenuContent,
@@ -236,6 +245,9 @@ export function StagingPanel({ repoId, onCommitSuccess, onFileClick }: Props) {
   const [view, setView] = useState<"path" | "tree">("path");
   const [expandedDirs, setExpandedDirs] = useState<Set<string>>(new Set());
   const [discardArmed, setDiscardArmed] = useState(false);
+  const [stashOpen, setStashOpen] = useState(false);
+  const [stashName, setStashName] = useState("");
+  const [stashError, setStashError] = useState<string | null>(null);
 
   // Auto-disarm the discard button after 3 s if not confirmed.
   useEffect(() => {
@@ -309,12 +321,19 @@ export function StagingPanel({ repoId, onCommitSuccess, onFileClick }: Props) {
     finally { setWorking(false); }
   }
 
-  async function handleStash() {
+  async function handleStash(message: string) {
     setWorking(true);
-    setError(null);
-    try { await ipc.stashPush(repoId, ""); refresh(); }
-    catch (e) { setError(String(e)); }
-    finally { setWorking(false); }
+    setStashError(null);
+    try {
+      await ipc.stashPush(repoId, message.trim());
+      setStashOpen(false);
+      setStashName("");
+      refresh();
+    } catch (e) {
+      setStashError(String(e));
+    } finally {
+      setWorking(false);
+    }
   }
 
   async function handleDiscard() {
@@ -404,7 +423,7 @@ export function StagingPanel({ repoId, onCommitSuccess, onFileClick }: Props) {
             size="sm"
             variant="ghost"
             className="h-6 px-2 text-xs gap-1 shrink-0"
-            onClick={handleStash}
+            onClick={() => { setStashError(null); setStashOpen(true); }}
             disabled={staged.length === 0 && unstaged.length === 0 || disabled}
             title="Stash all changes"
           >
@@ -567,6 +586,33 @@ export function StagingPanel({ repoId, onCommitSuccess, onFileClick }: Props) {
             : `Commit${staged.length > 0 ? ` ${staged.length} file${staged.length !== 1 ? "s" : ""}` : ""}`}
         </Button>
       </div>
+
+      <Dialog open={stashOpen} onOpenChange={(o) => { if (!o) { setStashOpen(false); setStashName(""); setStashError(null); } }}>
+        <DialogContent>
+          <DialogHeader>
+            <DialogTitle>Stash changes</DialogTitle>
+            <DialogDescription>
+              Save your working changes to a stash. Give it an optional name to find it later.
+            </DialogDescription>
+          </DialogHeader>
+          <Input
+            placeholder="Stash name (optional)"
+            value={stashName}
+            onChange={(e) => setStashName(e.target.value)}
+            onKeyDown={(e) => e.key === "Enter" && handleStash(stashName)}
+            autoFocus
+          />
+          {stashError && <p className="text-xs text-destructive break-words">{stashError}</p>}
+          <DialogFooter>
+            <Button variant="outline" onClick={() => { setStashOpen(false); setStashName(""); }} disabled={working}>
+              Cancel
+            </Button>
+            <Button onClick={() => handleStash(stashName)} disabled={working}>
+              {working ? "Stashing…" : "Stash"}
+            </Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
     </div>
   );
 }
