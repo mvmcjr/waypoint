@@ -136,6 +136,9 @@ function BadgeMenu({
             hideCreateTag={isTag}
             hideMergeRebase={isTag}
             hideReset={isHead}
+            pluginContext={
+              isTag ? undefined : { surface: "branchContextMenu", extra: { branchName: name } }
+            }
           />
         ) : (
           <ContextMenuItem onClick={() => navigator.clipboard.writeText(name)}>

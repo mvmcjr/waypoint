@@ -68,6 +68,10 @@ export function CommitContextMenu({ item, onAction, selectedOids, children }: Pr
           onAction={onAction}
           checkoutSlot={checkoutSlot}
           selectedOids={selectedOids}
+          pluginContext={{
+            surface: "commitContextMenu",
+            extra: { commitOid: oid, commitSummary: item.commit.summary },
+          }}
         />
       </ContextMenuContent>
     </ContextMenu>

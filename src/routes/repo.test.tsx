@@ -40,6 +40,17 @@ vi.mock("@/lib/queries", () => ({
   useRepoStatus: vi.fn(),
 }));
 
+// Plugins: RepoView reads the registry + runner for toolbar commands.
+vi.mock("@/lib/plugins/registry", () => ({
+  usePluginRegistry: (selector?: (s: { plugins: unknown[] }) => unknown) =>
+    selector ? selector({ plugins: [] }) : { plugins: [] },
+  commandsForSurface: () => [],
+}));
+
+vi.mock("@/components/plugins/PluginRunnerProvider", () => ({
+  usePluginRunner: () => ({ run: vi.fn() }),
+}));
+
 // Mock child components to keep tests simple and focused on RepoView
 vi.mock("@/components/sidebar/Sidebar", () => ({
   Sidebar: () => <div data-testid="sidebar">Sidebar</div>,
