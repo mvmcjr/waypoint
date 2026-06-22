@@ -2,11 +2,12 @@ import { useRef, useState, useEffect, useCallback, useMemo, forwardRef, useImper
 import { useVirtualizer } from "@tanstack/react-virtual";
 import type { PositionedCommit } from "@/lib/ipc";
 import { useRepoStatus, useRefs, useStashes } from "@/lib/queries";
-import { clamp, isStashCommit } from "@/lib/utils";
+import { clamp, isStashCommit, stashLabel } from "@/lib/utils";
 import { GraphLayer, LANE_WIDTH, ROW_HEIGHT, REFS_COL_WIDTH } from "./GraphLayer";
 import { CommitRow } from "./CommitRow";
 import { WipRow } from "./WipRow";
 import { CommitContextMenu, type CommitAction } from "./CommitContextMenu";
+import { StashContextMenu } from "./StashContextMenu";
 import type { RefAction } from "./RefBadge";
 
 const REFS_WIDTH_MIN = 60;
@@ -60,6 +61,7 @@ export const Timeline = forwardRef<TimelineHandle, Props>(function Timeline(
     [refs],
   );
   const stashOids = useMemo(() => new Set(stashes.map((s) => s.oid)), [stashes]);
+  const stashByOid = useMemo(() => new Map(stashes.map((s) => [s.oid, s])), [stashes]);
 
   const mergeInProgress = !!status?.merge_in_progress;
   const hasWip = !!status && ((status.staged_count + status.unstaged_count) > 0 || mergeInProgress);
@@ -220,6 +222,40 @@ export const Timeline = forwardRef<TimelineHandle, Props>(function Timeline(
               }
               const item = commits[virtualItem.index - wipOffset];
               const isStash = isStashCommit(item.commit.oid, item.commit.summary, stashOids);
+              const stashEntry = stashByOid.get(item.commit.oid);
+
+              const row = (
+                <CommitRow
+                  item={item}
+                  refsWidth={refsWidth}
+                  graphWidth={graphColWidth}
+                  isSelected={item.commit.oid === selectedOid || multiSelectedSet.has(item.commit.oid)}
+                  isHead={item.commit.oid === headOid}
+                  headBranch={headBranch}
+                  pushedTagNames={pushedTagNames}
+                  isStash={isStash}
+                  stashName={stashEntry ? stashLabel(stashEntry.message) : undefined}
+                  onRefAction={stableRefAction}
+                  onCommitAction={stableCommitAction}
+                  onSelect={stableSelectOid}
+                />
+              );
+
+              // Stash rows aren't real commits — give them Pop/Apply/Drop instead
+              // of the checkout/merge/rebase commit menu.
+              if (isStash && repoId && stashEntry) {
+                return (
+                  <StashContextMenu
+                    key={item.commit.oid}
+                    repoId={repoId}
+                    index={stashEntry.index}
+                    currentName={stashLabel(stashEntry.message)}
+                  >
+                    {row}
+                  </StashContextMenu>
+                );
+              }
+
               return (
                 <CommitContextMenu
                   key={item.commit.oid}
@@ -227,19 +263,7 @@ export const Timeline = forwardRef<TimelineHandle, Props>(function Timeline(
                   onAction={stableCommitAction}
                   selectedOids={multiSelectedOids}
                 >
-                  <CommitRow
-                    item={item}
-                    refsWidth={refsWidth}
-                    graphWidth={graphColWidth}
-                    isSelected={item.commit.oid === selectedOid || multiSelectedSet.has(item.commit.oid)}
-                    isHead={item.commit.oid === headOid}
-                    headBranch={headBranch}
-                    pushedTagNames={pushedTagNames}
-                    isStash={isStash}
-                    onRefAction={stableRefAction}
-                    onCommitAction={stableCommitAction}
-                    onSelect={stableSelectOid}
-                  />
+                  {row}
                 </CommitContextMenu>
               );
             })}

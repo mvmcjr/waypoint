@@ -1,10 +1,12 @@
 import { memo } from "react";
 import { formatDistanceToNow } from "date-fns";
 import type { PositionedCommit } from "@/lib/ipc";
+import { Archive } from "lucide-react";
 import { RefBadge, groupRefs, type RefAction } from "./RefBadge";
 import { ROW_HEIGHT } from "./GraphLayer";
 import type { CommitAction } from "./CommitContextMenu";
 import { HoverCard, HoverCardTrigger, HoverCardContent } from "@/components/ui/hover-card";
+import { stashLabel } from "@/lib/utils";
 
 interface Props {
   item: PositionedCommit;
@@ -15,12 +17,14 @@ interface Props {
   headBranch: string | null;
   pushedTagNames?: Set<string>;
   isStash?: boolean;
+  /** For stash rows: the reflog-derived name (reflects renames; commit.summary does not). */
+  stashName?: string;
   onRefAction?: (action: RefAction) => void;
   onCommitAction?: (action: CommitAction) => void;
   onSelect: (oid: string, mods: { ctrl: boolean; shift: boolean }) => void;
 }
 
-export const CommitRow = memo(function CommitRow({ item, refsWidth, graphWidth, isSelected, isHead, headBranch, pushedTagNames, isStash, onRefAction, onCommitAction, onSelect }: Props) {
+export const CommitRow = memo(function CommitRow({ item, refsWidth, graphWidth, isSelected, isHead, headBranch, pushedTagNames, isStash, stashName, onRefAction, onCommitAction, onSelect }: Props) {
   const { commit } = item;
   const relative = formatDistanceToNow(new Date(commit.timestamp * 1000), { addSuffix: true });
   const refGroups = groupRefs(commit.refs, item.commit.local_branches, item.commit.remote_branches, headBranch, pushedTagNames);
@@ -53,6 +57,14 @@ export const CommitRow = memo(function CommitRow({ item, refsWidth, graphWidth, 
         style={{ width: refsWidth, flexShrink: 0 }}
         className="flex items-center gap-0.5 px-2 overflow-hidden"
       >
+        {isStash ? (
+          // Plain (menu-less) badge so the row's StashContextMenu handles right-click.
+          <span className="inline-flex items-center gap-1 px-1.5 py-px rounded text-[10px] font-mono bg-amber-500/12 text-amber-300/85 border border-amber-500/20 shrink-0">
+            <Archive size={9} className="opacity-70" />
+            stash
+          </span>
+        ) : (
+          <>
         {visibleRefs.map((g) => (
           <RefBadge key={g.name} {...g} oid={commit.oid} onAction={onRefAction} onCommitAction={onCommitAction} commitSummary={commit.summary} />
         ))}
@@ -88,6 +100,8 @@ export const CommitRow = memo(function CommitRow({ item, refsWidth, graphWidth, 
             </HoverCardContent>
           </HoverCard>
         )}
+          </>
+        )}
       </div>
 
       {/* Graph spacer */}
@@ -97,9 +111,8 @@ export const CommitRow = memo(function CommitRow({ item, refsWidth, graphWidth, 
       <span className={[
         "flex-1 min-w-0 truncate pl-2 text-[13px]",
         isHead ? "text-foreground/95" : "text-foreground/75",
-        isStash ? "" : "",
       ].join(" ")}>
-        {commit.summary}
+        {isStash ? (stashName ?? stashLabel(commit.summary)) : commit.summary}
       </span>
 
       {/* Right metadata cluster */}

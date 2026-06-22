@@ -15,6 +15,17 @@ export function isStashCommit(oid: string, summary: string, stashOids: Set<strin
   return stashOids.has(oid) || STASH_SUMMARY_RE.test(summary);
 }
 
+/**
+ * Strip git's auto-generated stash prefixes to reveal the user's name/message.
+ * "WIP on main: a1b2c3d Subject" → "Subject"; "On main: my name" → "my name".
+ */
+export function stashLabel(message: string): string {
+  return message
+    .replace(/^WIP on [^:]+: [0-9a-f]+ /, "")
+    .replace(/^On [^:]+: /, "")
+    .trim();
+}
+
 export function repoLabel(path: string): string {
   return path.split(/[/\\]/).filter(Boolean).pop() ?? path;
 }

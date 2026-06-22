@@ -9,6 +9,8 @@ import {
 } from "@/components/ui/context-menu";
 import { ipc } from "@/lib/ipc";
 import { useStashes, useRefreshRepo } from "@/lib/queries";
+import { stashLabel } from "@/lib/utils";
+import { StashRenameDialog } from "@/components/StashRenameDialog";
 
 interface Props {
   repoId: string;
@@ -20,6 +22,7 @@ export function StashList({ repoId, onApplied }: Props) {
   const { data: stashes = [] } = useStashes(repoId);
   const [open, setOpen] = useState(true);
   const [busy, setBusy] = useState(false);
+  const [renaming, setRenaming] = useState<{ index: number; name: string } | null>(null);
   // Tracks which repo's stash op is currently in-flight (null when idle).
   const opRepoRef = useRef<string | null>(null);
 
@@ -81,9 +84,7 @@ export function StashList({ repoId, onApplied }: Props) {
       {open && (
         <ul className="pb-1">
           {stashes.map((s) => {
-            const label = s.message
-              .replace(/^(WIP on [^:]+: [a-f0-9]+ )/, "")
-              .replace(/^On [^:]+: /, "");
+            const label = stashLabel(s.message);
             return (
               <li key={s.index}>
                 <ContextMenu>
@@ -109,6 +110,10 @@ export function StashList({ repoId, onApplied }: Props) {
                       <span className="ml-auto text-xs text-muted-foreground">keep stash</span>
                     </ContextMenuItem>
                     <ContextMenuSeparator />
+                    <ContextMenuItem onClick={() => setRenaming({ index: s.index, name: label })}>
+                      Rename…
+                    </ContextMenuItem>
+                    <ContextMenuSeparator />
                     <ContextMenuItem
                       onClick={() => handleDrop(s.index)}
                       className="text-destructive focus:text-destructive"
@@ -121,6 +126,15 @@ export function StashList({ repoId, onApplied }: Props) {
             );
           })}
         </ul>
+      )}
+
+      {renaming && (
+        <StashRenameDialog
+          repoId={repoId}
+          index={renaming.index}
+          currentName={renaming.name}
+          onClose={() => setRenaming(null)}
+        />
       )}
     </div>
   );
