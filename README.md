@@ -8,11 +8,23 @@ A Git GUI desktop application with a visual commit timeline. Built with Tauri 2,
 - Staging panel with per-file and per-hunk control
 - Inline conflict resolver (ours/theirs per file)
 - Branch, tag, and stash management
-- Cherry-pick, rebase, and reset operations
+- Cherry-pick, rebase, squash, and reset operations
 - Context menus on commits for common Git actions
 - Multi-repo tabs
 - Recent repos on the welcome screen
+- **Extensible via plugins** — add custom commands to the palette, context menus, and toolbar
 - Dark theme
+
+## Plugins
+
+Waypoint is extensible. Plugins are small JavaScript packages (local folders or
+GitHub repos) that add custom commands to the command palette, commit/branch
+context menus, and the toolbar — e.g. a one-click "create the next release
+branch" for your team's workflow.
+
+See **[docs/plugins.md](docs/plugins.md)** for the manifest schema, the full
+`api` reference, and how-tos. A ready-to-copy starting point lives in
+**[`example-plugin/`](example-plugin)**.
 
 ## Download
 
