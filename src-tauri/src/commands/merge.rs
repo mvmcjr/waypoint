@@ -459,7 +459,11 @@ fn revert_impl(repo: &git2::Repository, oid_str: &str) -> Result<CherryPickResul
     let git_oid = git2::Oid::from_str(oid_str).map_err(|_| Error::CommitNotFound(oid_str.to_string()))?;
     let commit = repo.find_commit(git_oid).map_err(|_| Error::CommitNotFound(oid_str.to_string()))?;
 
-    repo.revert(&commit, None)?;
+    let mut opts = git2::RevertOptions::new();
+    if commit.parent_count() > 1 {
+        opts.mainline(1);
+    }
+    repo.revert(&commit, Some(&mut opts))?;
 
     let mut index = repo.index()?;
     index.write()?;
@@ -557,6 +561,20 @@ mod tests {
         };
         let parent_refs: Vec<&git2::Commit> = parents.iter().collect();
         repo.commit(Some("HEAD"), &sig, &sig, msg, &tree, &parent_refs).unwrap()
+    }
+
+    fn write_merge_commit(repo: &Repository, filename: &str, content: &str, msg: &str, parent1: git2::Oid, parent2: git2::Oid) -> git2::Oid {
+        let workdir = repo.workdir().unwrap().to_path_buf();
+        std::fs::write(workdir.join(filename), content).unwrap();
+        let mut index = repo.index().unwrap();
+        index.add_path(Path::new(filename)).unwrap();
+        index.write().unwrap();
+        let tree_oid = index.write_tree().unwrap();
+        let tree = repo.find_tree(tree_oid).unwrap();
+        let sig = repo.signature().unwrap();
+        let p1 = repo.find_commit(parent1).unwrap();
+        let p2 = repo.find_commit(parent2).unwrap();
+        repo.commit(Some("HEAD"), &sig, &sig, msg, &tree, &[&p1, &p2]).unwrap()
     }
 
     fn checkout(repo: &Repository, branch_ref: &str) {
@@ -709,5 +727,28 @@ mod tests {
         assert!(result.conflicted.iter().any(|p| p == "shared.txt"));
         assert!(repo.path().join("REVERT_HEAD").exists());
         assert!(repo.path().join("REVERT_MSG").exists());
+    }
+
+    #[test]
+    fn revert_merge_commit() {
+        let (_dir, repo) = make_repo();
+        let base = write_commit(&repo, "shared.txt", "base\n", "initial");
+        let base_commit = repo.find_commit(base).unwrap();
+        let main_ref = repo.head().unwrap().name().unwrap().to_string();
+
+        repo.branch("side", &base_commit, false).unwrap();
+        checkout(&repo, "refs/heads/side");
+        let side_oid = write_commit(&repo, "side.txt", "side content\n", "side commit");
+
+        checkout(&repo, &main_ref);
+        let main_oid = write_commit(&repo, "main.txt", "main content\n", "main commit");
+
+        let merge_oid = write_merge_commit(&repo, "merged.txt", "merged\n", "Merge branch 'side'", main_oid, side_oid);
+
+        let result = revert_impl(&repo, &merge_oid.to_string()).unwrap();
+
+        assert_eq!(result.kind, "staged");
+        assert!(result.conflicted.is_empty());
+        assert!(result.message.contains("revert: Merge branch 'side'"));
     }
 }
