@@ -71,6 +71,7 @@ pub fn walk_commits(
         let author = commit.author();
         let timestamp = commit.time().seconds();
         let summary = commit.summary().unwrap_or("").to_owned();
+        let body = commit.body().unwrap_or("").trim().to_owned();
         let oid_s = oid.to_string();
         let refs = ref_map.get(&oid_s).cloned().unwrap_or_default();
         let local_branches = local_branch_map.get(&oid_s).cloned().unwrap_or_default();
@@ -80,6 +81,7 @@ pub fn walk_commits(
             oid: oid_s,
             parent_oids,
             summary,
+            body,
             author_name: author.name().unwrap_or("").to_owned(),
             author_email: author.email().unwrap_or("").to_owned(),
             timestamp,
@@ -108,7 +110,8 @@ pub fn get_commit(repo_id: String, oid: String, state: State<RepoState>) -> Resu
     Ok(CommitNode {
         oid: git_oid.to_string(),
         parent_oids,
-        summary: commit.message().unwrap_or("").to_owned(),
+        summary: commit.summary().unwrap_or("").to_owned(),
+        body: commit.body().unwrap_or("").trim().to_owned(),
         author_name: author.name().unwrap_or("").to_owned(),
         author_email: author.email().unwrap_or("").to_owned(),
         timestamp: commit.time().seconds(),

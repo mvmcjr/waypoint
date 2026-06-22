@@ -205,6 +205,232 @@ pub fn rebase_onto(repo_id: String, onto_oid: String, state: State<RepoState>) -
     Ok(())
 }
 
+#[derive(Debug, Serialize)]
+pub struct SquashPreview {
+    /// Number of commits that will be combined.
+    pub count: usize,
+    /// Suggested subject line — the oldest selected commit's summary.
+    pub default_subject: String,
+    /// Suggested body — the oldest commit's body plus each later commit's full
+    /// message, oldest first.
+    pub default_body: String,
+}
+
+/// A validated, contiguous squash selection: the commits ordered newest-first,
+/// plus the commit that will become the squashed commit's parent.
+struct SquashRange<'r> {
+    /// Selected commits, newest (tip) first, oldest (base) last.
+    chain: Vec<git2::Commit<'r>>,
+    /// Parent of the oldest selected commit — the squashed commit sits on top.
+    new_parent: git2::Commit<'r>,
+}
+
+/// Validate that `oids` form a contiguous linear chain on the current branch and
+/// return them newest-first. The selection may be interior (have descendants up
+/// to HEAD); those descendants are replayed by the caller.
+///
+/// Rules: ≥2 commits, no merge commits within the range, the oldest commit has a
+/// single parent, and every selected commit lies on one unbroken first-parent
+/// chain (no gaps, no extras).
+fn resolve_squash_range<'r>(
+    repo: &'r git2::Repository,
+    head_oid: git2::Oid,
+    oids: &[String],
+) -> Result<SquashRange<'r>> {
+    use std::collections::HashSet;
+
+    let mut wanted: HashSet<git2::Oid> = HashSet::new();
+    for o in oids {
+        let oid = git2::Oid::from_str(o).map_err(|_| Error::CommitNotFound(o.clone()))?;
+        wanted.insert(oid);
+    }
+    if wanted.len() < 2 {
+        return Err(Error::InvalidArg("Select at least two commits to squash.".into()));
+    }
+
+    // The tip is the only selected commit that is not an ancestor of another
+    // selected commit. Find it so we can walk parents downward from there.
+    let mut tip: Option<git2::Oid> = None;
+    for &candidate in &wanted {
+        let is_ancestor_of_other = wanted.iter().any(|&other| {
+            other != candidate && repo.graph_descendant_of(other, candidate).unwrap_or(false)
+        });
+        if !is_ancestor_of_other {
+            if tip.is_some() {
+                // Two unrelated tips ⇒ the selection spans diverging branches.
+                return Err(Error::InvalidArg(
+                    "Selected commits are not contiguous. Pick a single unbroken range.".into(),
+                ));
+            }
+            tip = Some(candidate);
+        }
+    }
+    let tip = tip.ok_or_else(|| {
+        Error::InvalidArg("Selected commits are not contiguous. Pick a single unbroken range.".into())
+    })?;
+
+    // The range must live on the current branch so its descendants can be replayed.
+    if tip != head_oid && !repo.graph_descendant_of(head_oid, tip)? {
+        return Err(Error::InvalidArg(
+            "Selected commits are not on the current branch.".into(),
+        ));
+    }
+
+    // Walk first-parent links from the tip, consuming the selection as we go.
+    let mut remaining = wanted.clone();
+    let mut chain = Vec::with_capacity(wanted.len());
+    let mut current = repo.find_commit(tip)?;
+    loop {
+        if !remaining.remove(&current.id()) {
+            // Reached a commit outside the selection before consuming it all ⇒ gap.
+            return Err(Error::InvalidArg(
+                "Selected commits are not contiguous. Pick a single unbroken range.".into(),
+            ));
+        }
+        if current.parent_count() > 1 {
+            return Err(Error::InvalidArg(
+                "Cannot squash across a merge commit. Select a linear range.".into(),
+            ));
+        }
+        chain.push(current.clone());
+
+        if remaining.is_empty() {
+            break; // current is the oldest (base) commit
+        }
+        if current.parent_count() == 0 {
+            return Err(Error::InvalidArg(
+                "Selected commits are not contiguous. Pick a single unbroken range.".into(),
+            ));
+        }
+        current = current.parent(0)?;
+    }
+
+    let base = chain.last().expect("range is non-empty");
+    if base.parent_count() != 1 {
+        return Err(Error::InvalidArg(
+            "Cannot squash: the oldest selected commit must have exactly one parent.".into(),
+        ));
+    }
+    let new_parent = base.parent(0)?;
+
+    Ok(SquashRange { chain, new_parent })
+}
+
+/// Preview a squash of the given commits: how many and a suggested combined
+/// message. Validates the selection without mutating anything.
+#[tauri::command]
+pub fn get_squash_preview(repo_id: String, oids: Vec<String>, state: State<RepoState>) -> Result<SquashPreview> {
+    let repos = state.0.lock().unwrap();
+    let repo = repos.get(&repo_id).ok_or_else(|| Error::RepoNotFound(repo_id.clone()))?;
+
+    let head = repo.head()?;
+    if !head.is_branch() {
+        return Err(Error::InvalidArg(
+            "Cannot squash: HEAD is detached. Checkout a branch first.".into(),
+        ));
+    }
+    let head_oid = head
+        .target()
+        .ok_or_else(|| Error::InvalidArg("HEAD has no target".into()))?;
+
+    let range = resolve_squash_range(repo, head_oid, &oids)?;
+
+    // Oldest first: the oldest commit's summary becomes the subject; its body and
+    // every later commit's full message become the body.
+    let mut oldest_first = range.chain.iter().rev();
+    let oldest = oldest_first.next().expect("range is non-empty");
+    let default_subject = oldest.summary().unwrap_or("").trim().to_owned();
+
+    let mut body_parts: Vec<String> = Vec::new();
+    let oldest_body = oldest.body().unwrap_or("").trim();
+    if !oldest_body.is_empty() {
+        body_parts.push(oldest_body.to_owned());
+    }
+    for c in oldest_first {
+        let msg = c.message().unwrap_or("").trim();
+        if !msg.is_empty() {
+            body_parts.push(msg.to_owned());
+        }
+    }
+    let default_body = body_parts.join("\n\n");
+
+    Ok(SquashPreview { count: range.chain.len(), default_subject, default_body })
+}
+
+/// Squash the given contiguous commits into a single commit using `message`,
+/// then replay any descendants up to HEAD. Rewrites history on the current
+/// branch. Aborts and errors on conflict.
+#[tauri::command]
+pub fn squash_commits(repo_id: String, oids: Vec<String>, message: String, state: State<RepoState>) -> Result<()> {
+    let repos = state.0.lock().unwrap();
+    let repo = repos.get(&repo_id).ok_or_else(|| Error::RepoNotFound(repo_id.clone()))?;
+
+    let head = repo.head()?;
+    if !head.is_branch() {
+        return Err(Error::InvalidArg(
+            "Cannot squash: HEAD is detached. Checkout a branch first.".into(),
+        ));
+    }
+    let head_oid = head
+        .target()
+        .ok_or_else(|| Error::InvalidArg("HEAD has no target".into()))?;
+
+    let msg = message.trim();
+    if msg.is_empty() {
+        return Err(Error::InvalidArg("Commit message cannot be empty.".into()));
+    }
+
+    let range = resolve_squash_range(repo, head_oid, &oids)?;
+    let tip = range.chain.first().expect("range is non-empty");
+    let tip_oid = tip.id();
+
+    // The squashed commit carries the tip's tree (the cumulative content of the
+    // whole range) on top of the oldest commit's parent.
+    let sig = repo.signature()?;
+    let tree = tip.tree()?;
+    let squashed_oid = repo.commit(None, &sig, &sig, msg, &tree, &[&range.new_parent])?;
+
+    let branch_ref = head
+        .name()
+        .ok_or_else(|| Error::InvalidArg("HEAD reference has no name".into()))?
+        .to_owned();
+
+    // No descendants beyond the range — just point the branch at the squash.
+    // Working dir/index already match (squash tree == old HEAD tree == tip tree).
+    if tip_oid == head_oid {
+        repo.reference(&branch_ref, squashed_oid, true, "squash commits")?;
+        repo.set_head(&branch_ref)?;
+        return Ok(());
+    }
+
+    // Interior squash: replay tip..HEAD onto the squashed commit.
+    let branch_ann = repo.reference_to_annotated_commit(&head)?;
+    let upstream_ann = repo.find_annotated_commit(tip_oid)?;
+    let onto_ann = repo.find_annotated_commit(squashed_oid)?;
+
+    let mut rebase = repo.rebase(Some(&branch_ann), Some(&upstream_ann), Some(&onto_ann), None)?;
+    loop {
+        match rebase.next() {
+            None => break,
+            Some(Err(e)) => {
+                let _ = rebase.abort();
+                return Err(Error::Git(e));
+            }
+            Some(Ok(_op)) => {
+                if repo.index()?.has_conflicts() {
+                    let _ = rebase.abort();
+                    return Err(Error::RebaseConflict(
+                        "Squash hit a conflict while replaying later commits and was aborted.".into(),
+                    ));
+                }
+                rebase.commit(None, &sig, None)?;
+            }
+        }
+    }
+    rebase.finish(None)?;
+    Ok(())
+}
+
 /// Checkout a remote tracking branch by creating (or reusing) a local branch.
 /// `remote_branch` is the shorthand, e.g. "origin/feature".
 #[tauri::command]

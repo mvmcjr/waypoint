@@ -6,6 +6,8 @@ pub struct CommitNode {
     pub oid: String,
     pub parent_oids: Vec<String>,
     pub summary: String,
+    /// Commit message body (everything after the summary line), trimmed. Empty when none.
+    pub body: String,
     pub author_name: String,
     pub author_email: String,
     pub timestamp: i64,
