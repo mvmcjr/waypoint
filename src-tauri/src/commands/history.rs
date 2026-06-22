@@ -50,10 +50,30 @@ pub fn walk_commits(
             ref_map.entry(oid.to_string()).or_default().push("HEAD".to_owned());
         }
     }
-    // Push every stash reflog entry so all stash commits appear in the timeline.
+    // A stash is not a single commit: its tip W has parents [base, index, untracked].
+    // We want the timeline to show only the stash tip (as one "stash" node) — the
+    // index/untracked helper commits are git plumbing and must not appear as rows
+    // (otherwise the user could cherry-pick/merge them and corrupt the repo).
+    //
+    // So: push each stash tip, hide its helper parents, and remember each tip's
+    // first parent so we can collapse its displayed parents to just the base.
+    let mut hidden_stash_commits: std::collections::HashSet<git2::Oid> = std::collections::HashSet::new();
+    let mut stash_tip_base: std::collections::HashMap<String, String> = std::collections::HashMap::new();
     if let Ok(reflog) = repo.reflog("refs/stash") {
         for entry in reflog.iter() {
-            let _ = walk.push(entry.id_new());
+            let tip = entry.id_new();
+            let _ = walk.push(tip);
+            if let Ok(commit) = repo.find_commit(tip) {
+                // Hide every parent except the first (the base commit).
+                for i in 1..commit.parent_count() {
+                    if let Ok(parent) = commit.parent_id(i) {
+                        hidden_stash_commits.insert(parent);
+                    }
+                }
+                if let Ok(base) = commit.parent_id(0) {
+                    stash_tip_base.insert(tip.to_string(), base.to_string());
+                }
+            }
         }
     }
 
@@ -62,17 +82,27 @@ pub fn walk_commits(
 
     for oid in walk.take(limit) {
         let oid = oid?;
+        // Skip stash helper commits (the index/untracked parents) — plumbing only.
+        if hidden_stash_commits.contains(&oid) {
+            continue;
+        }
         let commit = repo.find_commit(oid)?;
+        let oid_s = oid.to_string();
 
-        let parent_oids: Vec<String> = (0..commit.parent_count())
-            .map(|i| commit.parent_id(i).map(|o| o.to_string()))
-            .collect::<std::result::Result<_, _>>()?;
+        // For a stash tip, collapse its parents to just the base so the graph
+        // doesn't draw edges to the now-hidden helper commits.
+        let parent_oids: Vec<String> = if let Some(base) = stash_tip_base.get(&oid_s) {
+            vec![base.clone()]
+        } else {
+            (0..commit.parent_count())
+                .map(|i| commit.parent_id(i).map(|o| o.to_string()))
+                .collect::<std::result::Result<_, _>>()?
+        };
 
         let author = commit.author();
         let timestamp = commit.time().seconds();
         let summary = commit.summary().unwrap_or("").to_owned();
         let body = commit.body().unwrap_or("").trim().to_owned();
-        let oid_s = oid.to_string();
         let refs = ref_map.get(&oid_s).cloned().unwrap_or_default();
         let local_branches = local_branch_map.get(&oid_s).cloned().unwrap_or_default();
         let remote_branches = remote_branch_map.get(&oid_s).cloned().unwrap_or_default();
