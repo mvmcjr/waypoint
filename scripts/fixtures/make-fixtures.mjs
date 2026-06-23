@@ -642,15 +642,16 @@ function makeTags() {
 
 /**
  * LARGE-LINEAR
- * 2 000 sequential commits on one branch — no lanes, no merges.
- * Uses git-fast-import for speed (~1 s vs ~60 s with shell loops).
- * Tests timeline scrolling, virtualization performance, and the 2 000-commit limit.
+ * 50 000 sequential commits on one branch — no lanes, no merges.
+ * Uses git-fast-import for speed (~1-2 s vs minutes with shell loops).
+ * Stress-tests load-all (no commit cap), timeline virtualization, and the
+ * windowed GraphLayer scan — scroll to the bottom should stay smooth.
  */
 function makeLargeLinear() {
   const dir = fresh('large-linear');
   initRepo(dir);
 
-  const N = 2000;
+  const N = 50000;
   const parts = [];
 
   for (let i = 1; i <= N; i++) {

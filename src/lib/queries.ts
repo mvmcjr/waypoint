@@ -5,8 +5,20 @@ import { ipc } from "./ipc";
 export function useCommits(repoId: string | null) {
   return useQuery({
     queryKey: ["commits", repoId],
-    queryFn: () => ipc.walkCommits(repoId!, 2000),
+    // No limit: walk the entire graph. Rendering is virtualized and the per-commit
+    // payload is lean (no body), so even very large repos load in one pass.
+    queryFn: () => ipc.walkCommits(repoId!),
     enabled: !!repoId,
+    staleTime: Infinity,
+  });
+}
+
+/** Full commit detail (incl. body), fetched lazily for the selected commit. */
+export function useCommit(repoId: string | null, oid: string | null) {
+  return useQuery({
+    queryKey: ["commit", repoId, oid],
+    queryFn: () => ipc.getCommit(repoId!, oid!),
+    enabled: !!repoId && !!oid,
     staleTime: Infinity,
   });
 }

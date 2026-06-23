@@ -617,6 +617,11 @@ export function RepoView() {
             />
           ) : wipSelected && repoId && mergeInProgress ? (
             <ConflictPanel repoId={repoId} />
+          ) : isLoading ? (
+            <div className="flex-1 flex flex-col items-center justify-center gap-2 text-muted-foreground">
+              <RefreshCw size={20} className="animate-spin opacity-70" />
+              <span className="text-sm">Loading commits…</span>
+            </div>
           ) : (
             <Timeline
               ref={timelineRef}

@@ -1,7 +1,7 @@
 import { useState, useRef, useEffect } from "react";
 import { format } from "date-fns";
 import { Copy, Check, ChevronLeft, ChevronRight } from "lucide-react";
-import { useCommitDiff } from "@/lib/queries";
+import { useCommit, useCommitDiff } from "@/lib/queries";
 import type { FileDiff, PositionedCommit } from "@/lib/ipc";
 import { DiffViewer } from "./DiffViewer";
 import { Separator } from "@/components/ui/separator";
@@ -15,6 +15,9 @@ interface Props {
 export function CommitDetail({ repoId, item, onFileClick }: Props) {
   const { commit } = item;
   const { data: diff, isLoading } = useCommitDiff(repoId, commit.oid);
+  // The list payload omits the body to stay lean for large repos; fetch it lazily.
+  const { data: full } = useCommit(repoId, commit.oid);
+  const body = full?.body ?? commit.body;
   const [copied, setCopied] = useState(false);
   const [collapsed, setCollapsed] = useState(false);
   const copyTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
@@ -71,9 +74,9 @@ export function CommitDetail({ repoId, item, onFileClick }: Props) {
       {/* Meta */}
       <div className="p-3 space-y-2 text-sm shrink-0">
         <p className="font-medium text-foreground leading-snug">{commit.summary}</p>
-        {commit.body && (
+        {body && (
           <p className="text-xs text-muted-foreground leading-relaxed whitespace-pre-wrap break-words max-h-40 overflow-y-auto">
-            {commit.body}
+            {body}
           </p>
         )}
         <Separator />

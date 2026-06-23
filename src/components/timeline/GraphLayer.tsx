@@ -1,5 +1,11 @@
+import { useMemo } from "react";
 import type { PositionedCommit } from "@/lib/ipc";
 import { isStashCommit } from "@/lib/utils";
+
+// Edges whose span (parent_row - child_row) exceeds this are treated as "long" and
+// indexed up front, so the per-frame scan only has to look a bounded distance above
+// the viewport instead of from row 0. Keeps scroll O(window) regardless of repo size.
+const LONG_EDGE_SPAN = 256;
 
 export const LANE_WIDTH = 18;
 export const ROW_HEIGHT = 34;
@@ -92,22 +98,59 @@ export function GraphLayer({ commits, startRow, visibleRows, width, onSelectOid,
   const endRow = startRow + visibleRows;
   const svgHeight = visibleRows * ROW_HEIGHT;
 
+  // commits[i].row === i (assign_lanes uses the array index as the row; GraphLayer
+  // only renders the full, unfiltered list), so we can index by row directly.
+  //
+  // Long edges (parent far below its child) can cross into the viewport from commits
+  // far above it. Iterating from row 0 every frame to catch them is O(endRow) and is
+  // what froze deep scrolls once the 2000-commit cap was removed. Instead we index the
+  // (rare) long edges once and, per frame, only scan a bounded window above startRow
+  // for the common short edges.
+  const longEdges = useMemo(() => {
+    const out: { from_lane: number; from_row: number; to_lane: number; to_row: number; color_idx: number; isDashed: boolean }[] = [];
+    for (const item of commits) {
+      let dashed: boolean | null = null;
+      for (const e of item.edges) {
+        if (e.to_row - e.from_row <= LONG_EDGE_SPAN) continue;
+        if (dashed === null) dashed = isStashCommit(item.commit.oid, item.commit.summary, stashOids);
+        out.push({ from_lane: e.from_lane, from_row: e.from_row, to_lane: e.to_lane, to_row: e.to_row, color_idx: e.color_idx, isDashed: dashed });
+      }
+    }
+    return out;
+  }, [commits, stashOids]);
+
   const edges: { fromX: number; fromY: number; toX: number; toY: number; color: string; isDashed: boolean }[] = [];
 
-  for (const item of commits) {
-    if (item.row + wipOffset >= endRow) break; // commits are row-ordered; nothing past here can enter the viewport
+  const pushEdge = (e: { from_lane: number; from_row: number; to_lane: number; to_row: number; color_idx: number }, isDashed: boolean) => {
+    edges.push({
+      fromX: cx(e.from_lane),
+      fromY: cy(e.from_row, startRow, wipOffset),
+      toX: cx(e.to_lane),
+      toY: cy(e.to_row, startRow, wipOffset),
+      color: laneColor(e.color_idx),
+      isDashed,
+    });
+  };
+
+  // Short edges: only commits within LONG_EDGE_SPAN above the viewport can own an edge
+  // that reaches into it; everything below endRow is out of view.
+  const scanStart = Math.max(0, startRow - wipOffset - LONG_EDGE_SPAN);
+  const scanEnd = Math.min(commits.length, Math.max(0, endRow - wipOffset));
+  for (let i = scanStart; i < scanEnd; i++) {
+    const item = commits[i];
     let dashed: boolean | null = null;
     for (const e of item.edges) {
+      if (e.to_row - e.from_row > LONG_EDGE_SPAN) continue; // handled via longEdges
       if (e.from_row + wipOffset >= endRow || e.to_row + wipOffset < startRow) continue;
-
       if (dashed === null) dashed = isStashCommit(item.commit.oid, item.commit.summary, stashOids);
-      const fX = cx(e.from_lane);
-      const fY = cy(e.from_row, startRow, wipOffset);
-      const tX = cx(e.to_lane);
-      const tY = cy(e.to_row, startRow, wipOffset);
-
-      edges.push({ fromX: fX, fromY: fY, toX: tX, toY: tY, color: laneColor(e.color_idx), isDashed: dashed });
+      pushEdge(e, dashed);
     }
+  }
+
+  // Long edges: rare, so a full filtered pass is cheap.
+  for (const e of longEdges) {
+    if (e.from_row + wipOffset >= endRow || e.to_row + wipOffset < startRow) continue;
+    pushEdge(e, e.isDashed);
   }
 
   const commitStart = Math.max(0, startRow - wipOffset);

@@ -77,10 +77,16 @@ pub fn walk_commits(
         }
     }
 
-    let limit = limit.unwrap_or(2000);
-    let mut nodes: Vec<CommitNode> = Vec::with_capacity(limit);
+    // No limit = walk the entire graph. The timeline is virtualized and the graph
+    // layout is O(commits), so loading everything is fine; the per-commit payload is
+    // kept lean (body is fetched lazily via get_commit) to keep IPC transfer small.
+    let cap = limit.unwrap_or(usize::MAX);
+    let mut nodes: Vec<CommitNode> = Vec::new();
 
-    for oid in walk.take(limit) {
+    for (i, oid) in walk.enumerate() {
+        if i >= cap {
+            break;
+        }
         let oid = oid?;
         // Skip stash helper commits (the index/untracked parents) — plumbing only.
         if hidden_stash_commits.contains(&oid) {
@@ -102,7 +108,8 @@ pub fn walk_commits(
         let author = commit.author();
         let timestamp = commit.time().seconds();
         let summary = commit.summary().unwrap_or("").to_owned();
-        let body = commit.body().unwrap_or("").trim().to_owned();
+        // Body is intentionally omitted from the list payload (fetched lazily via
+        // get_commit when a commit is selected) — keeps the walk light for big repos.
         let refs = ref_map.get(&oid_s).cloned().unwrap_or_default();
         let local_branches = local_branch_map.get(&oid_s).cloned().unwrap_or_default();
         let remote_branches = remote_branch_map.get(&oid_s).cloned().unwrap_or_default();
@@ -111,7 +118,7 @@ pub fn walk_commits(
             oid: oid_s,
             parent_oids,
             summary,
-            body,
+            body: String::new(),
             author_name: author.name().unwrap_or("").to_owned(),
             author_email: author.email().unwrap_or("").to_owned(),
             timestamp,
