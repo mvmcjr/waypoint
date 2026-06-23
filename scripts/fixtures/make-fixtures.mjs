@@ -130,6 +130,41 @@ function makeStaged() {
 }
 
 /**
+ * UNTRACKED
+ * A clean committed baseline plus several untracked files (a single file, a
+ * multi-line file, and files inside a brand-new untracked directory). Nothing
+ * is staged. Tests that untracked files show the green "A" badge and that
+ * clicking one renders its full content in the diff view.
+ */
+function makeUntracked() {
+  const dir = fresh('untracked');
+  initRepo(dir);
+
+  write(dir, 'README.md', '# Untracked\n\nAll the files below are untracked — none staged. Click any to see its diff.\n');
+  run('git add .', dir);
+  run('git commit -m "Initial commit"', dir);
+
+  // Untracked: simple single-line file
+  write(dir, 'notes.txt', 'Just a scratch note.\n');
+
+  // Untracked: multi-line source file (exercises hunk/line rendering in the diff view)
+  write(dir, 'src/new-feature.js', [
+    'export function newFeature(input) {',
+    '  const trimmed = input.trim();',
+    '  if (!trimmed) return null;',
+    '  return trimmed.toUpperCase();',
+    '}',
+    '',
+  ].join('\n'));
+
+  // Untracked: files inside a brand-new directory (recurse_untracked_dirs path)
+  write(dir, 'assets/logo.svg', '<svg xmlns="http://www.w3.org/2000/svg" width="16" height="16"></svg>\n');
+  write(dir, 'assets/data/config.yml', 'enabled: true\nlevel: 3\n');
+
+  log('untracked', dir, '(all files untracked → green "A" badge, diffs show full content)');
+}
+
+/**
  * MERGE-CONFLICT
  * A `git merge` that stopped mid-way due to conflicts in shared.js.
  * MERGE_HEAD is set; the conflict panel should open automatically.
@@ -757,6 +792,7 @@ function log(name, dir, note = '') {
 const SCENARIOS = [
   ['clean',                makeClean],
   ['staged',               makeStaged],
+  ['untracked',            makeUntracked],
   ['merge-conflict',       makeMergeConflict],
   ['cherry-pick-conflict', makeCherryPickConflict],
   ['cherry-pick-ready',    makeCherryPickReady],
