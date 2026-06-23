@@ -45,7 +45,9 @@ const STATUS_STYLE: Record<string, { label: string; color: string }> = {
   modified:  { label: "M", color: "text-yellow-400" },
   deleted:   { label: "D", color: "text-red-400" },
   renamed:   { label: "R", color: "text-blue-400" },
-  untracked: { label: "?", color: "text-muted-foreground" },
+  // Untracked = a new file, just not staged yet — show it like a staged add ("A")
+  // rather than a cryptic "?". The status key stays "untracked" for stage/discard logic.
+  untracked: { label: "A", color: "text-green-400" },
 };
 const FALLBACK_STYLE = { label: "?", color: "text-muted-foreground" };
 

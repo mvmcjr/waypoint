@@ -143,7 +143,12 @@ pub fn get_workdir_diff(
     let repo = repos.get(&repo_id).ok_or_else(|| Error::RepoNotFound(repo_id.clone()))?;
 
     let mut opts = git2::DiffOptions::new();
-    opts.pathspec(&path).include_untracked(true);
+    // include_untracked lists untracked files as deltas, but their line content is
+    // only emitted with show_untracked_content — without it the diff view for an
+    // untracked file comes back with no hunks.
+    opts.pathspec(&path)
+        .include_untracked(true)
+        .show_untracked_content(true);
 
     let index = repo.index()?;
 
