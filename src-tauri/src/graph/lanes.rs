@@ -53,7 +53,7 @@ pub fn assign_lanes(commits: Vec<CommitNode>) -> Vec<PositionedCommit> {
 
     let mut result: Vec<PositionedCommit> = Vec::new();
 
-    for (row, commit) in commits.iter().enumerate() {
+    for (row, commit) in commits.into_iter().enumerate() {
         oid_to_row.insert(commit.oid.clone(), row);
 
         // ── 1. Find this commit's canonical lane ─────────────────────────
@@ -171,7 +171,7 @@ pub fn assign_lanes(commits: Vec<CommitNode>) -> Vec<PositionedCommit> {
         }
 
         result.push(PositionedCommit {
-            commit: commit.clone(),
+            commit,
             lane: commit_lane,
             row,
             color_idx,
