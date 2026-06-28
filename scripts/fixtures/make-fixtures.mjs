@@ -676,6 +676,56 @@ function makeTags() {
 }
 
 /**
+ * LONG-BRANCH-NAMES
+ * A small repo whose branches have very long names, forked at different
+ * commits. Exercises the timeline ref-badge truncation (middle ellipsis +
+ * full-name hover tooltip) and the sidebar ref tree on names that don't fit.
+ */
+function makeLongBranchNames() {
+  const dir = fresh('long-branch-names');
+  initRepo(dir);
+
+  write(dir, 'README.md', '# Long Branch Names\n\nBranches with names that overflow the badge.\n');
+  run('git add .', dir);
+  run('git commit -m "Initial commit"', dir);
+
+  write(dir, 'src/app.js', 'export const APP = "demo";\n');
+  run('git add .', dir);
+  run('git commit -m "Add app entry point"', dir);
+
+  // Long branch names forked off the *first* commit (HEAD~1).
+  const earlyBranches = [
+    'feature/very-long-feature-name-for-the-new-onboarding-flow-SA-100',
+    'bugfix/customer-reported-crash-on-startup-when-cache-is-empty-SA-241',
+  ];
+  for (const branch of earlyBranches) {
+    run('git checkout -b ' + JSON.stringify(branch) + ' HEAD~1', dir);
+    const safe = branch.replace(/[/]/g, '-');
+    write(dir, `src/${safe}.js`, `// work for ${branch}\nexport const READY = false;\n`);
+    run('git add .', dir);
+    run(`git commit -m ${JSON.stringify('wip: ' + branch)}`, dir);
+    run('git checkout main', dir);
+  }
+
+  // Long branch names forked off the latest commit (HEAD).
+  const tipBranches = [
+    'release/2026.06-quarterly-platform-stability-and-performance-RELEASE-2026Q2',
+    'chore/dependency-bump-and-toolchain-migration-to-the-new-build-system-INFRA-77',
+    'feat/experimental-graph-layout-engine-rewrite-with-webgl-acceleration-GFX-9',
+  ];
+  for (const branch of tipBranches) {
+    run('git checkout -b ' + JSON.stringify(branch), dir);
+    const safe = branch.replace(/[/]/g, '-');
+    write(dir, `src/${safe}.js`, `// work for ${branch}\nexport const STEP = 1;\n`);
+    run('git add .', dir);
+    run(`git commit -m ${JSON.stringify('feat: ' + branch)}`, dir);
+    run('git checkout main', dir);
+  }
+
+  log('long-branch-names', dir, `(${earlyBranches.length + tipBranches.length} long branches)`);
+}
+
+/**
  * LARGE-LINEAR
  * 50 000 sequential commits on one branch — no lanes, no merges.
  * Uses git-fast-import for speed (~1-2 s vs minutes with shell loops).
@@ -914,6 +964,7 @@ const SCENARIOS = [
   ['ahead-of-remote',      makeAheadOfRemote],
   ['stash',                makeStash],
   ['tags',                 makeTags],
+  ['long-branch-names',    makeLongBranchNames],
   ['large-linear',         makeLargeLinear],
   ['large-branchy',        makeLargeBranchy],
   ['stress',               makeStress],

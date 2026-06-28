@@ -8,6 +8,7 @@ import {
 } from "@/components/ui/context-menu";
 import type { CommitAction } from "./CommitContextMenu";
 import { CommitMenuItems } from "./CommitMenuItems";
+import { truncateMiddle } from "@/lib/utils";
 
 // Shared action type — also re-exported from RefTree for sidebar use.
 export type RefAction =
@@ -207,20 +208,24 @@ export function RefBadge({ name, trackingName, hasLocal, hasRemote, isHead, isTa
 
   let badge: React.ReactNode;
 
+  // Middle-truncate so the prefix and ticket-id tail both stay readable, and
+  // expose the full name via the native hover tooltip.
+  const shown = truncateMiddle(name);
+
   if (isHead) {
     badge = (
-      <span className={`${base} bg-teal-500/20 text-teal-300 border border-teal-500/40 font-medium`}>
+      <span className={`${base} bg-teal-500/20 text-teal-300 border border-teal-500/40 font-medium`} title={name}>
         <span className="text-[8px] mr-0.5 opacity-80">✓</span>
-        <span className="truncate">{name}</span>
+        <span className="overflow-hidden whitespace-nowrap">{shown}</span>
         {hasRemote && <Globe size={8} className="shrink-0 opacity-50 ml-0.5" />}
       </span>
     );
   } else if (isTag) {
     // ── Tag badge ──────────────────────────────────────────────────────────
     badge = (
-      <span className={`${base} bg-amber-500/12 text-amber-300/85 border border-amber-500/20`}>
+      <span className={`${base} bg-amber-500/12 text-amber-300/85 border border-amber-500/20`} title={name}>
         <Tag size={8} className="shrink-0 opacity-60 mr-0.5" />
-        <span className="truncate">{name}</span>
+        <span className="overflow-hidden whitespace-nowrap">{shown}</span>
         {hasLocal  && <Monitor size={8} className="shrink-0 opacity-40 ml-0.5" />}
         {hasRemote && <Globe   size={8} className="shrink-0 opacity-40" />}
       </span>
@@ -235,8 +240,8 @@ export function RefBadge({ name, trackingName, hasLocal, hasRemote, isHead, isTa
         : "bg-slate-600/10 text-slate-400/70 border border-slate-500/15";
 
     badge = (
-      <span className={`${base} ${colorClass}`}>
-        <span className="truncate">{name}</span>
+      <span className={`${base} ${colorClass}`} title={name}>
+        <span className="overflow-hidden whitespace-nowrap">{shown}</span>
         {hasLocal  && <Monitor size={8} className="shrink-0 opacity-40 ml-0.5" />}
         {hasRemote && <Globe   size={8} className="shrink-0 opacity-40" />}
       </span>

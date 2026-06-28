@@ -33,3 +33,16 @@ export function repoLabel(path: string): string {
 export function truncatePath(path: string, max = 54): string {
   return path.length > max ? "…" + path.slice(-(max - 1)) : path;
 }
+
+/**
+ * Collapse the middle of a string so both ends stay visible:
+ * "feature/very-long-name-SA-100" → "feature/v…SA-100". Useful for branch
+ * names where the meaningful bits (prefix + ticket id) live at both ends.
+ */
+export function truncateMiddle(s: string, max = 16): string {
+  if (s.length <= max) return s;
+  const keep = max - 1; // one char spent on the ellipsis
+  const head = Math.ceil(keep / 2);
+  const tail = Math.floor(keep / 2);
+  return s.slice(0, head) + "…" + s.slice(s.length - tail);
+}
