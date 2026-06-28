@@ -432,10 +432,33 @@ pub fn squash_commits(repo_id: String, oids: Vec<String>, message: String, state
     Ok(())
 }
 
+/// Outcome of `checkout_remote_branch`, so the frontend can explain what
+/// happened (and offer a hard reset when the local branch was left behind).
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum CheckoutRemoteResult {
+    /// No local branch existed; created one at the remote tip and checked it out.
+    Created,
+    /// Local branch already pointed at the remote tip.
+    UpToDate,
+    /// Local branch was behind; fast-forwarded it to the remote tip.
+    FastForward,
+    /// Local branch had diverged; checked out the remote tip detached and left
+    /// the local branch (and its unique commits) untouched.
+    Detached,
+}
+
 /// Checkout a remote tracking branch by creating (or reusing) a local branch.
 /// `remote_branch` is the shorthand, e.g. "origin/feature".
+///
+/// When the local branch already exists, land the user on the remote tip rather
+/// than on the (possibly stale) local position:
+///   - missing      → create at the remote tip, set tracking, check out
+///   - up to date   → check out the local branch as-is
+///   - behind       → fast-forward the local branch to the remote tip, check out
+///   - diverged     → check out the remote tip detached, leaving local commits intact
 #[tauri::command]
-pub fn checkout_remote_branch(repo_id: String, remote_branch: String, force: bool, state: State<RepoState>) -> Result<()> {
+pub fn checkout_remote_branch(repo_id: String, remote_branch: String, force: bool, state: State<RepoState>) -> Result<CheckoutRemoteResult> {
     let repos = state.0.lock().unwrap();
     let repo = repos.get(&repo_id).ok_or_else(|| Error::RepoNotFound(repo_id.clone()))?;
 
@@ -448,15 +471,80 @@ pub fn checkout_remote_branch(repo_id: String, remote_branch: String, force: boo
     let remote_obj = repo.revparse_single(&remote_ref)
         .map_err(|_| Error::InvalidArg(format!("Remote branch '{}' not found", remote_branch)))?;
     let remote_commit = remote_obj.peel_to_commit()?;
+    let remote_oid = remote_commit.id();
 
     let local_ref = format!("refs/heads/{}", local_name);
-    match repo.branch(local_name, &remote_commit, false) {
-        Ok(mut b) => { let _ = b.set_upstream(Some(&remote_branch)); }
-        Err(e) if e.code() == git2::ErrorCode::Exists => {}
-        Err(e) => return Err(Error::Git(e)),
-    }
 
-    do_checkout(repo, &local_ref, force)
+    // Resolve the existing local branch's tip (if any) in a scope that releases
+    // the borrow on `repo` before we check anything out below.
+    let local_oid: Option<git2::Oid> = match repo.find_branch(local_name, git2::BranchType::Local) {
+        Ok(b) => Some(
+            b.get().target()
+                .ok_or_else(|| Error::InvalidArg("local branch has no target".into()))?,
+        ),
+        Err(_) => None,
+    };
+
+    match local_oid {
+        // No local branch yet — create it at the remote tip and track it.
+        None => {
+            let mut b = repo.branch(local_name, &remote_commit, false)?;
+            let _ = b.set_upstream(Some(&remote_branch));
+            do_checkout(repo, &local_ref, force)?;
+            Ok(CheckoutRemoteResult::Created)
+        }
+        // Up to date, or behind the remote (local is an ancestor of the tip).
+        Some(local_oid) if local_oid == remote_oid || repo.graph_descendant_of(remote_oid, local_oid)? => {
+            if local_oid == remote_oid {
+                do_checkout(repo, &local_ref, force)?;
+                return Ok(CheckoutRemoteResult::UpToDate);
+            }
+            // Behind: fast-forward the local ref forward to the remote tip.
+            repo.find_reference(&local_ref)?
+                .set_target(remote_oid, "checkout: fast-forward to remote")?;
+            do_checkout(repo, &local_ref, force)?;
+            Ok(CheckoutRemoteResult::FastForward)
+        }
+        // Ahead or diverged — don't move the local branch over its own commits.
+        // Land on the remote tip detached so the user lands where the remote
+        // points without losing local work.
+        Some(_) => {
+            do_checkout(repo, &remote_oid.to_string(), force)?;
+            Ok(CheckoutRemoteResult::Detached)
+        }
+    }
+}
+
+/// Hard-reset a local branch onto its remote tip, discarding any local commits
+/// and working-tree changes that diverge from the remote, then check it out.
+/// Destructive — invoked explicitly by the user (e.g. after a remote force-push).
+#[tauri::command]
+pub fn reset_branch_to_remote(repo_id: String, remote_branch: String, state: State<RepoState>) -> Result<()> {
+    let repos = state.0.lock().unwrap();
+    let repo = repos.get(&repo_id).ok_or_else(|| Error::RepoNotFound(repo_id.clone()))?;
+
+    let slash = remote_branch.find('/').ok_or_else(|| {
+        Error::InvalidArg(format!("'{}' is not a valid remote tracking branch", remote_branch))
+    })?;
+    let local_name = &remote_branch[slash + 1..];
+    let remote_ref = format!("refs/remotes/{}", remote_branch);
+
+    let remote_commit = repo
+        .revparse_single(&remote_ref)
+        .map_err(|_| Error::InvalidArg(format!("Remote branch '{}' not found", remote_branch)))?
+        .peel_to_commit()?;
+    let remote_oid = remote_commit.id();
+
+    let local_ref = format!("refs/heads/{}", local_name);
+    // Force-move the local branch onto the remote tip, then force-checkout so the
+    // working tree matches — equivalent to `reset --hard` to the remote.
+    repo.reference(&local_ref, remote_oid, true, "reset to remote")?;
+    do_checkout(repo, &local_ref, true)?;
+
+    if let Ok(mut b) = repo.find_branch(local_name, git2::BranchType::Local) {
+        let _ = b.set_upstream(Some(&remote_branch));
+    }
+    Ok(())
 }
 
 /// Delete a local branch by short name.

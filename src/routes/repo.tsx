@@ -494,6 +494,34 @@ export function RepoView() {
     refresh();
   }
 
+  // After a diverged remote checkout left the user on a detached HEAD, offer a
+  // one-click hard reset of the local branch onto the remote tip (destructive).
+  function handleRemoteDiverged(remoteBranch: string) {
+    const localName = remoteBranch.slice(remoteBranch.indexOf("/") + 1);
+    const myRepoId = repoId;
+    toast.warning(
+      `${localName} has diverged from ${remoteBranch}. Checked out detached — your local ${localName} is kept.`,
+      {
+        duration: 12000,
+        action: {
+          label: `Reset ${localName} to remote`,
+          onClick: () => {
+            if (!myRepoId) return;
+            const p = ipc.resetBranchToRemote(myRepoId, remoteBranch);
+            toast.promise(p, {
+              loading: `Resetting ${localName} to ${remoteBranch}…`,
+              success: `${localName} reset to ${remoteBranch} (local commits discarded)`,
+              error: (e) => String(e),
+            });
+            p.then(() => {
+              if (repoIdRef.current === myRepoId) refresh();
+            }).catch(() => {});
+          },
+        },
+      },
+    );
+  }
+
   function handleMergeConflicts() {
     setDialog({ kind: "none" });
     setWipSelected(true);
@@ -695,7 +723,11 @@ export function RepoView() {
           repoId={repoId}
           remoteBranch={dialog.remoteBranch}
           onClose={() => setDialog({ kind: "none" })}
-          onSuccess={handleSuccess}
+          onSuccess={(result) => {
+            const remoteBranch = dialog.remoteBranch;
+            handleSuccess();
+            if (result === "detached") handleRemoteDiverged(remoteBranch);
+          }}
         />
       )}
       {repoId && dialog.kind === "create-branch" && (

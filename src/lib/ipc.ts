@@ -65,6 +65,9 @@ export interface DiffLine {
   content: string;
 }
 
+/** Outcome of checking out a remote tracking branch — see checkout_remote_branch. */
+export type CheckoutRemoteResult = "created" | "up_to_date" | "fast_forward" | "detached";
+
 export interface HeadInfo {
   oid: string;
   branch: string | null;
@@ -165,7 +168,10 @@ export const ipc = {
     invoke<void>("checkout_branch", { repoId, branchName, force }),
 
   checkoutRemoteBranch: (repoId: string, remoteBranch: string, force: boolean) =>
-    invoke<void>("checkout_remote_branch", { repoId, remoteBranch, force }),
+    invoke<CheckoutRemoteResult>("checkout_remote_branch", { repoId, remoteBranch, force }),
+
+  resetBranchToRemote: (repoId: string, remoteBranch: string) =>
+    invoke<void>("reset_branch_to_remote", { repoId, remoteBranch }),
 
   checkoutCommit: (repoId: string, oid: string, force: boolean) =>
     invoke<void>("checkout_commit", { repoId, oid, force }),

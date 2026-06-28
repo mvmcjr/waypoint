@@ -101,6 +101,7 @@ pub fn run() {
             commands::actions::get_head_info,
             commands::actions::checkout_branch,
             commands::actions::checkout_remote_branch,
+            commands::actions::reset_branch_to_remote,
             commands::actions::checkout_commit,
             commands::actions::create_branch_at,
             commands::actions::reset_head,

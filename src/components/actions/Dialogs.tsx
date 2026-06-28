@@ -17,7 +17,7 @@ import {
   SelectTrigger,
   SelectValue,
 } from "@/components/ui/select";
-import { ipc, type RemoteInfo } from "@/lib/ipc";
+import { ipc, type CheckoutRemoteResult, type RemoteInfo } from "@/lib/ipc";
 
 // ─── Shared helpers ────────────────────────────────────────────────────────
 
@@ -192,15 +192,15 @@ export function RemoteErrorDialog({ message, onClose }: { message: string; onClo
 
 // ─── Shared checkout shell ─────────────────────────────────────────────────
 
-interface CheckoutShellProps {
+interface CheckoutShellProps<T> {
   title: string;
   description: React.ReactNode;
-  onRun: (force: boolean) => Promise<void>;
+  onRun: (force: boolean) => Promise<T>;
   onClose: () => void;
-  onSuccess: () => void;
+  onSuccess: (result: T) => void;
 }
 
-function CheckoutShell({ title, description, onRun, onClose, onSuccess }: CheckoutShellProps) {
+function CheckoutShell<T>({ title, description, onRun, onClose, onSuccess }: CheckoutShellProps<T>) {
   const [force, setForce] = useState(false);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -209,8 +209,8 @@ function CheckoutShell({ title, description, onRun, onClose, onSuccess }: Checko
     setLoading(true);
     setError(null);
     try {
-      await onRun(force);
-      onSuccess();
+      const result = await onRun(force);
+      onSuccess(result);
     } catch (e) {
       setError(String(e));
     } finally {
@@ -284,8 +284,10 @@ export function CheckoutBranchDialog({ repoId, branchName, onClose, onSuccess }:
 
 // ─── Checkout Remote Branch ────────────────────────────────────────────────
 
-interface CheckoutRemoteBranchProps extends BaseProps {
+interface CheckoutRemoteBranchProps extends Omit<BaseProps, "onSuccess"> {
   remoteBranch: string;
+  /** Receives the checkout outcome so the caller can react (e.g. toast on diverged). */
+  onSuccess: (result: CheckoutRemoteResult) => void;
 }
 
 export function CheckoutRemoteBranchDialog({ repoId, remoteBranch, onClose, onSuccess }: CheckoutRemoteBranchProps) {
@@ -293,7 +295,7 @@ export function CheckoutRemoteBranchDialog({ repoId, remoteBranch, onClose, onSu
   return (
     <CheckoutShell
       title="Checkout branch"
-      description={<>Create local branch <code className="font-mono">{localName}</code> tracking{" "}<code className="font-mono">{remoteBranch}</code> and switch to it.</>}
+      description={<>Switch to <code className="font-mono">{localName}</code>, tracking{" "}<code className="font-mono">{remoteBranch}</code>. If your local branch has diverged, you'll land on the remote tip in a detached HEAD and your local branch is kept.</>}
       onRun={(force) => ipc.checkoutRemoteBranch(repoId, remoteBranch, force)}
       onClose={onClose}
       onSuccess={onSuccess}
