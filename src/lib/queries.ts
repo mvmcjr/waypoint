@@ -95,7 +95,14 @@ export function useMergeStatus(repoId: string | null) {
     queryKey: ["merge-status", repoId],
     queryFn: () => ipc.getMergeStatus(repoId!),
     enabled: !!repoId,
-    refetchInterval: 2000,
+    staleTime: Infinity,
+    // Merge state lives in .git/ (MERGE_HEAD, CHERRY_PICK_HEAD, the index), which
+    // the FS watcher already covers via repo-changed → refresh, and every
+    // conflict mutation calls useRefreshRepo. So only poll while a merge is
+    // actually in flight — as a safety net for index edits the watcher skips —
+    // and stay idle the rest of the time instead of scanning every 2s.
+    refetchInterval: (query) =>
+      query.state.data?.in_progress ? 2000 : false,
   });
 }
 

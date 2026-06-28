@@ -782,6 +782,117 @@ function makeLargeBranchy() {
   log('large-branchy', dir, `(${BRANCH_COUNT} simultaneous lanes)`);
 }
 
+/**
+ * STRESS
+ * A deliberately heavy, complex DAG for performance testing:
+ *   - a long trunk (default 1200 commits) on main
+ *   - hundreds of feature branches (default 300) forked at *varied* points
+ *     along the trunk, each a few commits long
+ *   - ~40% of those branches merged back into main (merge commits)
+ *   - a sprinkle of cross-branch merges for extra lane crossings
+ * Yields several thousand commits and hundreds of simultaneous branch refs.
+ *
+ * Built with git-fast-import so the whole thing materialises in ~1-2 s instead
+ * of the minutes a shell loop would take. Deterministic (seeded PRNG) so reruns
+ * produce an identical repo. Override sizes via env vars:
+ *   WAYPOINT_STRESS_TRUNK, WAYPOINT_STRESS_BRANCHES, WAYPOINT_STRESS_SEED
+ *
+ * This is the fixture to open when profiling walk_commits / assign_lanes and the
+ * sidebar ref tree on a worst-case repo.
+ */
+function makeStress() {
+  const dir = fresh('stress');
+  initRepo(dir);
+
+  const TRUNK        = Number(process.env.WAYPOINT_STRESS_TRUNK)    || 1200;
+  const BRANCHES     = Number(process.env.WAYPOINT_STRESS_BRANCHES) || 300;
+  const MERGE_RATIO  = 0.4;          // fraction of branches merged back to main
+  const CROSS_MERGES = Math.floor(BRANCHES * 0.1);
+
+  // mulberry32 — small deterministic PRNG so the fixture is reproducible.
+  let seed = (Number(process.env.WAYPOINT_STRESS_SEED) || 0x9e3779b9) >>> 0;
+  const rand = () => {
+    seed = (seed + 0x6d2b79f5) >>> 0;
+    let t = seed;
+    t = Math.imul(t ^ (t >>> 15), t | 1);
+    t ^= t + Math.imul(t ^ (t >>> 7), t | 61);
+    return ((t ^ (t >>> 14)) >>> 0) / 4294967296;
+  };
+  const randInt = (n) => Math.floor(rand() * n);
+
+  let mark = 0;
+  let ts = 1700000000;
+  const parts = [];
+
+  /** Emit one fast-import commit (with an inline file change) and return its mark. */
+  function commit(ref, msg, fromMark, mergeMarks, file, content) {
+    const m = ++mark;
+    ts += 60;
+    parts.push(
+      `commit ${ref}`,
+      `mark :${m}`,
+      `committer Fixture User <fixture@example.com> ${ts} +0000`,
+      `data ${Buffer.byteLength(msg)}`,
+      msg,
+      ...(fromMark ? [`from :${fromMark}`] : []),
+      ...mergeMarks.map((mm) => `merge :${mm}`),
+      `M 100644 inline ${file}`,
+      `data ${Buffer.byteLength(content)}`,
+      content,
+      ``, // blank line terminates the commit
+    );
+    return m;
+  }
+
+  // ── Trunk ───────────────────────────────────────────────────────────────
+  const trunkMarks = [];
+  let prev = null;
+  for (let i = 1; i <= TRUNK; i++) {
+    prev = commit('refs/heads/main', `chore: trunk commit ${i}`, prev, [], 'trunk.txt', `trunk ${i}\n`);
+    trunkMarks.push(prev);
+  }
+  let mainTip = prev;
+
+  // ── Feature branches forked at varied points; merge ~40% back to main ────
+  const branchTips = [];   // { name, tip } for later cross-branch merges
+  for (let b = 1; b <= BRANCHES; b++) {
+    const name = `feature/topic-${String(b).padStart(3, '0')}`;
+    const ref = `refs/heads/${name}`;
+    const file = `feat/topic-${String(b).padStart(3, '0')}.txt`;
+
+    let tip = trunkMarks[randInt(TRUNK)];     // varied fork point along the trunk
+    const len = 2 + randInt(7);               // 2..8 commits
+    for (let j = 1; j <= len; j++) {
+      tip = commit(ref, `feat(${name}): step ${j}`, tip, [], file, `${name} step ${j}\n`);
+    }
+    branchTips.push({ name, tip });
+
+    if (rand() < MERGE_RATIO) {
+      mainTip = commit('refs/heads/main', `Merge ${name} into main`, mainTip, [tip], 'trunk.txt', `merge ${name}\n`);
+    }
+  }
+
+  // ── A few cross-branch merges for extra lane crossings ───────────────────
+  for (let i = 0; i < CROSS_MERGES; i++) {
+    const into = branchTips[randInt(branchTips.length)];
+    const from = branchTips[randInt(branchTips.length)];
+    if (into === from) continue;
+    const ref = `refs/heads/${into.name}`;
+    const file = `feat/${into.name.replace('/', '-')}.txt`;
+    into.tip = commit(ref, `Merge ${from.name} into ${into.name}`, into.tip, [from.tip], file, `merge ${from.name}\n`);
+  }
+
+  execSync('git fast-import --quiet', {
+    cwd: dir,
+    input: parts.join('\n'),
+    stdio: ['pipe', 'pipe', 'pipe'],
+    env: { ...process.env, ...GIT_ENV },
+  });
+  run('git checkout -f main', dir);
+
+  log('stress', dir, `(${TRUNK} trunk + ${BRANCHES} branches, ${mark} commits)`);
+}
+
 // ── Runner ────────────────────────────────────────────────────────────────────
 
 function log(name, dir, note = '') {
@@ -805,6 +916,7 @@ const SCENARIOS = [
   ['tags',                 makeTags],
   ['large-linear',         makeLargeLinear],
   ['large-branchy',        makeLargeBranchy],
+  ['stress',               makeStress],
 ];
 
 mkdirSync(REPOS_DIR, { recursive: true });
