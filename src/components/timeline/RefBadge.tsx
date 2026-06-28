@@ -17,6 +17,7 @@ export type RefAction =
   | { kind: "merge"; oid: string; label: string }
   | { kind: "rebase"; oid: string }
   | { kind: "push"; branchName: string }
+  | { kind: "rename-branch"; branchName: string }
   | { kind: "delete-branch"; branchName: string }
   | { kind: "push-tag"; tagName: string }
   | { kind: "delete-tag"; tagName: string }
@@ -179,16 +180,21 @@ function BadgeMenu({
             </ContextMenuItem>
           </>
         )}
-        {!isTag && hasLocal && !isHead && act && (
+        {!isTag && hasLocal && act && (
           <>
             <ContextMenuSeparator />
-            <ContextMenuItem
-              onClick={() => act({ kind: "delete-branch", branchName: name })}
-              className="text-destructive focus:text-destructive"
-            >
-              Delete {name}
+            <ContextMenuItem onClick={() => act({ kind: "rename-branch", branchName: name })}>
+              Rename…
             </ContextMenuItem>
           </>
+        )}
+        {!isTag && hasLocal && !isHead && act && (
+          <ContextMenuItem
+            onClick={() => act({ kind: "delete-branch", branchName: name })}
+            className="text-destructive focus:text-destructive"
+          >
+            Delete {name}
+          </ContextMenuItem>
         )}
 
       </ContextMenuContent>

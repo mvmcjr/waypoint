@@ -787,6 +787,94 @@ export function DeleteBranchDialog({ repoId, branchName, onClose, onSuccess }: D
   );
 }
 
+// ─── Rename Branch ─────────────────────────────────────────────────────────
+
+interface RenameBranchProps extends BaseProps {
+  branchName: string;
+  /** True when a remote branch of the same name exists — enables remote rename. */
+  hasRemote: boolean;
+  remotes: RemoteInfo[];
+}
+
+export function RenameBranchDialog({ repoId, branchName, hasRemote, remotes, onClose, onSuccess }: RenameBranchProps) {
+  const [name, setName] = useState(branchName);
+  const [alsoRenameRemote, setAlsoRenameRemote] = useState(hasRemote);
+  const [remoteName, setRemoteName] = useState(
+    remotes.find((r) => r.name === "origin")?.name ?? remotes[0]?.name ?? ""
+  );
+  const [loading, setLoading] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+
+  const trimmed = name.trim();
+  const unchanged = trimmed === branchName;
+
+  async function run() {
+    if (!trimmed) { setError("New branch name is required."); return; }
+    if (unchanged) { setError("New name is the same as the current name."); return; }
+    setLoading(true);
+    setError(null);
+    try {
+      // Local rename first; the remote rename pushes the now-renamed local branch.
+      await ipc.renameBranch(repoId, branchName, trimmed);
+      if (hasRemote && alsoRenameRemote && remoteName) {
+        await ipc.renameRemoteBranch(repoId, remoteName, branchName, trimmed);
+      }
+      onSuccess();
+    } catch (e) {
+      setError(String(e));
+    } finally {
+      setLoading(false);
+    }
+  }
+
+  return (
+    <Dialog open onOpenChange={(o) => !o && onClose()}>
+      <DialogContent>
+        <DialogHeader>
+          <DialogTitle>Rename branch</DialogTitle>
+          <DialogDescription>
+            Rename <code className="font-mono">{branchName}</code>.
+          </DialogDescription>
+        </DialogHeader>
+
+        <Input
+          placeholder="branch-name"
+          value={name}
+          onChange={(e) => setName(e.target.value)}
+          onKeyDown={(e) => e.key === "Enter" && run()}
+          autoFocus
+        />
+
+        {hasRemote && remotes.length > 0 && (
+          <div className="flex flex-col gap-3">
+            <label className="flex items-center gap-2 text-sm cursor-pointer select-none">
+              <input
+                type="checkbox"
+                className="h-4 w-4 accent-primary"
+                checked={alsoRenameRemote}
+                onChange={(e) => setAlsoRenameRemote(e.target.checked)}
+              />
+              Also rename on remote
+            </label>
+            {alsoRenameRemote && (
+              <RemoteSelect remotes={remotes} value={remoteName} onChange={setRemoteName} />
+            )}
+          </div>
+        )}
+
+        {error && <ErrorNote msg={error} />}
+
+        <DialogFooter>
+          <Button variant="outline" onClick={onClose} disabled={loading}>Cancel</Button>
+          <Button onClick={run} disabled={loading || !trimmed || unchanged}>
+            {loading ? "Renaming…" : "Rename"}
+          </Button>
+        </DialogFooter>
+      </DialogContent>
+    </Dialog>
+  );
+}
+
 // ─── Rebase Onto ───────────────────────────────────────────────────────────
 
 interface RebaseProps extends BaseProps {

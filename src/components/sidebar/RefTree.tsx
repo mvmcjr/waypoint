@@ -159,6 +159,10 @@ function buildMenu(
           <ContextMenuItem onClick={() => onRefAction({ kind: "push", branchName: ref.shorthand })}>
             Push…
           </ContextMenuItem>
+          <ContextMenuSeparator />
+          <ContextMenuItem onClick={() => onRefAction({ kind: "rename-branch", branchName: ref.shorthand })}>
+            Rename…
+          </ContextMenuItem>
         </>
       );
     }
@@ -192,6 +196,9 @@ function buildMenu(
           Push…
         </ContextMenuItem>
         <ContextMenuSeparator />
+        <ContextMenuItem onClick={() => onRefAction({ kind: "rename-branch", branchName: ref.shorthand })}>
+          Rename…
+        </ContextMenuItem>
         <ContextMenuItem
           onClick={() => onRefAction({ kind: "delete-branch", branchName: ref.shorthand })}
           className="text-destructive focus:text-destructive"

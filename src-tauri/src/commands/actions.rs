@@ -480,3 +480,27 @@ pub fn delete_branch(repo_id: String, name: String, state: State<RepoState>) -> 
     branch.delete().map_err(Error::Git)?;
     Ok(())
 }
+
+/// Rename a local branch. Renaming the currently checked-out branch is fine —
+/// libgit2 updates HEAD to follow it. `force` overwrites an existing branch.
+#[tauri::command]
+pub fn rename_branch(
+    repo_id: String,
+    old_name: String,
+    new_name: String,
+    state: State<RepoState>,
+) -> Result<()> {
+    let repos = state.0.lock().unwrap();
+    let repo = repos.get(&repo_id).ok_or_else(|| Error::RepoNotFound(repo_id.clone()))?;
+
+    let new = new_name.trim();
+    if new.is_empty() {
+        return Err(Error::InvalidArg("New branch name cannot be empty.".into()));
+    }
+
+    let mut branch = repo
+        .find_branch(&old_name, git2::BranchType::Local)
+        .map_err(|_| Error::InvalidArg(format!("Branch '{}' not found", old_name)))?;
+    branch.rename(new, false).map_err(Error::Git)?;
+    Ok(())
+}

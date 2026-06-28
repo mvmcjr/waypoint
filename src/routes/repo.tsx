@@ -2,7 +2,7 @@ import { useEffect, useMemo, useRef, useState } from "react";
 import { getCurrentWindow } from "@tauri-apps/api/window";
 import { listen } from "@tauri-apps/api/event";
 import { useStore } from "@/lib/store";
-import { useCommits, useHeadInfo, useRefreshRepo, useRemotes, useRepoStatus } from "@/lib/queries";
+import { useCommits, useHeadInfo, useRefreshRepo, useRefs, useRemotes, useRepoStatus } from "@/lib/queries";
 import { Timeline, type TimelineHandle } from "@/components/timeline/Timeline";
 import { Sidebar } from "@/components/sidebar/Sidebar";
 import { CommitDetail } from "@/components/detail/CommitDetail";
@@ -17,6 +17,7 @@ import {
   CheckoutRemoteBranchDialog,
   CreateBranchDialog,
   DeleteBranchDialog,
+  RenameBranchDialog,
   ResetDialog,
   RebaseDialog,
   SquashDialog,
@@ -55,6 +56,7 @@ type DialogState =
   | { kind: "checkout-remote-branch"; remoteBranch: string }
   | { kind: "create-branch"; oid: string }
   | { kind: "delete-branch"; branchName: string }
+  | { kind: "rename-branch"; branchName: string; hasRemote: boolean }
   | { kind: "reset"; oid: string }
   | { kind: "rebase"; oid: string }
   | { kind: "squash"; oids: string[] }
@@ -80,6 +82,7 @@ export function RepoView() {
   const { data: head } = useHeadInfo(repoId);
   const { data: status } = useRepoStatus(repoId);
   const { data: remotes } = useRemotes(repoId);
+  const { data: refs } = useRefs(repoId);
   const refresh = useRefreshRepo(repoId);
 
   const timelineRef = useRef<TimelineHandle>(null);
@@ -445,6 +448,12 @@ export function RepoView() {
       handlePushBranch(action.branchName);
     } else if (action.kind === "delete-branch") {
       setDialog({ kind: "delete-branch", branchName: action.branchName });
+    } else if (action.kind === "rename-branch") {
+      // Offer remote rename only when a remote branch of the same name exists.
+      const hasRemote = (refs ?? []).some(
+        (r) => r.kind === "remote_branch" && r.shorthand.slice(r.shorthand.indexOf("/") + 1) === action.branchName,
+      );
+      setDialog({ kind: "rename-branch", branchName: action.branchName, hasRemote });
     } else if (action.kind === "push-tag") {
       setDialog({ kind: "push-tag", tagName: action.tagName });
     } else if (action.kind === "delete-tag") {
@@ -759,6 +768,16 @@ export function RepoView() {
         <DeleteBranchDialog
           repoId={repoId}
           branchName={dialog.branchName}
+          onClose={() => setDialog({ kind: "none" })}
+          onSuccess={handleSuccess}
+        />
+      )}
+      {repoId && dialog.kind === "rename-branch" && (
+        <RenameBranchDialog
+          repoId={repoId}
+          branchName={dialog.branchName}
+          hasRemote={dialog.hasRemote}
+          remotes={remotes ?? []}
           onClose={() => setDialog({ kind: "none" })}
           onSuccess={handleSuccess}
         />

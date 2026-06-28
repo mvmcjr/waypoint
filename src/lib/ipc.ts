@@ -188,6 +188,12 @@ export const ipc = {
   deleteBranch: (repoId: string, name: string) =>
     invoke<void>("delete_branch", { repoId, name }),
 
+  renameBranch: (repoId: string, oldName: string, newName: string) =>
+    invoke<void>("rename_branch", { repoId, oldName, newName }),
+
+  renameRemoteBranch: (repoId: string, remoteName: string, oldName: string, newName: string) =>
+    invoke<void>("rename_remote_branch", { repoId, remoteName, oldName, newName }),
+
   getRepoStatus: (repoId: string) =>
     invoke<StatusInfo>("get_repo_status", { repoId }),
 

@@ -126,6 +126,24 @@ pub async fn delete_remote_tag(
     run_git(&get_workdir(&state, &repo_id)?, &["push", &remote_name, &refspec]).await
 }
 
+/// Rename a branch on a remote. Assumes the local branch was already renamed to
+/// `new_name`. Creates the new branch on the remote (setting upstream), then
+/// deletes the old one. New-then-delete order keeps the old branch intact if the
+/// push of the new name fails.
+#[tauri::command]
+pub async fn rename_remote_branch(
+    repo_id: String,
+    remote_name: String,
+    old_name: String,
+    new_name: String,
+    state: State<'_, RepoState>,
+) -> Result<()> {
+    let workdir = get_workdir(&state, &repo_id)?;
+    run_git(&workdir, &["push", "-u", &remote_name, &new_name]).await?;
+    run_git(&workdir, &["push", &remote_name, "--delete", &old_name]).await?;
+    Ok(())
+}
+
 #[tauri::command]
 pub async fn pull_branch(
     repo_id: String,
