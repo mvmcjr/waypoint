@@ -126,5 +126,6 @@ export function useRefreshRepo(repoId: string | null) {
     qc.invalidateQueries({ queryKey: ["staging", repoId] });
     qc.invalidateQueries({ queryKey: ["merge-status", repoId] });
     qc.invalidateQueries({ queryKey: ["stashes", repoId] });
+    qc.invalidateQueries({ queryKey: ["workdir-diff", repoId] });
   }, [qc, repoId]);
 }

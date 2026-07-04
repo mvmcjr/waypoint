@@ -2,7 +2,7 @@ import { useEffect, useMemo, useRef, useState } from "react";
 import { getCurrentWindow } from "@tauri-apps/api/window";
 import { listen } from "@tauri-apps/api/event";
 import { useStore } from "@/lib/store";
-import { useCommits, useHeadInfo, useRefreshRepo, useRefs, useRemotes, useRepoStatus } from "@/lib/queries";
+import { useCommits, useFileStatus, useHeadInfo, useRefreshRepo, useRefs, useRemotes, useRepoStatus } from "@/lib/queries";
 import { Timeline, type TimelineHandle } from "@/components/timeline/Timeline";
 import { Sidebar } from "@/components/sidebar/Sidebar";
 import { CommitDetail } from "@/components/detail/CommitDetail";
@@ -83,6 +83,7 @@ export function RepoView() {
   const { data: status } = useRepoStatus(repoId);
   const { data: remotes } = useRemotes(repoId);
   const { data: refs } = useRefs(repoId);
+  const { data: fileStatus } = useFileStatus(repoId);
   const refresh = useRefreshRepo(repoId);
 
   const timelineRef = useRef<TimelineHandle>(null);
@@ -250,6 +251,20 @@ export function RepoView() {
     setIsPushing(false);
     wasWorkingDirDirtyRef.current = false;
   }, [repoId]);
+
+  // Close the staging file diff once its entry disappears from status — covers
+  // commit, discard, stash, and switching branches (all of which can make the
+  // previously-focused path/section stop existing). Content edits keep the same
+  // status entry, so an open diff for a still-modified file stays open and just
+  // refetches (see workdir-diff invalidation in useRefreshRepo).
+  useEffect(() => {
+    if (!focusedStagingFile || !fileStatus) return;
+    const stillPresent = fileStatus.some((f) => {
+      if (f.path !== focusedStagingFile.path) return false;
+      return focusedStagingFile.section === "staged" ? f.staged !== null : f.unstaged !== null;
+    });
+    if (!stillPresent) setFocusedStagingFile(null);
+  }, [fileStatus, focusedStagingFile]);
 
   // Tauri's WebView doesn't fire browser focus/visibilitychange events, so
   // refetchOnWindowFocus won't work. Use the native Tauri focus event instead.

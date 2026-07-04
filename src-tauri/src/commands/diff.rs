@@ -145,9 +145,13 @@ pub fn get_workdir_diff(
     let mut opts = git2::DiffOptions::new();
     // include_untracked lists untracked files as deltas, but their line content is
     // only emitted with show_untracked_content — without it the diff view for an
-    // untracked file comes back with no hunks.
+    // untracked file comes back with no hunks. recurse_untracked_dirs is needed too:
+    // without it, a new file inside a brand-new (wholly untracked) directory is
+    // collapsed into a single delta for the directory itself, which never matches
+    // the file's own pathspec, so the diff for that file comes back empty.
     opts.pathspec(&path)
         .include_untracked(true)
+        .recurse_untracked_dirs(true)
         .show_untracked_content(true);
 
     let index = repo.index()?;
