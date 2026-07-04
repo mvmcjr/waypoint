@@ -2,7 +2,7 @@ import { describe, it, expect, vi, beforeEach } from "vitest";
 import { render, screen, fireEvent, waitFor, act } from "@testing-library/react";
 import { RepoView } from "./repo";
 import { useStore } from "@/lib/store";
-import { useCommits, useHeadInfo, useRefreshRepo, useRemotes, useRepoStatus } from "@/lib/queries";
+import { useCommits, useHeadInfo, useRefreshRepo, useRefs, useRemotes, useRepoStatus } from "@/lib/queries";
 import { ipc } from "@/lib/ipc";
 
 // Mock Tauri window
@@ -36,6 +36,7 @@ vi.mock("@/lib/queries", () => ({
   useCommits: vi.fn(),
   useHeadInfo: vi.fn(),
   useRefreshRepo: vi.fn(),
+  useRefs: vi.fn(),
   useRemotes: vi.fn(),
   useRepoStatus: vi.fn(),
 }));
@@ -104,6 +105,7 @@ describe("RepoView", () => {
     vi.mocked(useHeadInfo).mockReturnValue({ data: { oid: "abcdef", branch: "main" } } as any);
     vi.mocked(useRepoStatus).mockReturnValue({ data: { merge_in_progress: false } } as any);
     vi.mocked(useRemotes).mockReturnValue({ data: [] } as any);
+    vi.mocked(useRefs).mockReturnValue({ data: [] } as any);
     vi.mocked(useRefreshRepo).mockReturnValue(mockRefresh);
   });
 
