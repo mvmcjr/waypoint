@@ -32,9 +32,21 @@ pnpm preview                # Preview production build
 
 # Type checking
 tsc                         # Type check (called as part of build)
+
+# Frontend tests (Vitest + Testing Library, jsdom environment)
+pnpm test                   # Watch mode
+pnpm test run               # Single run (CI mode)
+pnpm test run src/lib/store.test.ts   # Single file
+pnpm test -- -t "test name"           # Single test by name
+
+# Backend tests (Rust)
+cd src-tauri && cargo test   # Run all Rust unit tests
+
+# Fixture repos used by some tests (generates throwaway git repos under scripts/fixtures/repos/)
+pnpm fixtures
 ```
 
-**Note**: The `package.json` scripts are minimal—use the `tauri` CLI directly for development and building. Tauri orchestrates both Rust and frontend builds via `beforeDevCommand` and `beforeBuildCommand` hooks in `tauri.conf.json`.
+**Note**: The `package.json` scripts are minimal—use the `tauri` CLI directly for development and building. Tauri orchestrates both Rust and frontend builds via `beforeDevCommand` and `beforeBuildCommand` hooks in `tauri.conf.json`. Test config lives in `vitest.config.ts` (separate from `vite.config.ts`), which sets `environment: "jsdom"`, `globals: true`, and excludes `scripts/fixtures/**` (those fixture repos ship their own unrelated `*.test.js` files).
 
 ## Architecture Overview
 
@@ -47,8 +59,11 @@ tsc                         # Type check (called as part of build)
     - `sidebar/` - Ref tree (branches, tags) and stash list
     - `staging/` - Working directory changes, staging panel, conflict resolver
     - `detail/` - Commit details and file diffs
-    - `ui/` - Base UI components (buttons, dialogs, etc.)
+    - `ui/` - Base UI components (buttons, dialogs, etc.) — generated via shadcn CLI, not hand-written (see below)
     - `actions/` - Action dialogs (checkout, reset, merge, rebase, cherry-pick, etc.)
+    - `plugins/` - UI for the plugin system: input-collection dialog, sandboxed command runner provider, settings/install panel
+    - `tabs/` - Tab bar for multiple open repos
+    - `CommandPalette.tsx`, `SettingsDialog.tsx` - top-level command palette and app settings, mounted from `App.tsx`
   - `lib/` - Core utilities:
     - `store.ts` - Zustand store for app state (tabs, selected commit, search filter)
     - `ipc.ts` - IPC interface definitions and Tauri `invoke` wrappers for Rust commands
@@ -85,14 +100,20 @@ tsc                         # Type check (called as part of build)
 - `main.rs` - Thin wrapper; delegates to `lib.rs`
 - `repo/` - Repository lifecycle (opening repos, maintaining global state of open repos)
   - `state.rs` - `RepoState` struct: `Arc<Mutex<HashMap<repoId, Repository>>>`; one git2::Repository per open repo
-- `commands/` - Tauri command handlers (invoked via IPC from frontend):
+- `commands/` - Tauri command handlers (invoked via IPC from frontend); all registered explicitly in the `invoke_handler!` macro in `lib.rs`:
   - `repo.rs` - `open_repo()`, `list_refs()`
   - `history.rs` - `walk_commits()` (core feature: builds positioned commit graph with lanes)
   - `diff.rs` - `get_commit_diff()`, `get_workdir_diff()`
-  - `actions.rs` - `get_head_info()`, `checkout_branch/commit()`, `create_branch_at()`, `reset_head()`, `rebase_onto()`
-  - `staging.rs` - `list_status()`, `stage_file/paths()`, `unstage_file/paths()`, `do_commit()`, `discard_all()`
-  - `merge.rs` - `merge_commit()`, `get_merge_status()`, `resolve_ours/theirs()`, `finish_merge()`, `abort_merge()`, `cherry_pick()`, `finish_cherry_pick()`
-  - `stash.rs` - `stash_push()`, `list_stashes()`, `pop_stash()`, `apply_stash()`, `drop_stash()`
+  - `actions.rs` - `get_head_info()`, `checkout_branch/commit()`, `create_branch_at()`, `reset_head()`, `rebase_onto()`, `squash_commits()`
+  - `staging.rs` - `list_status()`, `stage_file/paths()`, `unstage_file/paths()`, `do_commit()`, `amend_commit()`, `discard_all()`
+  - `merge.rs` - `merge_commit()`, `get_merge_status()`, `resolve_ours/theirs()`, `finish_merge()`, `abort_merge()`, `cherry_pick()`, `finish_cherry_pick()`, `revert_commit()`, `finish_revert()`
+  - `stash.rs` - `stash_push()`, `list_stashes()`, `pop_stash()`, `apply_stash()`, `drop_stash()`, `rename_stash()`
+  - `tags.rs` - `create_tag()`, `delete_tag()`
+  - `remote.rs` - `list_remotes()`, `fetch_remote()`, `push_branch()`, `pull_branch()`, `push_tag()`, `delete_remote_tag()`, `rename_remote_branch()`. **Shells out to the system `git` binary** (via `tokio::process::Command`) instead of `git2`, so credential helpers (GCM, SSH agent, etc.) behave exactly as they do in a terminal — no re-implementing auth.
+  - `fs.rs` - `scan_for_git_repos()` (filesystem scan used by the repo picker)
+  - `plugins.rs` - `read_local_plugin()` (reads a plugin's manifest + entry module off disk; validation happens on the frontend)
+  - `cli.rs` - `register_cli_shim/unregister_cli_shim/check_cli_shim()` (installs a `waypoint` shell shim so the app can be launched from a terminal, e.g. `waypoint .`)
+  - top-level in `lib.rs` - `register_explorer_context_menu()` (Windows-only: adds/removes an "Open in Waypoint" entry in Explorer's right-click menu via the registry)
 - `graph/` - Commit graph layout engine:
   - `lanes.rs` - `assign_lanes()` function: topological sort + lane assignment for rendering DAG as columns
   - `mod.rs` - `PositionedCommit` struct (commit data + visual position: lane, row, color_idx, edges)
@@ -113,6 +134,21 @@ tsc                         # Type check (called as part of build)
 - `FileStatus`: path, staged status, unstaged status (for staging view)
 - `StatusInfo`: staged/unstaged counts, merge_in_progress flag
 - `MergeStatus`: in_progress, kind, conflicted_paths, merge_head oid, default message
+
+### Plugin System
+
+Waypoint supports third-party plugins: small JS packages (local folder or GitHub repo) described by a `waypoint.plugin.json` manifest plus an entry ES module exporting `commands` keyed by command id.
+
+- `src/lib/plugins/types.ts` - manifest/command/surface types. Surfaces are where a command can appear: `commandPalette`, `commitContextMenu`, `branchContextMenu`, `toolbar`
+- `src/lib/plugins/registry.ts` - hand-rolled manifest validation (no schema lib) + install/list state persisted via `@tauri-apps/plugin-store` (`plugins.json`)
+- `src/lib/plugins/install.ts` - fetching/installing a plugin from a local path or GitHub repo (backed by `commands::plugins::read_local_plugin` on the Rust side)
+- `src/lib/plugins/host.ts` + `sandbox.worker.ts` - **execution sandbox**: each plugin command runs in a fresh Web Worker (`runInWorker`), with `api.*` calls proxied back to the host over `postMessage` and handled by `src/lib/plugins/api.ts`. The worker is killed on a 30s timeout or completion. This isolates crashes/hangs, not security (see comment in `sandbox.worker.ts`) — plugins are trusted code, same as any other local script.
+- `src/components/plugins/` - `PluginsSettings` (install/manage UI), `PluginRunnerProvider` (wires surfaces to the sandbox), `PluginInputDialog` (renders a manifest's declared `InputField`s before running a command)
+
+### File Watching
+
+- `src-tauri/src/repo/watcher_state.rs` holds a `notify_debouncer_mini` debouncer per open repo (`WatcherState`, managed alongside `RepoState`)
+- Set up in `commands::repo` when a repo is opened; watches the working directory so the frontend's status polling reflects external changes (e.g. edits made outside the app) promptly
 
 ## Common Development Patterns
 
@@ -168,6 +204,7 @@ waypoint/
 │   │   ├── ipc.ts             # Type-safe Tauri invoke wrappers
 │   │   ├── store.ts           # Zustand app state
 │   │   ├── queries.ts         # React Query hooks
+│   │   ├── plugins/           # Plugin manifest/registry/sandbox (see Plugin System)
 │   │   └── utils.ts           # Utilities
 │   ├── components/
 │   │   ├── timeline/          # Commit graph timeline
@@ -175,11 +212,13 @@ waypoint/
 │   │   ├── staging/           # Working dir changes, staging, conflicts
 │   │   ├── detail/            # Commit detail, file diffs
 │   │   ├── actions/           # Action dialogs
+│   │   ├── plugins/           # Plugin settings/runner/input UI
 │   │   ├── tabs/              # Tab bar for multiple repos
-│   │   └── ui/                # Base UI components
+│   │   └── ui/                # Base UI components (shadcn-generated)
 │   └── routes/
 │       ├── welcome.tsx        # Repo picker
 │       └── repo.tsx           # Main repo view
+├── vitest.config.ts            # Vitest config (jsdom, globals, setup file)
 ├── src-tauri/                 # Backend (Rust)
 │   ├── tauri.conf.json       # Tauri config (window size, beforeDevCommand, etc.)
 │   ├── Cargo.toml            # Rust dependencies (git2, tauri, serde, etc.)
@@ -187,8 +226,8 @@ waypoint/
 │       ├── lib.rs            # Entry point, command registration
 │       ├── main.rs           # Thin wrapper to lib.rs
 │       ├── error.rs          # Custom error types
-│       ├── repo/             # Repository state management
-│       ├── commands/         # All Tauri commands (handlers)
+│       ├── repo/             # Repository + file-watcher state management
+│       ├── commands/         # All Tauri commands (handlers, incl. remote/tags/fs/plugins/cli)
 │       └── graph/            # Commit graph layout engine
 └── dist/                      # Frontend build output (generated)
 ```
@@ -201,6 +240,10 @@ waypoint/
 - `src/index.css` defines `:root` (light) and `.dark` (dark mode) variables
 - All colors use oklch() function; sidebar has dedicated color set
 - No Tailwind config file needed (inline `@theme` in CSS)
+
+### UI Components
+
+- Generate new base components with the shadcn CLI (`pnpm dlx shadcn@latest add <component>`) rather than hand-writing them, so they match the existing set in `src/components/ui/`
 
 ### Query Cache Invalidation
 
