@@ -165,6 +165,99 @@ function makeUntracked() {
 }
 
 /**
+ * HUNKS
+ * A file with several well-separated edits (non-adjacent, so each becomes its
+ * own hunk) left entirely unstaged — open it in Waypoint and try "Stage hunk"
+ * on each one individually. A second file gets the same treatment but is then
+ * staged and committed whole, so its multi-hunk diff is also viewable
+ * read-only from the commit history (no hunk-action buttons there).
+ */
+function makeHunks() {
+  const dir = fresh('hunks');
+  initRepo(dir);
+
+  const calcLines = (a, b, c, d, e, f) => [
+    'def add(x, y):',
+    `    return x + y  # ${a}`,
+    '',
+    '',
+    '',
+    'def subtract(x, y):',
+    `    return x - y  # ${b}`,
+    '',
+    '',
+    '',
+    'def multiply(x, y):',
+    `    return x * y  # ${c}`,
+    '',
+    '',
+    '',
+    'def divide(x, y):',
+    `    return x / y  # ${d}`,
+    '',
+    '',
+    '',
+    'def power(x, y):',
+    `    return x ** y  # ${e}`,
+    '',
+    '',
+    '',
+    'def modulo(x, y):',
+    `    return x % y  # ${f}`,
+    '',
+  ].join('\n');
+
+  write(dir, 'README.md', '# Hunks\n\nOpen `calc.py` under Unstaged — it has three non-adjacent edits, so\nthe diff view shows three separate hunks, each with its own "Stage hunk"\nbutton. `strings.py` shows the read-only side: its multi-hunk change was\nalready staged and committed, so its diff appears in the commit history\nwith no hunk-action buttons.\n');
+  write(dir, 'calc.py', calcLines('v1', 'v1', 'v1', 'v1', 'v1', 'v1'));
+
+  const stringsBefore = [
+    'def shout(s):',
+    '    return s.upper()',
+    '',
+    '',
+    '',
+    'def whisper(s):',
+    '    return s.lower()',
+    '',
+    '',
+    '',
+    'def reverse(s):',
+    '    return s[::-1]',
+    '',
+  ].join('\n');
+  write(dir, 'strings.py', stringsBefore);
+
+  run('git add .', dir);
+  run('git commit -m "Initial commit"', dir);
+
+  // calc.py: three non-adjacent edits → three separate hunks, left unstaged.
+  write(dir, 'calc.py', calcLines('fixed rounding', 'v1', 'now clamps to zero', 'v1', 'v1', 'guards divisor'));
+
+  // strings.py: two non-adjacent edits, staged and committed whole — a
+  // multi-hunk diff you can browse read-only from the commit history.
+  const stringsAfter = [
+    'def shout(s):',
+    '    return s.upper() + "!"',
+    '',
+    '',
+    '',
+    'def whisper(s):',
+    '    return s.lower()',
+    '',
+    '',
+    '',
+    'def reverse(s):',
+    '    return "".join(reversed(s))',
+    '',
+  ].join('\n');
+  write(dir, 'strings.py', stringsAfter);
+  run('git add strings.py', dir);
+  run('git commit -m "Tweak shout punctuation and reverse implementation"', dir);
+
+  log('hunks', dir, '(calc.py: 3 unstaged hunks to try "Stage hunk" on; strings.py: committed multi-hunk diff)');
+}
+
+/**
  * MERGE-CONFLICT
  * A `git merge` that stopped mid-way due to conflicts in shared.js.
  * MERGE_HEAD is set; the conflict panel should open automatically.
@@ -954,6 +1047,7 @@ const SCENARIOS = [
   ['clean',                makeClean],
   ['staged',               makeStaged],
   ['untracked',            makeUntracked],
+  ['hunks',                makeHunks],
   ['merge-conflict',       makeMergeConflict],
   ['cherry-pick-conflict', makeCherryPickConflict],
   ['cherry-pick-ready',    makeCherryPickReady],

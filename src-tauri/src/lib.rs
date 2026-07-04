@@ -98,6 +98,8 @@ pub fn run() {
             commands::history::get_commit,
             commands::diff::get_commit_diff,
             commands::diff::get_workdir_diff,
+            commands::diff::stage_hunk,
+            commands::diff::unstage_hunk,
             commands::actions::get_head_info,
             commands::actions::checkout_branch,
             commands::actions::checkout_remote_branch,

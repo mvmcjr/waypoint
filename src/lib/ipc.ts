@@ -161,6 +161,12 @@ export const ipc = {
   getWorkdirDiff: (repoId: string, path: string, staged: boolean) =>
     invoke<FileDiff>("get_workdir_diff", { repoId, path, staged }),
 
+  stageHunk: (repoId: string, path: string, hunkIndex: number) =>
+    invoke<void>("stage_hunk", { repoId, path, hunkIndex }),
+
+  unstageHunk: (repoId: string, path: string, hunkIndex: number) =>
+    invoke<void>("unstage_hunk", { repoId, path, hunkIndex }),
+
   getHeadInfo: (repoId: string) =>
     invoke<HeadInfo>("get_head_info", { repoId }),
 

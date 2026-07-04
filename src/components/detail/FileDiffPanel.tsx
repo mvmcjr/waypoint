@@ -6,6 +6,12 @@ interface Props {
   file: FileDiff;
   commitSummary: string;
   onClose: () => void;
+  /** When set, shows a per-hunk button (e.g. "Stage hunk" / "Unstage hunk"). */
+  hunkAction?: {
+    label: string;
+    pendingIndex: number | null;
+    onClick: (hunkIndex: number) => void;
+  };
 }
 
 function parseHunkStart(header: string): { oldStart: number; newStart: number } {
@@ -15,7 +21,15 @@ function parseHunkStart(header: string): { oldStart: number; newStart: number } 
     : { oldStart: 1, newStart: 1 };
 }
 
-function HunkBlock({ hunk }: { hunk: Hunk }) {
+function HunkBlock({
+  hunk,
+  index,
+  hunkAction,
+}: {
+  hunk: Hunk;
+  index: number;
+  hunkAction?: Props["hunkAction"];
+}) {
   const { oldStart, newStart } = parseHunkStart(hunk.header);
   let oldLine = oldStart;
   let newLine = newStart;
@@ -44,8 +58,17 @@ function HunkBlock({ hunk }: { hunk: Hunk }) {
   return (
     <div className="mb-0 font-mono text-xs">
       {/* Hunk header */}
-      <div className="bg-blue-500/10 text-blue-300 px-3 py-0.5 select-none">
-        {hunk.header}
+      <div className="bg-blue-500/10 text-blue-300 px-3 py-0.5 select-none flex items-center justify-between">
+        <span>{hunk.header}</span>
+        {hunkAction && (
+          <button
+            onClick={() => hunkAction.onClick(index)}
+            disabled={hunkAction.pendingIndex !== null}
+            className="text-[10px] normal-case font-sans text-blue-200 hover:text-white hover:bg-blue-500/20 rounded px-1.5 py-0.5 disabled:opacity-40"
+          >
+            {hunkAction.pendingIndex === index ? "…" : hunkAction.label}
+          </button>
+        )}
       </div>
 
       {rows.map(({ key, oldNo, newNo, line }) => {
@@ -87,7 +110,7 @@ function HunkBlock({ hunk }: { hunk: Hunk }) {
   );
 }
 
-export function FileDiffPanel({ file, commitSummary, onClose }: Props) {
+export function FileDiffPanel({ file, commitSummary, onClose, hunkAction }: Props) {
   return (
     <div className="flex-1 flex flex-col overflow-hidden border-r border-border bg-background min-w-0">
       {/* Header */}
@@ -127,7 +150,7 @@ export function FileDiffPanel({ file, commitSummary, onClose }: Props) {
         ) : (
           <div className="border-b border-border">
             {file.hunks.map((hunk, i) => (
-              <HunkBlock key={i} hunk={hunk} />
+              <HunkBlock key={i} hunk={hunk} index={i} hunkAction={hunkAction} />
             ))}
           </div>
         )}

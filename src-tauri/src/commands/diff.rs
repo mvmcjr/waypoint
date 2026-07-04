@@ -169,3 +169,193 @@ pub fn get_workdir_diff(
     let files = collect_diff(diff)?;
     files.into_iter().next().ok_or_else(|| Error::InvalidArg(format!("no diff for {path}")))
 }
+
+/// Stage a single hunk (by its index within the file's unstaged diff) —
+/// applies just that hunk from workdir-vs-index onto the index.
+#[tauri::command]
+pub fn stage_hunk(
+    repo_id: String,
+    path: String,
+    hunk_index: usize,
+    state: State<RepoState>,
+) -> Result<()> {
+    let repos = state.0.lock().unwrap();
+    let repo = repos.get(&repo_id).ok_or_else(|| Error::RepoNotFound(repo_id.clone()))?;
+    stage_hunk_impl(repo, &path, hunk_index)
+}
+
+/// Unstage a single hunk (by its index within the file's staged diff) —
+/// reverse-applies just that hunk from HEAD-vs-index onto the index.
+#[tauri::command]
+pub fn unstage_hunk(
+    repo_id: String,
+    path: String,
+    hunk_index: usize,
+    state: State<RepoState>,
+) -> Result<()> {
+    let repos = state.0.lock().unwrap();
+    let repo = repos.get(&repo_id).ok_or_else(|| Error::RepoNotFound(repo_id.clone()))?;
+    unstage_hunk_impl(repo, &path, hunk_index)
+}
+
+fn stage_hunk_impl(repo: &git2::Repository, path: &str, hunk_index: usize) -> Result<()> {
+    let mut opts = git2::DiffOptions::new();
+    opts.pathspec(path).include_untracked(true).recurse_untracked_dirs(true).show_untracked_content(true);
+
+    let index = repo.index()?;
+    let diff = repo.diff_index_to_workdir(Some(&index), Some(&mut opts))?;
+    apply_single_hunk(repo, diff, hunk_index, path)
+}
+
+fn unstage_hunk_impl(repo: &git2::Repository, path: &str, hunk_index: usize) -> Result<()> {
+    let mut opts = git2::DiffOptions::new();
+    // reverse(true) flips the polarity of every hunk so applying the result to
+    // the index moves it back toward HEAD for just that hunk, instead of
+    // needing a separate "unapply" path.
+    opts.pathspec(path).reverse(true);
+
+    let head_tree: Option<git2::Tree> = match repo.head() {
+        Ok(head) => Some(head.peel_to_tree()?),
+        Err(_) => None,
+    };
+    let index = repo.index()?;
+    let diff = repo.diff_tree_to_index(head_tree.as_ref(), Some(&index), Some(&mut opts))?;
+    apply_single_hunk(repo, diff, hunk_index, path)
+}
+
+/// Apply only the hunk at `hunk_index` (in file order) from `diff` to the index.
+fn apply_single_hunk(
+    repo: &git2::Repository,
+    diff: git2::Diff,
+    hunk_index: usize,
+    path: &str,
+) -> Result<()> {
+    let mut seen = 0usize;
+    let mut applied = false;
+    let mut apply_opts = git2::ApplyOptions::new();
+    apply_opts.hunk_callback(|_hunk| {
+        let is_target = seen == hunk_index;
+        seen += 1;
+        if is_target {
+            applied = true;
+        }
+        is_target
+    });
+    repo.apply(&diff, git2::ApplyLocation::Index, Some(&mut apply_opts))?;
+    drop(apply_opts);
+
+    if !applied {
+        return Err(Error::InvalidArg(format!("hunk {hunk_index} not found for {path}")));
+    }
+    Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use git2::Repository;
+    use std::path::{Path, PathBuf};
+
+    fn make_temp_dir() -> PathBuf {
+        let id = uuid::Uuid::new_v4();
+        let dir = std::env::temp_dir().join(format!("wpt_diff_test_{}", id));
+        std::fs::create_dir_all(&dir).unwrap();
+        dir
+    }
+
+    fn make_repo() -> (PathBuf, Repository) {
+        let dir = make_temp_dir();
+        let repo = Repository::init(&dir).unwrap();
+        {
+            let mut cfg = repo.config().unwrap();
+            cfg.set_str("user.name", "Test User").unwrap();
+            cfg.set_str("user.email", "test@example.com").unwrap();
+        }
+        (dir, repo)
+    }
+
+    fn write_commit(repo: &Repository, filename: &str, content: &str, msg: &str) -> git2::Oid {
+        let workdir = repo.workdir().unwrap().to_path_buf();
+        std::fs::write(workdir.join(filename), content).unwrap();
+        let mut index = repo.index().unwrap();
+        index.add_path(Path::new(filename)).unwrap();
+        index.write().unwrap();
+        let tree_oid = index.write_tree().unwrap();
+        let tree = repo.find_tree(tree_oid).unwrap();
+        let sig = repo.signature().unwrap();
+        let parents: Vec<git2::Commit> = match repo.head() {
+            Ok(head) => vec![head.peel_to_commit().unwrap()],
+            Err(_) => vec![],
+        };
+        let parent_refs: Vec<&git2::Commit> = parents.iter().collect();
+        repo.commit(Some("HEAD"), &sig, &sig, msg, &tree, &parent_refs).unwrap()
+    }
+
+    fn read_index_content(repo: &Repository, filename: &str) -> String {
+        let index = repo.index().unwrap();
+        let entry = index.get_path(Path::new(filename), 0).unwrap();
+        let blob = repo.find_blob(entry.id).unwrap();
+        String::from_utf8_lossy(blob.content()).to_string()
+    }
+
+    #[test]
+    fn stage_hunk_applies_only_target_hunk_to_index() {
+        let (_dir, repo) = make_repo();
+        write_commit(&repo, "file.txt", "one\ntwo\nthree\nfour\nfive\nsix\nseven\nEIGHT\nnine\nten\n", "initial");
+
+        // Two separate, non-adjacent edits — two hunks.
+        let workdir = repo.workdir().unwrap().to_path_buf();
+        std::fs::write(
+            &workdir.join("file.txt"),
+            "ONE\ntwo\nthree\nfour\nfive\nsix\nseven\nEIGHT\nnine\nTEN\n",
+        )
+        .unwrap();
+
+        let mut opts = git2::DiffOptions::new();
+        opts.pathspec("file.txt");
+        let index = repo.index().unwrap();
+        let diff = repo.diff_index_to_workdir(Some(&index), Some(&mut opts)).unwrap();
+        let files = collect_diff(diff).unwrap();
+        assert_eq!(files[0].hunks.len(), 2, "expected two separate hunks from two non-adjacent edits");
+
+        // Stage only the first hunk (the "ONE" edit).
+        stage_hunk_impl(&repo, "file.txt", 0).unwrap();
+
+        let staged = read_index_content(&repo, "file.txt");
+        assert!(staged.starts_with("ONE\n"), "first hunk should be staged: {staged}");
+        assert!(staged.ends_with("nine\nten\n"), "second hunk should NOT be staged: {staged}");
+    }
+
+    #[test]
+    fn unstage_hunk_reverses_only_target_hunk_in_index() {
+        let (_dir, repo) = make_repo();
+        write_commit(&repo, "file.txt", "one\ntwo\nthree\nfour\nfive\nsix\nseven\nEIGHT\nnine\nten\n", "initial");
+
+        // Stage both edits fully (simulate "stage all").
+        let workdir = repo.workdir().unwrap().to_path_buf();
+        std::fs::write(
+            &workdir.join("file.txt"),
+            "ONE\ntwo\nthree\nfour\nfive\nsix\nseven\nEIGHT\nnine\nTEN\n",
+        )
+        .unwrap();
+        let mut index = repo.index().unwrap();
+        index.add_path(Path::new("file.txt")).unwrap();
+        index.write().unwrap();
+
+        unstage_hunk_impl(&repo, "file.txt", 0).unwrap();
+
+        let content = read_index_content(&repo, "file.txt");
+        assert!(content.starts_with("one\n"), "first hunk should be unstaged back to HEAD: {content}");
+        assert!(content.ends_with("nine\nTEN\n"), "second hunk should remain staged: {content}");
+    }
+
+    #[test]
+    fn stage_hunk_out_of_range_errors() {
+        let (_dir, repo) = make_repo();
+        write_commit(&repo, "file.txt", "one\n", "initial");
+        std::fs::write(repo.workdir().unwrap().join("file.txt"), "one\ntwo\n").unwrap();
+
+        let result = stage_hunk_impl(&repo, "file.txt", 5);
+        assert!(result.is_err());
+    }
+}
