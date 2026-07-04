@@ -656,12 +656,19 @@ export function RepoView() {
         <div className="flex flex-1 overflow-hidden">
           {focusedFile && selectedItem ? (
             <FileDiffPanel
+              key={`${selectedItem.commit.oid}:${focusedFile.path}`}
               file={focusedFile}
               commitSummary={selectedItem.commit.summary}
               onClose={() => setFocusedFile(null)}
+              fetchFullFile={
+                repoId
+                  ? () => ipc.getCommitFileDiff(repoId, selectedItem.commit.oid, focusedFile.path)
+                  : undefined
+              }
             />
           ) : focusedStagingFile && repoId && focusedStagingFile.repoId === repoId ? (
             <StagingFileDiffPanel
+              key={`${focusedStagingFile.path}:${focusedStagingFile.section}`}
               repoId={repoId}
               path={focusedStagingFile.path}
               section={focusedStagingFile.section}

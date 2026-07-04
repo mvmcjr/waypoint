@@ -158,14 +158,26 @@ export const ipc = {
   getCommitDiff: (repoId: string, oid: string) =>
     invoke<FileDiff[]>("get_commit_diff", { repoId, oid }),
 
+  getCommitFileDiff: (repoId: string, oid: string, path: string) =>
+    invoke<FileDiff>("get_commit_file_diff", { repoId, oid, path }),
+
   getWorkdirDiff: (repoId: string, path: string, staged: boolean) =>
     invoke<FileDiff>("get_workdir_diff", { repoId, path, staged }),
 
-  stageHunk: (repoId: string, path: string, hunkIndex: number) =>
-    invoke<void>("stage_hunk", { repoId, path, hunkIndex }),
+  getWorkdirFileFull: (repoId: string, path: string, staged: boolean) =>
+    invoke<FileDiff>("get_workdir_file_full", { repoId, path, staged }),
 
-  unstageHunk: (repoId: string, path: string, hunkIndex: number) =>
-    invoke<void>("unstage_hunk", { repoId, path, hunkIndex }),
+  stageLine: (repoId: string, path: string, hunkIndex: number, lineIndex: number, fullFile: boolean) =>
+    invoke<void>("stage_line", { repoId, path, hunkIndex, lineIndex, fullFile }),
+
+  unstageLine: (repoId: string, path: string, hunkIndex: number, lineIndex: number, fullFile: boolean) =>
+    invoke<void>("unstage_line", { repoId, path, hunkIndex, lineIndex, fullFile }),
+
+  stageHunk: (repoId: string, path: string, hunkIndex: number, fullFile: boolean) =>
+    invoke<void>("stage_hunk", { repoId, path, hunkIndex, fullFile }),
+
+  unstageHunk: (repoId: string, path: string, hunkIndex: number, fullFile: boolean) =>
+    invoke<void>("unstage_hunk", { repoId, path, hunkIndex, fullFile }),
 
   getHeadInfo: (repoId: string) =>
     invoke<HeadInfo>("get_head_info", { repoId }),
