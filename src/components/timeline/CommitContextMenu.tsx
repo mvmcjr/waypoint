@@ -1,3 +1,4 @@
+import { GitBranch } from "lucide-react";
 import {
   ContextMenu,
   ContextMenuContent,
@@ -15,10 +16,12 @@ interface Props {
   onAction: (action: import("./CommitMenuItems").CommitAction) => void;
   /** Active multi-selection — enables the "Squash N commits…" item. */
   selectedOids?: string[];
+  /** Fires when the menu opens/closes — lets the caller keep the row highlighted while it's open. */
+  onOpenChange?: (open: boolean) => void;
   children: React.ReactNode;
 }
 
-export function CommitContextMenu({ item, onAction, selectedOids, children }: Props) {
+export function CommitContextMenu({ item, onAction, selectedOids, onOpenChange, children }: Props) {
   const oid = item.commit.oid;
   const { local_branches: localBranches, remote_branches: remoteBranches } = item.commit;
   const remoteOnlyBranches = remoteBranches.filter((rb) => !rb.endsWith("/HEAD"));
@@ -35,6 +38,7 @@ export function CommitContextMenu({ item, onAction, selectedOids, children }: Pr
           key={branch}
           onClick={() => onAction({ kind: "checkout-branch", branchName: branch })}
         >
+          <GitBranch />
           Checkout{" "}
           <span className="ml-auto font-mono text-xs text-muted-foreground">{branch}</span>
         </ContextMenuItem>
@@ -45,19 +49,21 @@ export function CommitContextMenu({ item, onAction, selectedOids, children }: Pr
           key={rb}
           onClick={() => onAction({ kind: "checkout-remote-branch", remoteBranch: rb })}
         >
+          <GitBranch />
           Checkout{" "}
           <span className="ml-auto font-mono text-xs text-muted-foreground">{rb}</span>
         </ContextMenuItem>
       ))
     ) : (
       <ContextMenuItem onClick={() => onAction({ kind: "checkout-detached", oid })}>
+        <GitBranch />
         Checkout{" "}
         <span className="ml-auto font-mono text-xs text-muted-foreground">{oid.slice(0, 8)}</span>
       </ContextMenuItem>
     );
 
   return (
-    <ContextMenu>
+    <ContextMenu onOpenChange={onOpenChange}>
       <ContextMenuTrigger>{children}</ContextMenuTrigger>
       <ContextMenuContent className="w-56">
         <CommitMenuItems

@@ -16,6 +16,8 @@ interface Props {
   index: number;
   /** Current stash name (for the rename dialog's initial value). */
   currentName: string;
+  /** Fires when the menu opens/closes — lets the caller keep the row highlighted while it's open. */
+  onOpenChange?: (open: boolean) => void;
   children: React.ReactNode;
 }
 
@@ -23,7 +25,7 @@ interface Props {
  * Context menu for stash rows in the timeline. Stashes aren't real commits, so
  * they get Pop / Apply / Drop instead of the checkout/merge/rebase commit menu.
  */
-export function StashContextMenu({ repoId, index, currentName, children }: Props) {
+export function StashContextMenu({ repoId, index, currentName, onOpenChange, children }: Props) {
   const refresh = useRefreshRepo(repoId);
   const [busy, setBusy] = useState(false);
   const [renaming, setRenaming] = useState(false);
@@ -41,7 +43,7 @@ export function StashContextMenu({ repoId, index, currentName, children }: Props
   }
 
   return (
-    <ContextMenu>
+    <ContextMenu onOpenChange={onOpenChange}>
       <ContextMenuTrigger>{children}</ContextMenuTrigger>
       <ContextMenuContent className="w-44">
         <ContextMenuItem disabled={busy} onClick={() => act(() => ipc.popStash(repoId, index))}>

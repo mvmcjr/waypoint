@@ -52,6 +52,9 @@ export const Timeline = forwardRef<TimelineHandle, Props>(function Timeline(
   ref
 ) {
   const multiSelectedSet = useMemo(() => new Set(multiSelectedOids), [multiSelectedOids]);
+  // Tracks which row's context menu is open, so the row stays highlighted while it's up
+  // (right-clicking doesn't otherwise change selection, so nothing else marks the target).
+  const [contextTargetOid, setContextTargetOid] = useState<string | null>(null);
   const parentRef = useRef<HTMLDivElement>(null);
   const { data: status } = useRepoStatus(repoId);
   const { data: stashes = [] } = useStashes(repoId);
@@ -230,6 +233,7 @@ export const Timeline = forwardRef<TimelineHandle, Props>(function Timeline(
                   refsWidth={refsWidth}
                   graphWidth={graphColWidth}
                   isSelected={item.commit.oid === selectedOid || multiSelectedSet.has(item.commit.oid)}
+                  isContextTarget={contextTargetOid === item.commit.oid}
                   isHead={item.commit.oid === headOid}
                   headBranch={headBranch}
                   pushedTagNames={pushedTagNames}
@@ -241,15 +245,20 @@ export const Timeline = forwardRef<TimelineHandle, Props>(function Timeline(
                 />
               );
 
+              const oid = item.commit.oid;
+              const handleMenuOpenChange = (open: boolean) =>
+                setContextTargetOid((prev) => (open ? oid : prev === oid ? null : prev));
+
               // Stash rows aren't real commits — give them Pop/Apply/Drop instead
               // of the checkout/merge/rebase commit menu.
               if (isStash && repoId && stashEntry) {
                 return (
                   <StashContextMenu
-                    key={item.commit.oid}
+                    key={oid}
                     repoId={repoId}
                     index={stashEntry.index}
                     currentName={stashLabel(stashEntry.message)}
+                    onOpenChange={handleMenuOpenChange}
                   >
                     {row}
                   </StashContextMenu>
@@ -258,10 +267,11 @@ export const Timeline = forwardRef<TimelineHandle, Props>(function Timeline(
 
               return (
                 <CommitContextMenu
-                  key={item.commit.oid}
+                  key={oid}
                   item={item}
                   onAction={stableCommitAction}
                   selectedOids={multiSelectedOids}
+                  onOpenChange={handleMenuOpenChange}
                 >
                   {row}
                 </CommitContextMenu>

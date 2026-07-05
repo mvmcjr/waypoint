@@ -13,6 +13,8 @@ interface Props {
   refsWidth: number;
   graphWidth: number;
   isSelected: boolean;
+  /** True while this row's context menu is open — keeps the row highlighted so it's clear what the menu applies to. */
+  isContextTarget?: boolean;
   isHead: boolean;
   headBranch: string | null;
   pushedTagNames?: Set<string>;
@@ -24,7 +26,7 @@ interface Props {
   onSelect: (oid: string, mods: { ctrl: boolean; shift: boolean }) => void;
 }
 
-export const CommitRow = memo(function CommitRow({ item, refsWidth, graphWidth, isSelected, isHead, headBranch, pushedTagNames, isStash, stashName, onRefAction, onCommitAction, onSelect }: Props) {
+export const CommitRow = memo(function CommitRow({ item, refsWidth, graphWidth, isSelected, isContextTarget, isHead, headBranch, pushedTagNames, isStash, stashName, onRefAction, onCommitAction, onSelect }: Props) {
   const { commit } = item;
   const relative = formatDistanceToNow(new Date(commit.timestamp * 1000), { addSuffix: true });
   const refGroups = groupRefs(commit.refs, item.commit.local_branches, item.commit.remote_branches, headBranch, pushedTagNames);
@@ -32,15 +34,16 @@ export const CommitRow = memo(function CommitRow({ item, refsWidth, graphWidth, 
   const visibleRefs = refGroups.slice(0, MAX_REFS);
   const hiddenCount = refGroups.length - MAX_REFS;
   const shortHash = commit.oid.slice(0, 7);
+  const highlighted = isSelected || isContextTarget;
 
   const rowClass = [
     "flex items-center cursor-pointer select-none text-sm border-l-2 transition-colors duration-75",
     isStash ? "opacity-35 italic" : "",
-    isHead && isSelected
+    isHead && highlighted
       ? "border-l-teal-400 bg-teal-500/10"
       : isHead
       ? "border-l-teal-500/70 bg-teal-500/[0.04]"
-      : isSelected
+      : highlighted
       ? "border-l-teal-400/50 bg-white/[0.07]"
       : "border-l-transparent hover:bg-white/[0.04]",
   ].join(" ");
