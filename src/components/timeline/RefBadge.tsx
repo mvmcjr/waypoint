@@ -1,4 +1,4 @@
-import { Monitor, Globe, Tag } from "lucide-react";
+import { Monitor, Globe, Tag, GitBranch } from "lucide-react";
 import {
   ContextMenu,
   ContextMenuContent,
@@ -100,18 +100,20 @@ function BadgeMenu({
   const checkoutSlot: React.ReactNode = isHead ? null
     : isTag ? (
         oid && ca
-          ? <ContextMenuItem onClick={() => ca({ kind: "checkout-detached", oid })}>Checkout (detached)</ContextMenuItem>
+          ? <ContextMenuItem onClick={() => ca({ kind: "checkout-detached", oid })}><GitBranch />Checkout (detached)</ContextMenuItem>
           : null
       )
     : hasLocal ? (
         ca
           ? <ContextMenuItem onClick={() => ca({ kind: "checkout-branch", branchName: name })}>
+              <GitBranch />
               Checkout <span className="ml-auto font-mono text-xs text-muted-foreground">{name}</span>
             </ContextMenuItem>
           : null
       )
     : (ca && trackingName
         ? <ContextMenuItem onClick={() => ca({ kind: "checkout-remote-branch", remoteBranch: trackingName })}>
+            <GitBranch />
             Checkout <span className="ml-auto font-mono text-xs text-muted-foreground">{name}</span>
           </ContextMenuItem>
         : null);

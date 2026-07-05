@@ -1,4 +1,15 @@
 import {
+  Copy,
+  GitBranchPlus,
+  Tag,
+  GitMerge,
+  GitCommitVertical,
+  Undo2,
+  GitFork,
+  Combine,
+  RotateCcw,
+} from "lucide-react";
+import {
   ContextMenuItem,
   ContextMenuSeparator,
 } from "@/components/ui/context-menu";
@@ -65,10 +76,12 @@ export function CommitMenuItems({
     <>
       {/* ── Copy ──────────────────────────────────────────────── */}
       <ContextMenuItem onClick={() => navigator.clipboard.writeText(short)}>
+        <Copy />
         Copy short hash{" "}
         <span className="ml-auto font-mono text-xs text-muted-foreground">{short}</span>
       </ContextMenuItem>
       <ContextMenuItem onClick={() => navigator.clipboard.writeText(oid)}>
+        <Copy />
         Copy full hash
       </ContextMenuItem>
       {extraCopyItems}
@@ -80,10 +93,12 @@ export function CommitMenuItems({
 
       {/* ── Create ────────────────────────────────────────────── */}
       <ContextMenuItem onClick={() => onAction({ kind: "create-branch", oid })}>
+        <GitBranchPlus />
         New branch here…
       </ContextMenuItem>
       {!hideCreateTag && (
         <ContextMenuItem onClick={() => onAction({ kind: "create-tag", oid })}>
+          <Tag />
           New tag here…
         </ContextMenuItem>
       )}
@@ -94,6 +109,7 @@ export function CommitMenuItems({
           {(!isHead || commitSummary !== undefined) && <ContextMenuSeparator />}
           {!isHead && (
             <ContextMenuItem onClick={() => onAction({ kind: "merge", oid, label: mergeLabel })}>
+              <GitMerge />
               Merge into current branch
             </ContextMenuItem>
           )}
@@ -101,6 +117,7 @@ export function CommitMenuItems({
             <ContextMenuItem
               onClick={() => onAction({ kind: "cherry-pick", oid, summary: commitSummary })}
             >
+              <GitCommitVertical />
               Cherry-pick onto current branch
             </ContextMenuItem>
           )}
@@ -108,11 +125,13 @@ export function CommitMenuItems({
             <ContextMenuItem
               onClick={() => onAction({ kind: "revert", oid, summary: commitSummary })}
             >
+              <Undo2 />
               Revert commit…
             </ContextMenuItem>
           )}
           {!isHead && (
             <ContextMenuItem onClick={() => onAction({ kind: "rebase", oid })}>
+              <GitFork />
               Rebase current branch here
             </ContextMenuItem>
           )}
@@ -124,6 +143,7 @@ export function CommitMenuItems({
         <>
           <ContextMenuSeparator />
           <ContextMenuItem onClick={() => onAction({ kind: "squash", oids: squashOids })}>
+            <Combine />
             Squash {squashOids.length} commits…
           </ContextMenuItem>
         </>
@@ -152,6 +172,7 @@ export function CommitMenuItems({
             onClick={() => onAction({ kind: "reset", oid })}
             className="text-destructive focus:text-destructive"
           >
+            <RotateCcw />
             Reset HEAD here…
           </ContextMenuItem>
         </>
