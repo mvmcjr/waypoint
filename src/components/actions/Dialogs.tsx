@@ -1,4 +1,5 @@
 import { useEffect, useState } from "react";
+import { TriangleAlert } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Textarea } from "@/components/ui/textarea";
@@ -33,6 +34,25 @@ interface BaseProps {
 
 function ErrorNote({ msg }: { msg: string }) {
   return <p className="text-xs text-destructive mt-2 break-words">{msg}</p>;
+}
+
+/**
+ * Risk callout, scaled to what's actually at stake: "danger" for operations that
+ * lose data with no UI undo (hard reset, force push); "caution" for operations
+ * that rewrite history but stay recoverable via reflog (rebase, squash).
+ * Keeps the destructive button variant reserved for the "danger" tier only.
+ */
+function RiskBanner({ level, children }: { level: "caution" | "danger"; children: React.ReactNode }) {
+  const styles =
+    level === "danger"
+      ? "border-destructive/30 bg-destructive/10 text-destructive"
+      : "border-amber-500/30 bg-amber-500/10 text-amber-300";
+  return (
+    <div className={`flex items-start gap-2 rounded-lg border px-3 py-2 text-xs font-medium ${styles}`}>
+      <TriangleAlert size={14} className="shrink-0 mt-0.5" />
+      <span>{children}</span>
+    </div>
+  );
 }
 
 // ─── Remote operation helpers ──────────────────────────────────────────────
@@ -157,9 +177,9 @@ export function PushRejectedDialog({ repoId, remoteName, branchName, onClose, on
             <code className="font-mono">{remoteName}/{branchName}</code> has diverged from your local branch. You can force push to overwrite it.
           </DialogDescription>
         </DialogHeader>
-        <p className="text-xs text-destructive font-semibold">
-          ⚠ Force push will overwrite the remote branch and may cause data loss for collaborators.
-        </p>
+        <RiskBanner level="danger">
+          Force push will overwrite the remote branch and may cause data loss for collaborators.
+        </RiskBanner>
         {error && <ErrorNote msg={error} />}
         <DialogFooter>
           <Button variant="outline" onClick={onClose} disabled={loading}>Cancel</Button>
@@ -437,9 +457,9 @@ export function ResetDialog({ repoId, oid, onClose, onSuccess }: ResetProps) {
         </div>
 
         {kind === "hard" && (
-          <p className="text-xs text-destructive font-semibold">
-            ⚠ Hard reset will permanently discard uncommitted changes.
-          </p>
+          <RiskBanner level="danger">
+            Hard reset will permanently discard uncommitted changes.
+          </RiskBanner>
         )}
 
         {error && <ErrorNote msg={error} />}
@@ -912,15 +932,18 @@ export function RebaseDialog({ repoId, ontoOid, currentBranch, onClose, onSucces
               ? <code className="font-mono">{currentBranch}</code>
               : "current branch"}{" "}
             onto <code className="font-mono">{short(ontoOid)}</code>.
-            This rewrites commit history.
           </DialogDescription>
         </DialogHeader>
+
+        <RiskBanner level="caution">
+          This rewrites commit history. Recoverable via reflog, but coordinate first if the branch is shared.
+        </RiskBanner>
 
         {error && <ErrorNote msg={error} />}
 
         <DialogFooter>
           <Button variant="outline" onClick={onClose} disabled={loading}>Cancel</Button>
-          <Button variant="destructive" onClick={run} disabled={loading}>
+          <Button onClick={run} disabled={loading}>
             {loading ? "Rebasing…" : "Rebase"}
           </Button>
         </DialogFooter>
@@ -986,9 +1009,13 @@ export function SquashDialog({ repoId, oids, onClose, onSuccess }: SquashProps) 
           <DialogDescription>
             Combine{" "}
             <strong>{count ?? oids.length}</strong>{" "}
-            selected commits into one. This rewrites commit history.
+            selected commits into one.
           </DialogDescription>
         </DialogHeader>
+
+        <RiskBanner level="caution">
+          This rewrites commit history. Recoverable via reflog, but coordinate first if the branch is shared.
+        </RiskBanner>
 
         {previewError ? (
           <ErrorNote msg={previewError} />
@@ -1022,7 +1049,6 @@ export function SquashDialog({ repoId, oids, onClose, onSuccess }: SquashProps) 
         <DialogFooter>
           <Button variant="outline" onClick={onClose} disabled={loading}>Cancel</Button>
           <Button
-            variant="destructive"
             onClick={run}
             disabled={loading || !!previewError || !subject.trim()}
           >
