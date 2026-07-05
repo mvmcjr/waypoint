@@ -87,6 +87,14 @@ interface Props extends RefGroup {
   onCommitAction?: (action: CommitAction) => void;
   /** Commit summary — needed for cherry-pick label. */
   commitSummary?: string;
+  /**
+   * Max badge width in px, driven by the caller's available space (e.g. the
+   * resizable refs column). Falls back to a fixed 124px when omitted. The
+   * name is only middle-truncated as far as this budget actually requires —
+   * widening the column shows more of the name instead of always cutting at
+   * a fixed character count.
+   */
+  maxWidth?: number;
 }
 
 function BadgeMenu({
@@ -205,18 +213,21 @@ function BadgeMenu({
   );
 }
 
-export function RefBadge({ name, trackingName, hasLocal, hasRemote, isHead, isTag, oid, onAction, onCommitAction, commitSummary }: Props) {
-  const base = "inline-flex items-center gap-0.5 px-1.5 py-px rounded text-[10px] font-mono min-w-0 max-w-[124px]";
+export function RefBadge({ name, trackingName, hasLocal, hasRemote, isHead, isTag, oid, onAction, onCommitAction, commitSummary, maxWidth }: Props) {
+  const base = "inline-flex items-center gap-0.5 px-1.5 py-px rounded text-[10px] font-mono min-w-0";
+  const width = maxWidth ?? 124;
 
   let badge: React.ReactNode;
 
   // Middle-truncate so the prefix and ticket-id tail both stay readable, and
-  // expose the full name via the native hover tooltip.
-  const shown = truncateMiddle(name);
+  // expose the full name via the native hover tooltip. Character budget scales
+  // with the available pixel width (font is monospace, so px→chars is linear)
+  // instead of always cutting at a fixed length regardless of room.
+  const shown = truncateMiddle(name, Math.max(6, Math.floor((width - 28) / 6.2)));
 
   if (isHead) {
     badge = (
-      <span className={`${base} bg-teal-500/20 text-teal-300 border border-teal-500/40 font-medium`} title={name}>
+      <span className={`${base} bg-teal-500/20 text-teal-300 border border-teal-500/40 font-medium`} style={{ maxWidth: width }} title={name}>
         <span className="text-[8px] mr-0.5 opacity-80">✓</span>
         <span className="overflow-hidden whitespace-nowrap">{shown}</span>
         {hasRemote && <Globe size={8} className="shrink-0 opacity-50 ml-0.5" />}
@@ -225,7 +236,7 @@ export function RefBadge({ name, trackingName, hasLocal, hasRemote, isHead, isTa
   } else if (isTag) {
     // ── Tag badge ──────────────────────────────────────────────────────────
     badge = (
-      <span className={`${base} bg-amber-500/12 text-amber-300/85 border border-amber-500/20`} title={name}>
+      <span className={`${base} bg-amber-500/12 text-amber-300/85 border border-amber-500/20`} style={{ maxWidth: width }} title={name}>
         <Tag size={8} className="shrink-0 opacity-60 mr-0.5" />
         <span className="overflow-hidden whitespace-nowrap">{shown}</span>
         {hasLocal  && <Monitor size={8} className="shrink-0 opacity-40 ml-0.5" />}
@@ -242,7 +253,7 @@ export function RefBadge({ name, trackingName, hasLocal, hasRemote, isHead, isTa
         : "bg-slate-600/10 text-slate-400/70 border border-slate-500/15";
 
     badge = (
-      <span className={`${base} ${colorClass}`} title={name}>
+      <span className={`${base} ${colorClass}`} style={{ maxWidth: width }} title={name}>
         <span className="overflow-hidden whitespace-nowrap">{shown}</span>
         {hasLocal  && <Monitor size={8} className="shrink-0 opacity-40 ml-0.5" />}
         {hasRemote && <Globe   size={8} className="shrink-0 opacity-40" />}

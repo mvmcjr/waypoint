@@ -154,7 +154,7 @@ Custom thin scrollbars everywhere (`src/index.css` `@layer base`): 14px webkit s
 
 - **Sidebar section header**: icon (10px, `opacity-70`) + uppercase 10px label (`tracking-[0.12em]`) + count + `ChevronRight` that rotates 90° when open. See `RefGroup` in `RefTree.tsx`.
 - **HEAD indicator dot**: `w-1.5 h-1.5 rounded-full bg-teal-400` with a soft `shadow-[0_0_4px_rgba(45,212,191,0.5)]` — the only glow used outside the timeline HEAD ring.
-- **Truncated badges with tooltip**: badge text is middle-truncated (`truncateMiddle`) with full name in native `title` attribute — used for long branch/tag names.
+- **Truncated badges with tooltip**: badge text is middle-truncated (`truncateMiddle`) with full name in native `title` attribute — used for long branch/tag names. The character budget scales with the badge's actual `maxWidth` (px), which `CommitRow` derives from the resizable refs column, rather than a fixed character count — widening the column shows more of the name instead of always cutting at the same length. Relies on the badge font being monospace, so px→chars is a fixed ratio.
 - **"+N more" overflow**: hidden refs beyond `MAX_REFS = 3` collapse into a `HoverCard` trigger rather than wrapping or scrolling.
 - **Context-menu target highlight**: right-clicking a timeline row doesn't change selection, so `Timeline.tsx` tracks `contextTargetOid` (set via each `CommitContextMenu`/`StashContextMenu`'s `onOpenChange`) and `CommitRow` treats `isContextTarget` the same as `isSelected` for its highlight class — reuses the existing selection visual language rather than inventing a new one, so a right-clicked row stays visibly marked for as long as its menu is open.
 

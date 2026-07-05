@@ -34,6 +34,16 @@ export const CommitRow = memo(function CommitRow({ item, refsWidth, graphWidth, 
   const visibleRefs = refGroups.slice(0, MAX_REFS);
   const hiddenCount = refGroups.length - MAX_REFS;
   const shortHash = commit.oid.slice(0, 7);
+  // Badge width budget scales with the (resizable) refs column instead of a fixed
+  // cap, so widening it actually shows more of the name rather than always
+  // truncating at the same point. Reserves column padding, inter-badge gaps, and
+  // the "+N" overflow indicator's own width.
+  const badgeMaxWidth = visibleRefs.length > 0
+    ? Math.max(50, Math.floor(
+        (refsWidth - 16 - 2 * Math.max(visibleRefs.length - 1, 0) - (hiddenCount > 0 ? 20 : 0))
+        / visibleRefs.length
+      ))
+    : undefined;
   const highlighted = isSelected || isContextTarget;
 
   const rowClass = [
@@ -69,7 +79,7 @@ export const CommitRow = memo(function CommitRow({ item, refsWidth, graphWidth, 
         ) : (
           <>
         {visibleRefs.map((g) => (
-          <RefBadge key={g.name} {...g} oid={commit.oid} onAction={onRefAction} onCommitAction={onCommitAction} commitSummary={commit.summary} />
+          <RefBadge key={g.name} {...g} oid={commit.oid} onAction={onRefAction} onCommitAction={onCommitAction} commitSummary={commit.summary} maxWidth={badgeMaxWidth} />
         ))}
         {hiddenCount > 0 && (
           <HoverCard>
@@ -97,6 +107,7 @@ export const CommitRow = memo(function CommitRow({ item, refsWidth, graphWidth, 
                     onAction={onRefAction}
                     onCommitAction={onCommitAction}
                     commitSummary={commit.summary}
+                    maxWidth={200}
                   />
                 ))}
               </div>
