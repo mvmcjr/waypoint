@@ -34,6 +34,29 @@ jobs:
 
     steps:
       - uses: actions/checkout@v4
+        with:
+          # Full history + tags so the changelog step below can diff against
+          # the previous release tag (default checkout is a shallow, tag-less clone).
+          fetch-depth: 0
+
+      - name: Generate changelog
+        id: changelog
+        shell: bash
+        run: |
+          CURRENT_TAG="${{ github.ref_name }}"
+          PREV_TAG=$(git tag --sort=-creatordate | grep -v "^${CURRENT_TAG}$" | head -n 1)
+          {
+            echo "changelog<<CHANGELOG_EOF"
+            if [ -n "$PREV_TAG" ]; then
+              echo "**Changes since $PREV_TAG:**"
+              echo ""
+              git log "${PREV_TAG}..${CURRENT_TAG}" --pretty=format:"- %s (%h)" --no-merges
+            else
+              echo "Initial release."
+            fi
+            echo ""
+            echo "CHANGELOG_EOF"
+          } >> "$GITHUB_OUTPUT"
 
       - uses: pnpm/action-setup@v4
         with:
@@ -121,6 +144,8 @@ jobs:
           tagName: ${{ github.ref_name }}
           releaseName: Waypoint ${{ github.ref_name }}
           releaseBody: |
+            ${{ steps.changelog.outputs.changelog }}
+
             See the assets below to download and install this version.
 
             **Platforms**
