@@ -230,6 +230,7 @@ export function RefBadge({ name, trackingName, hasLocal, hasRemote, isHead, isTa
       <span className={`${base} bg-teal-500/20 text-teal-300 border border-teal-500/40 font-medium`} style={{ maxWidth: width }} title={name}>
         <span className="text-[8px] mr-0.5 opacity-80">✓</span>
         <span className="overflow-hidden whitespace-nowrap">{shown}</span>
+        {hasLocal  && <Monitor size={8} className="shrink-0 opacity-50 ml-0.5" />}
         {hasRemote && <Globe size={8} className="shrink-0 opacity-50 ml-0.5" />}
       </span>
     );
