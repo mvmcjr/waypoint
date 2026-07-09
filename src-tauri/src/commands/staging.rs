@@ -322,8 +322,8 @@ pub fn discard_paths(repo_id: String, paths: Vec<String>, state: State<RepoState
     Ok(())
 }
 
-/// Discard all staged and unstaged changes to tracked files (hard reset to HEAD).
-/// Untracked files are left untouched.
+/// Discard all staged and unstaged changes to tracked files (hard reset to HEAD),
+/// and delete all untracked files/directories. Ignored files are left untouched.
 #[tauri::command]
 pub fn discard_all(repo_id: String, state: State<RepoState>) -> Result<()> {
     {
@@ -331,6 +331,25 @@ pub fn discard_all(repo_id: String, state: State<RepoState>) -> Result<()> {
         let repo = repos.get(&repo_id).ok_or_else(|| Error::RepoNotFound(repo_id.clone()))?;
         let head = repo.head()?.peel_to_commit()?;
         repo.reset(head.as_object(), git2::ResetType::Hard, None)?;
+
+        let workdir = repo.workdir().ok_or_else(|| Error::InvalidArg("bare repository has no working directory".into()))?;
+        let mut opts = git2::StatusOptions::new();
+        opts.include_untracked(true)
+            .include_ignored(false)
+            .recurse_untracked_dirs(false);
+        let statuses = repo.statuses(Some(&mut opts))?;
+        for entry in statuses.iter() {
+            if entry.status().contains(git2::Status::WT_NEW) {
+                if let Some(path) = entry.path() {
+                    let full = workdir.join(path);
+                    if path.ends_with('/') {
+                        let _ = std::fs::remove_dir_all(&full);
+                    } else {
+                        let _ = std::fs::remove_file(&full);
+                    }
+                }
+            }
+        }
     }
     // Re-open with a fresh handle so libgit2's internal cache reflects the reset state.
     let fresh = git2::Repository::open(&repo_id)?;

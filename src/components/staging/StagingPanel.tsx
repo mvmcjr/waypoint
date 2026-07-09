@@ -438,7 +438,7 @@ export function StagingPanel({ repoId, onCommitSuccess, onFileClick }: Props) {
             variant="ghost"
             onClick={handleDiscard}
             disabled={staged.length === 0 && unstaged.length === 0 || disabled}
-            title={discardArmed ? "Click again to confirm discard" : "Discard all changes"}
+            title={discardArmed ? "Click again to confirm discard" : "Discard all changes (including untracked files)"}
             className={[
               "h-6 px-2 text-xs gap-1 shrink-0 transition-colors",
               discardArmed ? "text-destructive hover:text-destructive" : "",
