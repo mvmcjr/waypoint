@@ -21,6 +21,7 @@ import {
   ResetDialog,
   RebaseDialog,
   SquashDialog,
+  RewordDialog,
   MergeDialog,
   CherryPickDialog,
   RevertDialog,
@@ -60,6 +61,7 @@ type DialogState =
   | { kind: "reset"; oid: string }
   | { kind: "rebase"; oid: string }
   | { kind: "squash"; oids: string[] }
+  | { kind: "reword"; oid: string }
   | { kind: "merge"; oid: string; label: string }
   | { kind: "cherry-pick"; oid: string; summary: string }
   | { kind: "revert"; oid: string; summary: string }
@@ -359,6 +361,15 @@ export function RepoView() {
     if (!data.some((c) => c.commit.oid === selectedOid)) selectCommit(null);
   }, [data, selectedOid, selectCommit]);
 
+  // Same idea for the multi-selection: a squash/reword can rewrite descendant
+  // OIDs (via rebase), leaving stale OIDs selected that no longer exist.
+  useEffect(() => {
+    if (!data || multiSelectedOids.length === 0) return;
+    const live = new Set(data.map((c) => c.commit.oid));
+    const filtered = multiSelectedOids.filter((oid) => live.has(oid));
+    if (filtered.length !== multiSelectedOids.length) setMultiSelected(filtered);
+  }, [data, multiSelectedOids, setMultiSelected]);
+
   // Auto-open WIP panel when a merge with conflicts starts, or when the user
   // switches to a repo that already has a merge in progress.  repoId is in the
   // dep array so the effect re-fires on tab switch even when merge_in_progress
@@ -495,6 +506,8 @@ export function RepoView() {
       setDialog({ kind: "rebase", oid: action.oid });
     } else if (action.kind === "squash") {
       setDialog({ kind: "squash", oids: action.oids });
+    } else if (action.kind === "reword") {
+      setDialog({ kind: "reword", oid: action.oid });
     } else if (action.kind === "merge") {
       setDialog({ kind: "merge", oid: action.oid, label: action.label });
     } else if (action.kind === "cherry-pick") {
@@ -783,6 +796,14 @@ export function RepoView() {
           oids={dialog.oids}
           onClose={() => setDialog({ kind: "none" })}
           onSuccess={() => { setDialog({ kind: "none" }); selectCommit(null); refresh(); }}
+        />
+      )}
+      {repoId && dialog.kind === "reword" && (
+        <RewordDialog
+          repoId={repoId}
+          oid={dialog.oid}
+          onClose={() => setDialog({ kind: "none" })}
+          onSuccess={handleSuccess}
         />
       )}
       {repoId && dialog.kind === "merge" && (

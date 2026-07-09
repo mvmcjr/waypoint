@@ -8,6 +8,7 @@ import {
   GitFork,
   Combine,
   RotateCcw,
+  Pencil,
 } from "lucide-react";
 import {
   ContextMenuItem,
@@ -28,6 +29,7 @@ export type CommitAction =
   | { kind: "reset"; oid: string }
   | { kind: "rebase"; oid: string }
   | { kind: "squash"; oids: string[] }
+  | { kind: "reword"; oid: string }
   | { kind: "merge"; oid: string; label: string }
   | { kind: "cherry-pick"; oid: string; summary: string }
   | { kind: "revert"; oid: string; summary: string };
@@ -106,7 +108,12 @@ export function CommitMenuItems({
       {/* ── Merge / cherry-pick / rebase / revert ──────── */}
       {!hideMergeRebase && (
         <>
-          {(!isHead || commitSummary !== undefined) && <ContextMenuSeparator />}
+          {/* Edit message always renders below, so the separator always applies. */}
+          <ContextMenuSeparator />
+          <ContextMenuItem onClick={() => onAction({ kind: "reword", oid })}>
+            <Pencil />
+            Edit message…
+          </ContextMenuItem>
           {!isHead && (
             <ContextMenuItem onClick={() => onAction({ kind: "merge", oid, label: mergeLabel })}>
               <GitMerge />

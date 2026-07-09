@@ -1060,6 +1060,106 @@ export function SquashDialog({ repoId, oids, onClose, onSuccess }: SquashProps) 
   );
 }
 
+// ─── Edit commit message ────────────────────────────────────────────────────
+
+interface RewordProps extends BaseProps {
+  oid: string;
+}
+
+export function RewordDialog({ repoId, oid, onClose, onSuccess }: RewordProps) {
+  const [subject, setSubject] = useState("");
+  const [body, setBody] = useState("");
+  const [loading, setLoading] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+
+  // Load the commit's current message once on open. On failure, subject stays
+  // empty — Save is already disabled while subject is blank, so there's no
+  // separate "preview failed" state to track.
+  useEffect(() => {
+    let cancelled = false;
+    ipc
+      .getCommit(repoId, oid)
+      .then((c) => {
+        if (cancelled) return;
+        setSubject(c.summary);
+        setBody(c.body);
+      })
+      .catch((e) => !cancelled && setError(String(e)));
+    return () => {
+      cancelled = true;
+    };
+  }, [repoId, oid]);
+
+  async function run() {
+    const trimmedSubject = subject.trim();
+    if (!trimmedSubject) return;
+    const trimmedBody = body.trim();
+    const message = trimmedBody ? `${trimmedSubject}\n\n${trimmedBody}` : trimmedSubject;
+    setLoading(true);
+    setError(null);
+    try {
+      await ipc.rewordCommit(repoId, oid, message);
+      onSuccess();
+    } catch (e) {
+      setError(String(e));
+    } finally {
+      setLoading(false);
+    }
+  }
+
+  return (
+    <Dialog open onOpenChange={(o) => !o && onClose()}>
+      <DialogContent>
+        <DialogHeader>
+          <DialogTitle>Edit commit message</DialogTitle>
+          <DialogDescription>
+            Rewrite the message for <code className="font-mono">{short(oid)}</code>.
+          </DialogDescription>
+        </DialogHeader>
+
+        <RiskBanner level="caution">
+          This rewrites commit history. Refused if the commit has already been pushed to a remote.
+        </RiskBanner>
+
+        <div className="flex flex-col gap-3">
+          <div className="flex flex-col gap-1">
+            <label className="text-xs text-muted-foreground">Summary</label>
+            <Input
+              value={subject}
+              onChange={(e) => setSubject(e.target.value)}
+              className="font-mono text-sm"
+              placeholder="Summary line"
+              autoFocus
+            />
+          </div>
+          <div className="flex flex-col gap-1">
+            <label className="text-xs text-muted-foreground">Description</label>
+            <Textarea
+              value={body}
+              onChange={(e) => setBody(e.target.value)}
+              rows={7}
+              className="font-mono text-sm resize-none"
+              placeholder="Extended description (optional)"
+            />
+          </div>
+        </div>
+
+        {error && <ErrorNote msg={error} />}
+
+        <DialogFooter>
+          <Button variant="outline" onClick={onClose} disabled={loading}>Cancel</Button>
+          <Button
+            onClick={run}
+            disabled={loading || !subject.trim()}
+          >
+            {loading ? "Saving…" : "Save"}
+          </Button>
+        </DialogFooter>
+      </DialogContent>
+    </Dialog>
+  );
+}
+
 // ─── Create Tag ─────────────────────────────────────────────────────────────
 
 interface CreateTagProps extends BaseProps {

@@ -4,6 +4,36 @@ use tauri::State;
 use crate::error::{Error, Result};
 use crate::repo::RepoState;
 
+/// Drive a prepared rebase to completion, replaying each operation as its own
+/// commit and aborting with `conflict_msg` if any operation lands with
+/// conflicts. Shared by every command that rewrites history via `repo.rebase`
+/// (plain rebase, squash, reword) so they abort/report identically.
+fn run_rebase_to_completion(
+    repo: &git2::Repository,
+    mut rebase: git2::Rebase,
+    sig: &git2::Signature,
+    conflict_msg: &str,
+) -> Result<()> {
+    loop {
+        match rebase.next() {
+            None => break,
+            Some(Err(e)) => {
+                let _ = rebase.abort();
+                return Err(Error::Git(e));
+            }
+            Some(Ok(_op)) => {
+                if repo.index()?.has_conflicts() {
+                    let _ = rebase.abort();
+                    return Err(Error::RebaseConflict(conflict_msg.into()));
+                }
+                rebase.commit(None, sig, None)?;
+            }
+        }
+    }
+    rebase.finish(None)?;
+    Ok(())
+}
+
 #[derive(Debug, Serialize)]
 pub struct StatusInfo {
     pub staged_count: usize,
@@ -181,29 +211,14 @@ pub fn rebase_onto(repo_id: String, onto_oid: String, state: State<RepoState>) -
     let onto = repo.find_annotated_commit(oid)?;
 
     let sig = repo.signature()?;
-    let mut rebase = repo.rebase(None, Some(&onto), None, None)?;
+    let rebase = repo.rebase(None, Some(&onto), None, None)?;
 
-    loop {
-        match rebase.next() {
-            None => break,
-            Some(Err(e)) => {
-                let _ = rebase.abort();
-                return Err(Error::Git(e));
-            }
-            Some(Ok(_op)) => {
-                if repo.index()?.has_conflicts() {
-                    let _ = rebase.abort();
-                    return Err(Error::RebaseConflict(
-                        "Rebase has conflicts and was aborted. Please resolve them manually in a terminal.".into(),
-                    ));
-                }
-                rebase.commit(None, &sig, None)?;
-            }
-        }
-    }
-
-    rebase.finish(None)?;
-    Ok(())
+    run_rebase_to_completion(
+        repo,
+        rebase,
+        &sig,
+        "Rebase has conflicts and was aborted. Please resolve them manually in a terminal.",
+    )
 }
 
 #[derive(Debug, Serialize)]
@@ -409,27 +424,149 @@ pub fn squash_commits(repo_id: String, oids: Vec<String>, message: String, state
     let upstream_ann = repo.find_annotated_commit(tip_oid)?;
     let onto_ann = repo.find_annotated_commit(squashed_oid)?;
 
-    let mut rebase = repo.rebase(Some(&branch_ann), Some(&upstream_ann), Some(&onto_ann), None)?;
-    loop {
-        match rebase.next() {
-            None => break,
-            Some(Err(e)) => {
-                let _ = rebase.abort();
-                return Err(Error::Git(e));
-            }
-            Some(Ok(_op)) => {
-                if repo.index()?.has_conflicts() {
-                    let _ = rebase.abort();
-                    return Err(Error::RebaseConflict(
-                        "Squash hit a conflict while replaying later commits and was aborted.".into(),
-                    ));
-                }
-                rebase.commit(None, &sig, None)?;
+    let rebase = repo.rebase(Some(&branch_ann), Some(&upstream_ann), Some(&onto_ann), None)?;
+    run_rebase_to_completion(
+        repo,
+        rebase,
+        &sig,
+        "Squash hit a conflict while replaying later commits and was aborted.",
+    )
+}
+
+/// True if `oid` is reachable from the tip of any remote-tracking branch —
+/// i.e. it (or a descendant) has already been pushed, so rewriting it would
+/// require a force-push. A single BFS shared across all remote tips (rather
+/// than one `graph_descendant_of` walk per branch) so overlapping history
+/// between remotes is only walked once, and it stops as soon as `oid` turns up.
+fn is_reachable_from_any_remote(repo: &git2::Repository, oid: git2::Oid) -> Result<bool> {
+    use std::collections::{HashSet, VecDeque};
+
+    let mut queue: VecDeque<git2::Oid> = VecDeque::new();
+    let mut visited: HashSet<git2::Oid> = HashSet::new();
+
+    for branch in repo.branches(Some(git2::BranchType::Remote))? {
+        let (branch, _) = branch?;
+        if let Some(target) = branch.get().target() {
+            if visited.insert(target) {
+                queue.push_back(target);
             }
         }
     }
-    rebase.finish(None)?;
+
+    while let Some(cur) = queue.pop_front() {
+        if cur == oid {
+            return Ok(true);
+        }
+        if let Ok(commit) = repo.find_commit(cur) {
+            for parent_id in commit.parent_ids() {
+                if visited.insert(parent_id) {
+                    queue.push_back(parent_id);
+                }
+            }
+        }
+    }
+    Ok(false)
+}
+
+/// Confirm every commit on `tip_oid`'s first-parent chain down to (and
+/// including) `base_oid` has exactly one parent — i.e. replaying that range
+/// won't cross a merge commit, whose other parents wouldn't be replayed
+/// correctly. Mirrors the per-commit check in `resolve_squash_range`, which
+/// additionally validates contiguity against a specific commit selection.
+fn assert_first_parent_chain_is_linear(
+    repo: &git2::Repository,
+    tip_oid: git2::Oid,
+    base_oid: git2::Oid,
+    err_msg: &str,
+) -> Result<()> {
+    let mut cur = repo.find_commit(tip_oid)?;
+    while cur.id() != base_oid {
+        if cur.parent_count() != 1 {
+            return Err(Error::InvalidArg(err_msg.into()));
+        }
+        cur = cur.parent(0)?;
+    }
     Ok(())
+}
+
+/// Edit the message of `oid`, a commit on the current branch's first-parent
+/// chain up to HEAD, then replay any descendants on top. Refuses commits
+/// already reachable from a remote-tracking branch (rewriting those would
+/// need a force-push) and commits behind a merge in the replay range.
+#[tauri::command]
+pub fn reword_commit(repo_id: String, oid: String, message: String, state: State<RepoState>) -> Result<()> {
+    let repos = state.0.lock().unwrap();
+    let repo = repos.get(&repo_id).ok_or_else(|| Error::RepoNotFound(repo_id.clone()))?;
+
+    let head = repo.head()?;
+    if !head.is_branch() {
+        return Err(Error::InvalidArg(
+            "Cannot edit message: HEAD is detached. Checkout a branch first.".into(),
+        ));
+    }
+    let head_oid = head
+        .target()
+        .ok_or_else(|| Error::InvalidArg("HEAD has no target".into()))?;
+
+    let msg = message.trim();
+    if msg.is_empty() {
+        return Err(Error::InvalidArg("Commit message cannot be empty.".into()));
+    }
+
+    let target_oid = git2::Oid::from_str(&oid).map_err(|_| Error::CommitNotFound(oid.clone()))?;
+    let target = repo.find_commit(target_oid).map_err(|_| Error::CommitNotFound(oid.clone()))?;
+
+    if target_oid != head_oid && !repo.graph_descendant_of(head_oid, target_oid)? {
+        return Err(Error::InvalidArg("Commit is not on the current branch.".into()));
+    }
+
+    if is_reachable_from_any_remote(repo, target_oid)? {
+        return Err(Error::InvalidArg(
+            "Cannot edit message: this commit has already been pushed to a remote.".into(),
+        ));
+    }
+
+    assert_first_parent_chain_is_linear(
+        repo,
+        head_oid,
+        target_oid,
+        "Cannot edit message: a merge commit sits between this commit and HEAD.",
+    )?;
+
+    // Rebuild the commit with the same tree and parents — only the message
+    // (and committer identity/time, to reflect the edit) changes.
+    let sig = repo.signature()?;
+    let tree = target.tree()?;
+    let parents: Vec<git2::Commit> = (0..target.parent_count())
+        .map(|i| target.parent(i))
+        .collect::<std::result::Result<_, _>>()?;
+    let parent_refs: Vec<&git2::Commit> = parents.iter().collect();
+    let new_oid = repo.commit(None, &target.author(), &sig, msg, &tree, &parent_refs)?;
+
+    let branch_ref = head
+        .name()
+        .ok_or_else(|| Error::InvalidArg("HEAD reference has no name".into()))?
+        .to_owned();
+
+    // Target was HEAD — no descendants to replay, just move the branch tip.
+    if target_oid == head_oid {
+        repo.reference(&branch_ref, new_oid, true, "reword commit")?;
+        repo.set_head(&branch_ref)?;
+        return Ok(());
+    }
+
+    // Interior reword: replay target..HEAD onto the reworded commit.
+    let branch_ann = repo.reference_to_annotated_commit(&head)?;
+    let upstream_ann = repo.find_annotated_commit(target_oid)?;
+    let onto_ann = repo.find_annotated_commit(new_oid)?;
+
+    let rebase = repo.rebase(Some(&branch_ann), Some(&upstream_ann), Some(&onto_ann), None)?;
+    run_rebase_to_completion(
+        repo,
+        rebase,
+        &sig,
+        "Editing this commit's message hit a conflict while replaying later commits and was aborted.",
+    )
 }
 
 /// Outcome of `checkout_remote_branch`, so the frontend can explain what

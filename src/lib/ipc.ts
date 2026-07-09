@@ -209,6 +209,9 @@ export const ipc = {
   squashCommits: (repoId: string, oids: string[], message: string) =>
     invoke<void>("squash_commits", { repoId, oids, message }),
 
+  rewordCommit: (repoId: string, oid: string, message: string) =>
+    invoke<void>("reword_commit", { repoId, oid, message }),
+
   deleteBranch: (repoId: string, name: string) =>
     invoke<void>("delete_branch", { repoId, name }),
 
