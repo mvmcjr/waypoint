@@ -180,9 +180,20 @@ export function GraphLayer({ commits, startRow, visibleRows, width, onSelectOid,
       {/* WIP dot + connection line to HEAD (rendered here so x aligns with commit dots) */}
       {wipOffset > 0 && (() => {
         const h = headCommit ?? commits.find((c) => c.commit.oid === headOid);
-        if (!h) return null;
-        const x = cx(h.lane);
-        const color = laneColor(h.color_idx);
+        // A repo with no commits yet has no HEAD to connect to, but the WIP row is
+        // still rendered — draw its dot in lane 0 so the graph column isn't blank.
+        const x = cx(h ? h.lane : 0);
+        const color = laneColor(h ? h.color_idx : 0);
+        if (!h) {
+          const wipY = cy(-1, startRow, wipOffset);
+          if (wipY < 0 || wipY > svgHeight) return null;
+          return (
+            <circle key="wip-dot" cx={x} cy={wipY} r={4.5}
+              fill="none"
+              stroke={mergeInProgress ? "#fb923c" : color}
+              strokeWidth={1.5} strokeDasharray="3 2" opacity={0.85} />
+          );
+        }
         const headY = cy(h.row, startRow, wipOffset);
         // WIP is virtual row 0; reuse cy() so this stays consistent with commit dot math.
         const wipY = cy(-1, startRow, wipOffset);

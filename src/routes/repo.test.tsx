@@ -71,6 +71,10 @@ vi.mock("@/components/staging/ConflictPanel", () => ({
   MergeCommitPanel: () => <div data-testid="merge-commit-panel">MergeCommitPanel</div>,
 }));
 
+vi.mock("@/components/staging/StagingPanel", () => ({
+  StagingPanel: () => <div data-testid="staging-panel">StagingPanel</div>,
+}));
+
 vi.mock("@/components/detail/StagingFileDiffPanel", () => ({
   StagingFileDiffPanel: ({ repoId, path }: { repoId: string; path: string }) => (
     <div data-testid="staging-diff-panel" data-repo={repoId} data-path={path}>
@@ -88,9 +92,11 @@ function mockStoreFor(repoId: string) {
     activeTabId: repoId,
     commits: [],
     selectedOid: null,
+    multiSelectedOids: [],
     searchFilter: "",
     setCommits: vi.fn(),
     selectCommit: mockSelectCommit,
+    setMultiSelected: vi.fn(),
     setSearchFilter: vi.fn(),
   } as any);
 }
@@ -140,6 +146,33 @@ describe("RepoView", () => {
 
     render(<RepoView />);
     expect(screen.getByText(/Test error/i)).toBeInTheDocument();
+  });
+
+  // ── Unborn HEAD (repo with no commits) ─────────────────────────────────────
+
+  it("shows the pending branch name when HEAD is unborn", () => {
+    vi.mocked(useHeadInfo).mockReturnValue({ data: { oid: null, branch: "main" } } as any);
+
+    render(<RepoView />);
+    expect(screen.getByText("⎇ main")).toBeInTheDocument();
+  });
+
+  it("disables Push and Pull when HEAD is unborn", () => {
+    vi.mocked(useRemotes).mockReturnValue({ data: ONE_REMOTE } as any);
+    vi.mocked(useHeadInfo).mockReturnValue({ data: { oid: null, branch: "main" } } as any);
+
+    render(<RepoView />);
+    // Nothing to push yet — git would fail with "src refspec main does not match any".
+    expect(screen.getByRole("button", { name: /push/i })).toBeDisabled();
+    expect(screen.getByRole("button", { name: /pull/i })).toBeDisabled();
+  });
+
+  it("opens the staging panel automatically when HEAD is unborn", async () => {
+    vi.mocked(useHeadInfo).mockReturnValue({ data: { oid: null, branch: "main" } } as any);
+
+    render(<RepoView />);
+    // No commit is selectable in an empty repo, so staging is the only useful view.
+    await waitFor(() => expect(screen.getByTestId("staging-panel")).toBeInTheDocument());
   });
 
   // ── V3: merge-conflict effect ───────────────────────────────────────────────

@@ -68,8 +68,14 @@ export interface DiffLine {
 /** Outcome of checking out a remote tracking branch — see checkout_remote_branch. */
 export type CheckoutRemoteResult = "created" | "up_to_date" | "fast_forward" | "detached";
 
+export interface InitTarget {
+  /** Root of the repository this folder already sits inside, if any. */
+  enclosing_repo: string | null;
+}
+
 export interface HeadInfo {
-  oid: string;
+  /** HEAD commit, or null in a fresh repository with no commits yet. */
+  oid: string | null;
   branch: string | null;
 }
 
@@ -145,6 +151,12 @@ export const ipc = {
 
   openRepo: (path: string) =>
     invoke<string>("open_repo", { path }),
+
+  initRepo: (path: string, allowNested = false) =>
+    invoke<void>("init_repo", { path, allowNested }),
+
+  checkInitTarget: (path: string) =>
+    invoke<InitTarget>("check_init_target", { path }),
 
   listRefs: (repoId: string) =>
     invoke<RefInfo[]>("list_refs", { repoId }),

@@ -382,6 +382,13 @@ export function RepoView() {
     }
   }, [status?.merge_in_progress, repoId, selectCommit]);
 
+  // Fresh repo with no commits yet (unborn HEAD): there is no commit to select, so
+  // open the staging view directly — that's the only thing the user can act on.
+  useEffect(() => {
+    if (!repoId || isLoading || !head) return;
+    if (head.oid === null) setWipSelected(true);
+  }, [repoId, isLoading, head]);
+
   function handleSelectCommit(oid: string, mods: { ctrl: boolean; shift: boolean }) {
     setWipSelected(false);
     setFocusedFile(null);
@@ -585,7 +592,7 @@ export function RepoView() {
           <span className="text-sm font-semibold text-foreground shrink-0">
             {head?.branch ? (
               <span className="text-teal-400">⎇ {head.branch}</span>
-            ) : head ? (
+            ) : head?.oid ? (
               <span className="text-amber-400/90">⎇ detached {head.oid.slice(0, 8)}</span>
             ) : (
               "Timeline"
@@ -623,7 +630,7 @@ export function RepoView() {
                   variant="ghost"
                   size="sm"
                   className="h-6 px-2 text-xs gap-1"
-                  disabled={isPulling || !head?.branch}
+                  disabled={isPulling || !head?.branch || !head?.oid}
                   onClick={handlePull}
                 >
                   {isPulling ? <RefreshCw size={11} className="animate-spin" /> : <ArrowDown size={11} />}
@@ -633,8 +640,10 @@ export function RepoView() {
                   variant="ghost"
                   size="sm"
                   className="h-6 px-2 text-xs gap-1"
-                  disabled={isPushing || !head?.branch}
-                  onClick={() => head?.branch && handlePushBranch(head.branch)}
+                  // An unborn branch has no commit to push — git would fail with
+                  // "src refspec … does not match any".
+                  disabled={isPushing || !head?.branch || !head?.oid}
+                  onClick={() => head?.branch && head?.oid && handlePushBranch(head.branch)}
                 >
                   {isPushing ? <RefreshCw size={11} className="animate-spin" /> : <ArrowUp size={11} />}
                   Push

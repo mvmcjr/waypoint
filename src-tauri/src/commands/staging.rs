@@ -324,13 +324,57 @@ pub fn discard_paths(repo_id: String, paths: Vec<String>, state: State<RepoState
 
 /// Discard all staged and unstaged changes to tracked files (hard reset to HEAD),
 /// and delete all untracked files/directories. Ignored files are left untouched.
+///
+/// With an unborn HEAD there is nothing to reset to: the index is emptied and only
+/// files that were already untracked are deleted, so previously-staged files survive
+/// on disk (unstaged) rather than being destroyed.
 #[tauri::command]
 pub fn discard_all(repo_id: String, state: State<RepoState>) -> Result<()> {
     {
         let repos = state.0.lock().unwrap();
         let repo = repos.get(&repo_id).ok_or_else(|| Error::RepoNotFound(repo_id.clone()))?;
-        let head = repo.head()?.peel_to_commit()?;
-        repo.reset(head.as_object(), git2::ResetType::Hard, None)?;
+        discard_all_in(repo)?;
+    }
+    // Re-open with a fresh handle so libgit2's internal cache reflects the reset state.
+    let fresh = git2::Repository::open(&repo_id)?;
+    state.0.lock().unwrap().insert(repo_id, fresh);
+    Ok(())
+}
+
+fn discard_all_in(repo: &git2::Repository) -> Result<()> {
+    {
+        // On an unborn HEAD the sweep below is restricted to the paths that were
+        // already untracked before the index was emptied. Without that snapshot,
+        // clearing the index makes every indexed file look untracked — on an orphan
+        // branch (`git checkout --orphan`, HEAD unborn but the tree fully populated)
+        // that would delete the entire working tree.
+        let deletable: Option<std::collections::HashSet<String>> = match repo.head() {
+            Ok(head) => {
+                let commit = head.peel_to_commit()?;
+                repo.reset(commit.as_object(), git2::ResetType::Hard, None)?;
+                None
+            }
+            Err(e) if e.code() == git2::ErrorCode::UnbornBranch => {
+                let mut opts = git2::StatusOptions::new();
+                opts.include_untracked(true)
+                    .include_ignored(false)
+                    .recurse_untracked_dirs(false);
+                let untracked: std::collections::HashSet<String> = repo
+                    .statuses(Some(&mut opts))?
+                    .iter()
+                    .filter(|e| e.status().contains(git2::Status::WT_NEW))
+                    .filter_map(|e| e.path().map(|p| p.to_owned()))
+                    .collect();
+
+                // Nothing to reset to, so empty the index instead: staged files are
+                // unstaged but kept on disk.
+                let mut index = repo.index()?;
+                index.clear()?;
+                index.write()?;
+                Some(untracked)
+            }
+            Err(e) => return Err(e.into()),
+        };
 
         let workdir = repo.workdir().ok_or_else(|| Error::InvalidArg("bare repository has no working directory".into()))?;
         let mut opts = git2::StatusOptions::new();
@@ -341,6 +385,9 @@ pub fn discard_all(repo_id: String, state: State<RepoState>) -> Result<()> {
         for entry in statuses.iter() {
             if entry.status().contains(git2::Status::WT_NEW) {
                 if let Some(path) = entry.path() {
+                    if deletable.as_ref().is_some_and(|set| !set.contains(path)) {
+                        continue;
+                    }
                     let full = workdir.join(path);
                     if path.ends_with('/') {
                         let _ = std::fs::remove_dir_all(&full);
@@ -351,9 +398,6 @@ pub fn discard_all(repo_id: String, state: State<RepoState>) -> Result<()> {
             }
         }
     }
-    // Re-open with a fresh handle so libgit2's internal cache reflects the reset state.
-    let fresh = git2::Repository::open(&repo_id)?;
-    state.0.lock().unwrap().insert(repo_id, fresh);
     Ok(())
 }
 
@@ -403,4 +447,85 @@ pub fn amend_commit(repo_id: String, message: String, state: State<RepoState>) -
     )?;
 
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use git2::Repository;
+    use std::path::{Path, PathBuf};
+
+    fn make_repo() -> (PathBuf, Repository) {
+        let dir = std::env::temp_dir().join(format!("wpt_discard_{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let repo = Repository::init(&dir).unwrap();
+        {
+            let mut cfg = repo.config().unwrap();
+            cfg.set_str("user.name", "Test User").unwrap();
+            cfg.set_str("user.email", "test@example.com").unwrap();
+        }
+        (dir, repo)
+    }
+
+    fn stage(repo: &Repository, name: &str, content: &str) {
+        std::fs::write(repo.workdir().unwrap().join(name), content).unwrap();
+        let mut index = repo.index().unwrap();
+        index.add_path(Path::new(name)).unwrap();
+        index.write().unwrap();
+    }
+
+    /// On an orphan branch HEAD is unborn while the index and working tree are fully
+    /// populated. Discarding must not delete those tracked files.
+    #[test]
+    fn discard_all_on_orphan_branch_keeps_indexed_files() {
+        let (dir, repo) = make_repo();
+        stage(&repo, "tracked.txt", "keep me");
+        let tree = repo.find_tree(repo.index().unwrap().write_tree().unwrap()).unwrap();
+        let sig = repo.signature().unwrap();
+        repo.commit(Some("HEAD"), &sig, &sig, "init", &tree, &[]).unwrap();
+
+        // Orphan branch: HEAD points at a ref that doesn't exist yet.
+        repo.set_head("refs/heads/orphan").unwrap();
+        assert!(repo.head().is_err(), "HEAD should be unborn");
+        std::fs::write(dir.join("untracked.txt"), "delete me").unwrap();
+
+        discard_all_in(&repo).unwrap();
+
+        assert!(dir.join("tracked.txt").exists(), "indexed file must survive");
+        assert!(!dir.join("untracked.txt").exists(), "untracked file should be removed");
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    /// A repo with no commits at all: untracked files go, staged files are only unstaged.
+    #[test]
+    fn discard_all_on_unborn_head_unstages_without_deleting() {
+        let (dir, repo) = make_repo();
+        stage(&repo, "staged.txt", "staged");
+        std::fs::write(dir.join("untracked.txt"), "untracked").unwrap();
+
+        discard_all_in(&repo).unwrap();
+
+        assert!(dir.join("staged.txt").exists(), "staged file must survive on disk");
+        assert!(!dir.join("untracked.txt").exists(), "untracked file should be removed");
+        assert_eq!(repo.index().unwrap().len(), 0, "index should be empty");
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn discard_all_with_commits_resets_and_cleans() {
+        let (dir, repo) = make_repo();
+        stage(&repo, "a.txt", "original");
+        let tree = repo.find_tree(repo.index().unwrap().write_tree().unwrap()).unwrap();
+        let sig = repo.signature().unwrap();
+        repo.commit(Some("HEAD"), &sig, &sig, "init", &tree, &[]).unwrap();
+
+        std::fs::write(dir.join("a.txt"), "modified").unwrap();
+        std::fs::write(dir.join("new.txt"), "new").unwrap();
+
+        discard_all_in(&repo).unwrap();
+
+        assert_eq!(std::fs::read_to_string(dir.join("a.txt")).unwrap(), "original");
+        assert!(!dir.join("new.txt").exists());
+        let _ = std::fs::remove_dir_all(dir);
+    }
 }

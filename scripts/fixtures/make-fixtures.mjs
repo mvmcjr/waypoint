@@ -258,6 +258,88 @@ function makeHunks() {
 }
 
 /**
+ * NOT-A-REPO
+ * A plain folder with files and no .git at all. Opening it should raise the
+ * "Not a Git repository — initialize one here?" dialog rather than an error.
+ *
+ * ⚠ This folder lives inside the Waypoint checkout, so the dialog will also show
+ * the amber "already inside the repository at …" warning and the button reads
+ * "Initialize Anyway" — that nested-repo warning is itself part of what to check.
+ * To see the plain, warning-free version, copy the folder somewhere outside any
+ * repo (e.g. your Desktop) and open that instead.
+ */
+function makeNotARepo() {
+  const dir = fresh('not-a-repo');
+
+  write(dir, 'README.md', '# Not A Repo\n\nThere is no .git here. Opening this folder in Waypoint should offer to create one.\n');
+  write(dir, 'index.js', 'console.log("no version control yet");\n');
+  write(dir, 'src/main.js', 'export function main() {\n  return "hello";\n}\n');
+
+  log('not-a-repo', dir, '(no .git → init prompt; nested-repo warning expected in-tree)');
+}
+
+/**
+ * EMPTY-REPO
+ * `git init` with files on disk but no commits — HEAD is unborn. Used to blank
+ * the whole window; should now show the branch name, the WIP row, and the staging
+ * panel so the first commit can be made.
+ */
+function makeEmptyRepo() {
+  const dir = fresh('empty-repo');
+  initRepo(dir);
+
+  write(dir, 'README.md', '# Empty Repo\n\nNo commits yet. The staging panel should open automatically so you can make the first one.\n');
+  write(dir, 'src/app.js', 'export function app() {\n  return "first commit pending";\n}\n');
+  write(dir, 'notes/todo.txt', 'write the first commit\n');
+
+  log('empty-repo', dir, '(unborn HEAD, all untracked → WIP row + staging panel)');
+}
+
+/**
+ * EMPTY-REPO-STAGED
+ * Same unborn HEAD, but everything is already staged. Checks the initial-commit
+ * path (no parent commit) and that Push/Pull stay disabled until a commit exists.
+ * "Discard all" here should unstage without deleting the staged files.
+ */
+function makeEmptyRepoStaged() {
+  const dir = fresh('empty-repo-staged');
+  initRepo(dir);
+
+  write(dir, 'README.md', '# Empty Repo (staged)\n\nEverything below is staged, but there is still no commit.\n');
+  write(dir, 'src/index.js', 'console.log("staged, never committed");\n');
+  run('git add .', dir);
+
+  // One untracked file alongside the staged ones — "Discard all" should delete
+  // only this file and leave the staged ones on disk.
+  write(dir, 'scratch.txt', 'untracked — safe to delete\n');
+
+  log('empty-repo-staged', dir, '(unborn HEAD, staged files + 1 untracked → commit / discard-all)');
+}
+
+/**
+ * ORPHAN-BRANCH
+ * Real commits exist, but HEAD points at a branch that does not exist yet
+ * (`git checkout --orphan`): unborn HEAD with a fully populated index and working
+ * tree. "Discard all" must delete only the untracked file and keep every indexed
+ * file — clearing the index without that distinction wiped the working tree.
+ */
+function makeOrphanBranch() {
+  const dir = fresh('orphan-branch');
+  initRepo(dir);
+
+  write(dir, 'keep-me.js', 'export const IMPORTANT = "do not delete";\n');
+  write(dir, 'src/lib.js', 'export function lib() {\n  return 1;\n}\n');
+  run('git add .', dir);
+  run('git commit -m "Initial commit"', dir);
+
+  // Orphan branch: index + working tree stay populated, HEAD becomes unborn.
+  run('git checkout --orphan fresh-start', dir);
+  write(dir, 'delete-me.txt', 'untracked — this is the only file discard-all should remove\n');
+
+  log('orphan-branch', dir, '(unborn HEAD + populated index → discard-all must keep tracked files)');
+}
+
+/**
  * MERGE-CONFLICT
  * A `git merge` that stopped mid-way due to conflicts in shared.js.
  * MERGE_HEAD is set; the conflict panel should open automatically.
@@ -1048,6 +1130,10 @@ const SCENARIOS = [
   ['staged',               makeStaged],
   ['untracked',            makeUntracked],
   ['hunks',                makeHunks],
+  ['not-a-repo',           makeNotARepo],
+  ['empty-repo',           makeEmptyRepo],
+  ['empty-repo-staged',    makeEmptyRepoStaged],
+  ['orphan-branch',        makeOrphanBranch],
   ['merge-conflict',       makeMergeConflict],
   ['cherry-pick-conflict', makeCherryPickConflict],
   ['cherry-pick-ready',    makeCherryPickReady],

@@ -34,6 +34,12 @@ pub fn open_repo(
     state: State<RepoState>,
     watchers: State<WatcherState>,
 ) -> Result<String> {
+    // Distinguish "folder is gone/unreadable" from "folder exists but isn't a repo":
+    // only the latter should lead the UI to offer `git init` here.
+    if !std::path::Path::new(&path).is_dir() {
+        return Err(Error::InvalidArg(format!("folder does not exist: {path}")));
+    }
+
     let repo = git2::Repository::open(&path)
         .map_err(|_| Error::NotARepo(path.clone()))?;
 
@@ -67,6 +73,57 @@ pub fn open_repo(
     }
 
     Ok(id)
+}
+
+#[derive(Debug, Serialize)]
+pub struct InitTarget {
+    /// Working-tree root of the repository this folder already sits inside, if any.
+    /// `open_repo` uses `Repository::open` (not `discover`), so a subdirectory of a
+    /// repo reports as "not a repository" — without this the init prompt would be a
+    /// one-click way to bury a nested repo in someone's working tree.
+    pub enclosing_repo: Option<String>,
+}
+
+/// Inspect a folder before offering to initialize a repository in it.
+#[tauri::command]
+pub fn check_init_target(path: String) -> Result<InitTarget> {
+    let dir = std::path::Path::new(&path);
+    if !dir.is_dir() {
+        return Err(Error::InvalidArg(format!("folder does not exist: {path}")));
+    }
+
+    let enclosing_repo = git2::Repository::discover(dir).ok().map(|existing| {
+        existing
+            .workdir()
+            .unwrap_or_else(|| existing.path())
+            .display()
+            .to_string()
+    });
+
+    Ok(InitTarget { enclosing_repo })
+}
+
+/// Create a new git repository at `path`. The caller is expected to follow up
+/// with `open_repo` — this only lays down `.git/` so the open can succeed.
+///
+/// Refuses to create the folder itself, and refuses to nest inside an existing
+/// repository unless `allow_nested` is set — the UI only sets it after showing the
+/// user which repository they would be nesting inside.
+#[tauri::command]
+pub fn init_repo(path: String, allow_nested: bool) -> Result<()> {
+    let target = check_init_target(path.clone())?;
+    let dir = std::path::Path::new(&path);
+
+    if let Some(root) = target.enclosing_repo {
+        if !allow_nested {
+            return Err(Error::InvalidArg(format!(
+                "this folder is already inside the Git repository at {root}"
+            )));
+        }
+    }
+
+    git2::Repository::init(dir)?;
+    Ok(())
 }
 
 #[tauri::command]
@@ -156,4 +213,60 @@ pub fn list_refs(repo_id: String, state: State<RepoState>) -> Result<Vec<RefInfo
     }
 
     Ok(refs)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn temp_dir(prefix: &str) -> std::path::PathBuf {
+        let dir = std::env::temp_dir().join(format!("wpt_{}_{}", prefix, uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&dir).unwrap();
+        dir
+    }
+
+    #[test]
+    fn check_init_target_reports_no_enclosing_repo_for_plain_folder() {
+        let dir = temp_dir("plain");
+        let target = check_init_target(dir.display().to_string()).unwrap();
+        assert_eq!(target.enclosing_repo, None);
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn check_init_target_detects_enclosing_repo() {
+        let dir = temp_dir("outer");
+        git2::Repository::init(&dir).unwrap();
+        let nested = dir.join("sub");
+        std::fs::create_dir_all(&nested).unwrap();
+
+        let target = check_init_target(nested.display().to_string()).unwrap();
+        assert!(target.enclosing_repo.is_some(), "subdirectory must report its parent repo");
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    /// Nesting a repo inside another is only allowed after the UI has shown the user
+    /// which repository they would be nesting inside.
+    #[test]
+    fn init_repo_requires_opt_in_to_nest() {
+        let dir = temp_dir("nest");
+        git2::Repository::init(&dir).unwrap();
+        let nested = dir.join("sub");
+        std::fs::create_dir_all(&nested).unwrap();
+        let path = nested.display().to_string();
+
+        assert!(init_repo(path.clone(), false).is_err(), "must refuse by default");
+        assert!(!nested.join(".git").exists());
+
+        init_repo(path, true).unwrap();
+        assert!(nested.join(".git").exists());
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn init_repo_refuses_missing_folder() {
+        let missing = std::env::temp_dir().join(format!("wpt_missing_{}", uuid::Uuid::new_v4()));
+        assert!(init_repo(missing.display().to_string(), false).is_err());
+        assert!(!missing.exists(), "must not create the folder");
+    }
 }

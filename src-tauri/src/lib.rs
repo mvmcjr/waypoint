@@ -93,6 +93,8 @@ pub fn run() {
             is_windows,
             register_explorer_context_menu,
             commands::repo::open_repo,
+            commands::repo::init_repo,
+            commands::repo::check_init_target,
             commands::repo::list_refs,
             commands::history::walk_commits,
             commands::history::get_commit,

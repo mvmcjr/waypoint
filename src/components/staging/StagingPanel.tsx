@@ -262,7 +262,7 @@ export function StagingPanel({ repoId, onCommitSuccess, onFileClick }: Props) {
   const { data: refs = [] } = useRefs(repoId);
   // True when the HEAD commit is already present in any remote ref — amending
   // would rewrite shared history.
-  const headIsPushed = headInfo != null
+  const headIsPushed = headInfo?.oid != null
     && refs.some((r) => r.kind === "remote_branch" && r.target_oid === headInfo.oid);
 
   const staged   = files.filter((f) => f.staged !== null);
@@ -355,6 +355,7 @@ export function StagingPanel({ repoId, onCommitSuccess, onFileClick }: Props) {
       setError(null);
       try {
         const head = await ipc.getHeadInfo(repoId);
+        if (head.oid === null) throw new Error("this repository has no commits yet");
         const commit = await ipc.getCommit(repoId, head.oid);
         setSummary(commit.summary);
         setDescription(commit.body);

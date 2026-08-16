@@ -81,7 +81,8 @@ pub fn get_repo_status(repo_id: String, state: State<RepoState>) -> Result<Statu
 
 #[derive(Debug, Serialize)]
 pub struct HeadInfo {
-    pub oid: String,
+    /// HEAD commit, or None in a fresh repository where HEAD is still unborn.
+    pub oid: Option<String>,
     /// Local branch name, or None when HEAD is detached.
     pub branch: Option<String>,
 }
@@ -90,12 +91,32 @@ pub struct HeadInfo {
 pub fn get_head_info(repo_id: String, state: State<RepoState>) -> Result<HeadInfo> {
     let repos = state.0.lock().unwrap();
     let repo = repos.get(&repo_id).ok_or_else(|| Error::RepoNotFound(repo_id.clone()))?;
+    head_info(repo)
+}
 
-    let head = repo.head()?;
-    let oid = head
-        .target()
-        .ok_or_else(|| Error::InvalidArg("HEAD has no target".into()))?
-        .to_string();
+fn head_info(repo: &git2::Repository) -> Result<HeadInfo> {
+    let head = match repo.head() {
+        Ok(head) => head,
+        // A repository with no commits yet has an unborn HEAD: it still names the
+        // branch the first commit will create, but resolves to nothing. Report that
+        // instead of erroring, so the UI can show the staging view.
+        Err(e) if matches!(e.code(), git2::ErrorCode::UnbornBranch | git2::ErrorCode::NotFound) => {
+            let branch = repo
+                .find_reference("HEAD")
+                .ok()
+                .and_then(|r| r.symbolic_target().map(|t| {
+                    t.strip_prefix("refs/heads/").unwrap_or(t).to_owned()
+                }));
+            return Ok(HeadInfo { oid: None, branch });
+        }
+        Err(e) => return Err(e.into()),
+    };
+
+    let oid = Some(
+        head.target()
+            .ok_or_else(|| Error::InvalidArg("HEAD has no target".into()))?
+            .to_string(),
+    );
 
     let branch = if head.is_branch() {
         head.shorthand().map(|s| s.to_owned())
@@ -728,4 +749,59 @@ pub fn rename_branch(
         .map_err(|_| Error::InvalidArg(format!("Branch '{}' not found", old_name)))?;
     branch.rename(new, false).map_err(Error::Git)?;
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use git2::Repository;
+    use std::path::{Path, PathBuf};
+
+    fn make_temp_dir() -> PathBuf {
+        let id = uuid::Uuid::new_v4();
+        let dir = std::env::temp_dir().join(format!("wpt_head_{}", id));
+        std::fs::create_dir_all(&dir).unwrap();
+        dir
+    }
+
+    fn make_repo() -> (PathBuf, Repository) {
+        let dir = make_temp_dir();
+        let repo = Repository::init(&dir).unwrap();
+        {
+            let mut cfg = repo.config().unwrap();
+            cfg.set_str("user.name", "Test User").unwrap();
+            cfg.set_str("user.email", "test@example.com").unwrap();
+        }
+        (dir, repo)
+    }
+
+    /// A freshly initialized repo has an unborn HEAD; head_info must report the
+    /// pending branch name with no oid instead of erroring (which blanked the UI).
+    #[test]
+    fn head_info_reports_unborn_head() {
+        let (dir, repo) = make_repo();
+        let info = head_info(&repo).expect("unborn HEAD must not error");
+        assert_eq!(info.oid, None);
+        // git init writes HEAD as a symbolic ref to whatever init.defaultBranch is,
+        // so assert only that the pending branch name came through.
+        assert!(info.branch.is_some());
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn head_info_reports_branch_after_first_commit() {
+        let (dir, repo) = make_repo();
+        std::fs::write(dir.join("a.txt"), "hello").unwrap();
+        let mut index = repo.index().unwrap();
+        index.add_path(Path::new("a.txt")).unwrap();
+        index.write().unwrap();
+        let tree = repo.find_tree(index.write_tree().unwrap()).unwrap();
+        let sig = repo.signature().unwrap();
+        let oid = repo.commit(Some("HEAD"), &sig, &sig, "init", &tree, &[]).unwrap();
+
+        let info = head_info(&repo).unwrap();
+        assert_eq!(info.oid.as_deref(), Some(oid.to_string().as_str()));
+        assert!(info.branch.is_some());
+        let _ = std::fs::remove_dir_all(dir);
+    }
 }

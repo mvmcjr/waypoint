@@ -8,6 +8,7 @@ import { WelcomeScreen } from "@/routes/welcome";
 import { RepoView } from "@/routes/repo";
 import { CommandPalette } from "@/components/CommandPalette";
 import { SettingsDialog } from "@/components/SettingsDialog";
+import { InitRepoDialog } from "@/components/actions/InitRepoDialog";
 import { Toaster } from "@/components/ui/sonner";
 import { PluginRunnerProvider } from "@/components/plugins/PluginRunnerProvider";
 import { usePluginRegistry } from "@/lib/plugins/registry";
@@ -87,6 +88,7 @@ function Inner() {
       {activeTabId ? <RepoView /> : <WelcomeScreen />}
       <CommandPalette open={paletteOpen} onClose={() => setPaletteOpen(false)} />
       <SettingsDialog />
+      <InitRepoDialog />
       <Toaster position="bottom-right" richColors />
 
       <Dialog open={showConsentDialog} onOpenChange={(o) => { if (!o) handleConsentChoice(false); }}>

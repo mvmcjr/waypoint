@@ -20,6 +20,8 @@ interface AppState {
   multiSelectedOids: string[];
   searchFilter: string;
   settingsOpen: boolean;
+  /** Folder the user picked that turned out not to be a repo — prompts to run `git init`. */
+  initPromptPath: string | null;
 
   openTab: (id: string, path: string) => void;
   closeTab: (id: string) => void;
@@ -29,6 +31,7 @@ interface AppState {
   setMultiSelected: (oids: string[]) => void;
   setSearchFilter: (filter: string) => void;
   setSettingsOpen: (open: boolean) => void;
+  setInitPromptPath: (path: string | null) => void;
 }
 
 const BLANK_VIEW = { commits: [], selectedOid: null, multiSelectedOids: [], searchFilter: "" };
@@ -37,6 +40,7 @@ export const useStore = create<AppState>((set) => ({
   tabs: [],
   activeTabId: null,
   settingsOpen: false,
+  initPromptPath: null,
   ...BLANK_VIEW,
 
   openTab: (id, path) =>
@@ -73,4 +77,5 @@ export const useStore = create<AppState>((set) => ({
   setMultiSelected: (multiSelectedOids) => set({ multiSelectedOids }),
   setSearchFilter: (searchFilter) => set({ searchFilter }),
   setSettingsOpen: (settingsOpen) => set({ settingsOpen }),
+  setInitPromptPath: (initPromptPath) => set({ initPromptPath }),
 }));

@@ -126,6 +126,10 @@ export function useRefreshRepo(repoId: string | null) {
     qc.invalidateQueries({ queryKey: ["staging", repoId] });
     qc.invalidateQueries({ queryKey: ["merge-status", repoId] });
     qc.invalidateQueries({ queryKey: ["stashes", repoId] });
+    // Remotes are cached with staleTime: Infinity, so without this a remote added
+    // (or removed) while the repo is open never shows up — the Fetch/Pull/Push
+    // group stays hidden until the app restarts.
+    qc.invalidateQueries({ queryKey: ["remotes", repoId] });
     qc.invalidateQueries({ queryKey: ["workdir-diff", repoId] });
   }, [qc, repoId]);
 }

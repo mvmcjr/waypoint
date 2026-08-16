@@ -153,7 +153,9 @@ export const Timeline = forwardRef<TimelineHandle, Props>(function Timeline(
     () => commits.find((c) => c.commit.oid === headOid) ?? null,
     [commits, headOid],
   );
-  if (commits.length === 0) {
+  // A repo with no commits yet still has a WIP row to show — bailing out here would
+  // hide the only way to stage and create the first commit.
+  if (commits.length === 0 && wipOffset === 0) {
     return (
       <div className="flex-1 flex items-center justify-center text-muted-foreground text-sm">
         {searchActive ? "No matching commits." : "No commits found."}

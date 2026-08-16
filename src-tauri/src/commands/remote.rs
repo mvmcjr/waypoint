@@ -65,7 +65,9 @@ pub fn list_remotes(repo_id: String, state: State<'_, RepoState>) -> Result<Vec<
     let mut result = Vec::new();
     for name_opt in names.iter() {
         if let Some(name) = name_opt {
-            let remote = repo.find_remote(name)?;
+            // Skip a remote whose config can't be read rather than failing the whole
+            // list — one broken entry shouldn't hide Fetch/Pull/Push for the others.
+            let Ok(remote) = repo.find_remote(name) else { continue };
             result.push(RemoteInfo {
                 name: name.to_string(),
                 url: remote.url().unwrap_or("").to_string(),
