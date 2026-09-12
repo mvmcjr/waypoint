@@ -26,6 +26,7 @@ import {
   MergeDialog,
   CherryPickDialog,
   RevertDialog,
+  CheckInBranchDialog,
   PullConflictsDialog,
   PushRejectedDialog,
   RemoteErrorDialog,
@@ -66,6 +67,7 @@ type DialogState =
   | { kind: "merge"; oid: string; label: string }
   | { kind: "cherry-pick"; oid: string; summary: string }
   | { kind: "revert"; oid: string; summary: string }
+  | { kind: "check-in-branch"; oid: string; summary: string }
   | { kind: "pull-conflicts" }
   | { kind: "push-rejected"; branchName: string; remoteName: string }
   | { kind: "remote-error"; message: string }
@@ -543,6 +545,8 @@ export function RepoView() {
       setDialog({ kind: "cherry-pick", oid: action.oid, summary: action.summary });
     } else if (action.kind === "revert") {
       setDialog({ kind: "revert", oid: action.oid, summary: action.summary });
+    } else if (action.kind === "check-in-branch") {
+      setDialog({ kind: "check-in-branch", oid: action.oid, summary: action.summary });
     }
   }
 
@@ -769,6 +773,8 @@ export function RepoView() {
               selectedPath={focusedFile?.path ?? null}
               onFileClick={(file) => setFocusedFilePath(file.path)}
               onSelectCommit={handleSelectParent}
+              headBranch={head?.branch ?? null}
+              headOid={head?.oid ?? null}
             />
           )}
         </div>
@@ -875,6 +881,15 @@ export function RepoView() {
           onSuccess={handleSuccess}
           onConflicts={handleMergeConflicts}
           onLeaveStaged={() => { setDialog({ kind: "none" }); setWipSelected(true); selectCommit(null); refresh(); }}
+        />
+      )}
+      {repoId && dialog.kind === "check-in-branch" && (
+        <CheckInBranchDialog
+          repoId={repoId}
+          oid={dialog.oid}
+          summary={dialog.summary}
+          currentBranch={head?.branch ?? null}
+          onClose={() => setDialog({ kind: "none" })}
         />
       )}
       {repoId && dialog.kind === "delete-branch" && (

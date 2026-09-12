@@ -1,5 +1,6 @@
 import {
   Copy,
+  GitBranch,
   GitBranchPlus,
   Tag,
   GitMerge,
@@ -32,7 +33,8 @@ export type CommitAction =
   | { kind: "reword"; oid: string }
   | { kind: "merge"; oid: string; label: string }
   | { kind: "cherry-pick"; oid: string; summary: string }
-  | { kind: "revert"; oid: string; summary: string };
+  | { kind: "revert"; oid: string; summary: string }
+  | { kind: "check-in-branch"; oid: string; summary: string };
 
 export interface CommitMenuItemsProps {
   oid: string;
@@ -87,6 +89,16 @@ export function CommitMenuItems({
         Copy full hash
       </ContextMenuItem>
       {extraCopyItems}
+
+      <ContextMenuSeparator />
+
+      {/* ── Check if in branch ──────────────────────────────────── */}
+      <ContextMenuItem
+        onClick={() => onAction({ kind: "check-in-branch", oid, summary: commitSummary ?? short })}
+      >
+        <GitBranch />
+        Check if in branch…
+      </ContextMenuItem>
 
       <ContextMenuSeparator />
 

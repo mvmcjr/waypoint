@@ -160,6 +160,9 @@ export const ipc = {
   getCommit: (repoId: string, oid: string) =>
     invoke<CommitNode>("get_commit", { repoId, oid }),
 
+  isCommitInRef: (repoId: string, oid: string, refName: string | null) =>
+    invoke<boolean>("is_commit_in_ref", { repoId, oid, refName }),
+
   getCommitDiff: (repoId: string, oid: string) =>
     invoke<FileDiff[]>("get_commit_diff", { repoId, oid }),
 

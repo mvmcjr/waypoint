@@ -1,5 +1,5 @@
-import { useEffect, useState } from "react";
-import { TriangleAlert } from "lucide-react";
+import { useEffect, useMemo, useState } from "react";
+import { TriangleAlert, Check, X } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Textarea } from "@/components/ui/textarea";
@@ -14,11 +14,14 @@ import {
 import {
   Select,
   SelectContent,
+  SelectGroup,
   SelectItem,
+  SelectLabel,
   SelectTrigger,
   SelectValue,
 } from "@/components/ui/select";
 import { ipc, type CheckoutRemoteResult, type RemoteInfo } from "@/lib/ipc";
+import { useRefs, useCommitInRef } from "@/lib/queries";
 
 // ─── Shared helpers ────────────────────────────────────────────────────────
 
@@ -759,6 +762,122 @@ export function RevertDialog({ repoId, oid, summary, onClose, onSuccess, onConfl
           <Button onClick={run} disabled={loading}>
             {loading ? "Reverting…" : "Revert"}
           </Button>
+        </DialogFooter>
+      </DialogContent>
+    </Dialog>
+  );
+}
+
+// ─── Check if in branch ─────────────────────────────────────────────────────
+
+interface CheckInBranchProps {
+  repoId: string;
+  oid: string;
+  summary: string;
+  /** Currently checked-out branch, if any — used as the default selection. */
+  currentBranch: string | null;
+  onClose: () => void;
+}
+
+export function CheckInBranchDialog({ repoId, oid, summary, currentBranch, onClose }: CheckInBranchProps) {
+  const { data: refs } = useRefs(repoId);
+
+  const localBranches = useMemo(
+    () => (refs ?? []).filter((r) => r.kind === "local_branch"),
+    [refs],
+  );
+  const remoteBranches = useMemo(
+    () => (refs ?? []).filter((r) => r.kind === "remote_branch" && !r.shorthand.endsWith("/HEAD")),
+    [refs],
+  );
+
+  const [branch, setBranch] = useState<string | null>(null);
+
+  // Default to the current branch (if it's a local branch) once refs load,
+  // otherwise fall back to the first local branch. Only runs until a default
+  // has been picked — a later user selection is never overridden.
+  useEffect(() => {
+    if (branch !== null) return;
+    if (currentBranch && localBranches.some((r) => r.shorthand === currentBranch)) {
+      setBranch(currentBranch);
+    } else if (localBranches.length > 0) {
+      setBranch(localBranches[0].shorthand);
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [localBranches, currentBranch]);
+
+  const selectedRef = [...localBranches, ...remoteBranches].find((r) => r.shorthand === branch);
+  const tipOid = selectedRef?.target_oid ?? null;
+
+  const { data: inBranch, isLoading, error } = useCommitInRef(repoId, oid, branch, tipOid);
+
+  const hasBranches = localBranches.length > 0 || remoteBranches.length > 0;
+
+  return (
+    <Dialog open onOpenChange={(o) => !o && onClose()}>
+      <DialogContent>
+        <DialogHeader>
+          <DialogTitle>Check if in branch</DialogTitle>
+          <DialogDescription className="flex items-baseline gap-1.5 min-w-0">
+            <code className="font-mono shrink-0">{short(oid)}</code>
+            <span className="truncate">{summary}</span>
+          </DialogDescription>
+        </DialogHeader>
+
+        {hasBranches ? (
+          <Select value={branch ?? undefined} onValueChange={(v) => v !== null && setBranch(v)}>
+            <SelectTrigger className="w-full">
+              <SelectValue placeholder="Select a branch" />
+            </SelectTrigger>
+            <SelectContent>
+              {localBranches.length > 0 && (
+                <SelectGroup>
+                  <SelectLabel>Local</SelectLabel>
+                  {localBranches.map((r) => (
+                    <SelectItem key={r.name} value={r.shorthand} className="font-mono">
+                      {r.shorthand}
+                    </SelectItem>
+                  ))}
+                </SelectGroup>
+              )}
+              {remoteBranches.length > 0 && (
+                <SelectGroup>
+                  <SelectLabel>Remote</SelectLabel>
+                  {remoteBranches.map((r) => (
+                    <SelectItem key={r.name} value={r.shorthand} className="font-mono">
+                      {r.shorthand}
+                    </SelectItem>
+                  ))}
+                </SelectGroup>
+              )}
+            </SelectContent>
+          </Select>
+        ) : (
+          <p className="text-xs text-muted-foreground">No branches found.</p>
+        )}
+
+        <div aria-live="polite" className="min-h-5">
+          {!branch ? null : error ? (
+            <ErrorNote msg={String(error)} />
+          ) : isLoading || inBranch === undefined ? (
+            <p className="text-xs text-muted-foreground">Checking…</p>
+          ) : inBranch ? (
+            <p className="flex items-center gap-1.5 text-xs text-foreground">
+              <Check size={13} className="shrink-0" aria-hidden />
+              <span className="font-mono">{short(oid)}</span> is in{" "}
+              <span className="font-mono text-foreground">{branch}</span>
+            </p>
+          ) : (
+            <p className="flex items-center gap-1.5 text-xs text-muted-foreground">
+              <X size={13} className="shrink-0" aria-hidden />
+              <span className="font-mono">{short(oid)}</span> is not in{" "}
+              <span className="font-mono">{branch}</span>
+            </p>
+          )}
+        </div>
+
+        <DialogFooter>
+          <Button variant="outline" onClick={onClose}>Close</Button>
         </DialogFooter>
       </DialogContent>
     </Dialog>

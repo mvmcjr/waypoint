@@ -1,7 +1,16 @@
 import { describe, it, expect, vi, beforeEach } from "vitest";
 import { render, screen, fireEvent, waitFor, act } from "@testing-library/react";
-import { CherryPickDialog, RevertDialog, PullConflictsDialog, PushRejectedDialog, SquashDialog } from "./Dialogs";
+import {
+  CherryPickDialog,
+  RevertDialog,
+  PullConflictsDialog,
+  PushRejectedDialog,
+  SquashDialog,
+  CheckInBranchDialog,
+} from "./Dialogs";
 import { ipc } from "@/lib/ipc";
+import { useRefs, useCommitInRef } from "@/lib/queries";
+import type { RefInfo } from "@/lib/ipc";
 
 vi.mock("@/lib/ipc", () => ({
   ipc: {
@@ -15,6 +24,11 @@ vi.mock("@/lib/ipc", () => ({
     getSquashPreview: vi.fn(),
     squashCommits: vi.fn(),
   },
+}));
+
+vi.mock("@/lib/queries", () => ({
+  useRefs: vi.fn(),
+  useCommitInRef: vi.fn(),
 }));
 
 describe("Dialogs", () => {
@@ -399,6 +413,113 @@ describe("Dialogs", () => {
 
       fireEvent.click(screen.getByRole("button", { name: "Cancel" }));
       expect(mockOnClose).toHaveBeenCalled();
+    });
+  });
+
+  describe("CheckInBranchDialog", () => {
+    const REFS: RefInfo[] = [
+      { name: "refs/heads/main", shorthand: "main", kind: "local_branch", target_oid: "aaa111", is_head: true, is_pushed: true },
+      { name: "refs/heads/feature", shorthand: "feature", kind: "local_branch", target_oid: "bbb222", is_head: false, is_pushed: false },
+      { name: "refs/remotes/origin/main", shorthand: "origin/main", kind: "remote_branch", target_oid: "aaa111", is_head: false, is_pushed: false },
+      { name: "refs/remotes/origin/HEAD", shorthand: "origin/HEAD", kind: "remote_branch", target_oid: "aaa111", is_head: false, is_pushed: false },
+    ];
+
+    const defaultProps = {
+      repoId: "repo1",
+      oid: "c123456789",
+      summary: "fix login bug",
+      onClose: mockOnClose,
+    };
+
+    beforeEach(() => {
+      vi.mocked(useRefs).mockReturnValue({ data: REFS } as any);
+    });
+
+    it("renders the short hash and summary", () => {
+      vi.mocked(useCommitInRef).mockReturnValue({ data: true, isLoading: false, error: null } as any);
+      render(<CheckInBranchDialog {...defaultProps} currentBranch="main" />);
+
+      expect(screen.getByRole("heading", { name: "Check if in branch" })).toBeInTheDocument();
+      // The hash also appears in the result line below, so scope to the description.
+      const description = document.querySelector('[data-slot="dialog-description"]');
+      expect(description).toHaveTextContent("c1234567");
+      expect(description).toHaveTextContent("fix login bug");
+    });
+
+    it("defaults to the current branch when it exists locally, and queries with its tip oid", () => {
+      vi.mocked(useCommitInRef).mockReturnValue({ data: true, isLoading: false, error: null } as any);
+      render(<CheckInBranchDialog {...defaultProps} currentBranch="feature" />);
+
+      expect(useCommitInRef).toHaveBeenCalledWith("repo1", "c123456789", "feature", "bbb222");
+    });
+
+    it("defaults to the first local branch when there is no current branch", () => {
+      vi.mocked(useCommitInRef).mockReturnValue({ data: true, isLoading: false, error: null } as any);
+      render(<CheckInBranchDialog {...defaultProps} currentBranch={null} />);
+
+      expect(useCommitInRef).toHaveBeenCalledWith("repo1", "c123456789", "main", "aaa111");
+    });
+
+    it("shows a muted 'Checking…' state while the query is loading", () => {
+      vi.mocked(useCommitInRef).mockReturnValue({ data: undefined, isLoading: true, error: null } as any);
+      render(<CheckInBranchDialog {...defaultProps} currentBranch="main" />);
+
+      expect(screen.getByText("Checking…")).toBeInTheDocument();
+    });
+
+    it("shows the in-branch result", () => {
+      vi.mocked(useCommitInRef).mockReturnValue({ data: true, isLoading: false, error: null } as any);
+      render(<CheckInBranchDialog {...defaultProps} currentBranch="main" />);
+
+      expect(screen.getByText(/is in/)).toBeInTheDocument();
+    });
+
+    it("shows the not-in-branch result", () => {
+      vi.mocked(useCommitInRef).mockReturnValue({ data: false, isLoading: false, error: null } as any);
+      render(<CheckInBranchDialog {...defaultProps} currentBranch="main" />);
+
+      expect(screen.getByText(/is not in/)).toBeInTheDocument();
+    });
+
+    it("shows an error note when the query fails", () => {
+      vi.mocked(useCommitInRef).mockReturnValue({ data: undefined, isLoading: false, error: new Error("boom") } as any);
+      render(<CheckInBranchDialog {...defaultProps} currentBranch="main" />);
+
+      expect(screen.getByText("Error: boom")).toBeInTheDocument();
+    });
+
+    it("calls onClose when Close is clicked", () => {
+      vi.mocked(useCommitInRef).mockReturnValue({ data: true, isLoading: false, error: null } as any);
+      render(<CheckInBranchDialog {...defaultProps} currentBranch="main" />);
+
+      // The dialog also has a built-in "X" close button with the same "Close"
+      // accessible (sr-only) name — pick the visible footer button specifically.
+      const footerClose = screen
+        .getAllByRole("button", { name: "Close" })
+        .find((b) => b.getAttribute("data-slot") !== "dialog-close")!;
+      fireEvent.click(footerClose);
+      expect(mockOnClose).toHaveBeenCalled();
+    });
+
+    // Base UI's Select renders its options through a portal that only opens on a
+    // real pointer interaction, which is unreliable to drive in jsdom. Instead of
+    // asserting on the opened popup, we verify branch ordering/grouping indirectly:
+    // the default-selection tests above already prove locals are queried and
+    // preferred over remotes (feature/main are local_branch entries picked ahead
+    // of the remote-tracking origin/main), and this test confirms origin/HEAD
+    // (the only remote entry excluded from selection) never becomes the default
+    // even when it is first among remotes in the refs list.
+    it("never defaults to a remote-tracking */HEAD entry", () => {
+      vi.mocked(useRefs).mockReturnValue({
+        data: [
+          { name: "refs/remotes/origin/HEAD", shorthand: "origin/HEAD", kind: "remote_branch", target_oid: "aaa111", is_head: false, is_pushed: false },
+          { name: "refs/heads/main", shorthand: "main", kind: "local_branch", target_oid: "aaa111", is_head: true, is_pushed: true },
+        ],
+      } as any);
+      vi.mocked(useCommitInRef).mockReturnValue({ data: true, isLoading: false, error: null } as any);
+      render(<CheckInBranchDialog {...defaultProps} currentBranch={null} />);
+
+      expect(useCommitInRef).toHaveBeenCalledWith("repo1", "c123456789", "main", "aaa111");
     });
   });
 });

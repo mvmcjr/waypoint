@@ -1,7 +1,7 @@
 import { useState, useRef, useEffect, useMemo } from "react";
 import { format, formatDistanceToNowStrict } from "date-fns";
-import { Copy, Check, ChevronLeft, ChevronRight, RefreshCw } from "lucide-react";
-import { useCommit, useCommitDiff } from "@/lib/queries";
+import { Copy, Check, Minus, ChevronLeft, ChevronRight, RefreshCw } from "lucide-react";
+import { useCommit, useCommitDiff, useCommitInRef } from "@/lib/queries";
 import type { FileDiff, PositionedCommit } from "@/lib/ipc";
 import { useStore } from "@/lib/store";
 import { reflowCommitBody } from "@/lib/commitMessage";
@@ -18,6 +18,64 @@ interface Props {
   onFileClick?: (file: FileDiff) => void;
   /** Jump to another commit (parent chips). */
   onSelectCommit?: (oid: string) => void;
+  /** Currently checked-out branch, or null when HEAD is detached. */
+  headBranch?: string | null;
+  /** Current HEAD commit oid, or null on an unborn repo. */
+  headOid?: string | null;
+}
+
+/**
+ * Small chip reporting whether this commit is in the history of the checked-out
+ * branch (or HEAD, when detached). Renders nothing until an answer is in —
+ * there's no useful "loading" state worth a layout jump for such a small badge.
+ */
+function InBranchBadge({
+  repoId,
+  oid,
+  headBranch,
+  headOid,
+}: {
+  repoId: string;
+  oid: string;
+  headBranch: string | null;
+  headOid: string | null;
+}) {
+  const { data: inRef, error } = useCommitInRef(repoId, oid, null, headOid);
+
+  if (!headOid || error || inRef === undefined) return null;
+
+  const label = headBranch ?? "HEAD";
+  // `truncate` (text-overflow: ellipsis) has no effect on a flex container's
+  // children as a whole — it only works on the element whose own content
+  // overflows. So the chip clips via overflow-hidden + min-w-0, the icon and
+  // "in"/"not in" word stay shrink-0, and only the branch-name span truncates.
+  const base = "inline-flex items-center gap-1 h-5 px-1.5 rounded text-[10px] max-w-[9rem] min-w-0 overflow-hidden";
+
+  if (inRef) {
+    return (
+      <span
+        className={`${base} bg-white/[0.06] text-foreground/80`}
+        title={label}
+        aria-label={`This commit is in ${label}`}
+      >
+        <Check size={11} className="shrink-0" aria-hidden />
+        <span className="shrink-0">in</span>{" "}
+        <span className="font-mono truncate min-w-0">{label}</span>
+      </span>
+    );
+  }
+
+  return (
+    <span
+      className={`${base} text-muted-foreground border border-dashed border-foreground/15`}
+      title={label}
+      aria-label={`This commit is not in ${label}`}
+    >
+      <Minus size={11} className="shrink-0" aria-hidden />
+      <span className="shrink-0">not in</span>{" "}
+      <span className="font-mono truncate min-w-0">{label}</span>
+    </span>
+  );
 }
 
 function MetaRow({ label, children }: { label: string; children: React.ReactNode }) {
@@ -29,7 +87,15 @@ function MetaRow({ label, children }: { label: string; children: React.ReactNode
   );
 }
 
-export function CommitDetail({ repoId, item, selectedPath = null, onFileClick, onSelectCommit }: Props) {
+export function CommitDetail({
+  repoId,
+  item,
+  selectedPath = null,
+  onFileClick,
+  onSelectCommit,
+  headBranch = null,
+  headOid = null,
+}: Props) {
   const { commit } = item;
   const { data: diff, isLoading, error, refetch, isFetching } = useCommitDiff(repoId, commit.oid);
   // The list payload omits the body to stay lean for large repos; fetch it lazily.
@@ -100,6 +166,7 @@ export function CommitDetail({ repoId, item, selectedPath = null, onFileClick, o
             : <Copy className="size-3 shrink-0 opacity-0 group-hover:opacity-60 group-focus-visible:opacity-60 transition-opacity" aria-hidden />}
         </button>
         <span className="sr-only" aria-live="polite">{copied ? "Hash copied to clipboard" : ""}</span>
+        <InBranchBadge repoId={repoId} oid={commit.oid} headBranch={headBranch} headOid={headOid} />
         <button
           type="button"
           onClick={() => setViewPref("commitPanelCollapsed", true)}

@@ -1,13 +1,14 @@
 import { describe, it, expect, vi, beforeEach } from "vitest";
 import { render, screen, fireEvent, within } from "@testing-library/react";
 import { CommitDetail } from "./CommitDetail";
-import { useCommit, useCommitDiff } from "@/lib/queries";
+import { useCommit, useCommitDiff, useCommitInRef } from "@/lib/queries";
 import { useStore } from "@/lib/store";
 import type { FileDiff, PositionedCommit } from "@/lib/ipc";
 
 vi.mock("@/lib/queries", () => ({
   useCommit: vi.fn(),
   useCommitDiff: vi.fn(),
+  useCommitInRef: vi.fn(),
 }));
 
 // jsdom has no layout, so no scrolling APIs.
@@ -67,6 +68,9 @@ describe("CommitDetail", () => {
     vi.clearAllMocks();
     useStore.setState({ fileListView: "path", commitPanelCollapsed: false });
     vi.mocked(useCommit).mockReturnValue({ data: undefined } as unknown as ReturnType<typeof useCommit>);
+    vi.mocked(useCommitInRef).mockReturnValue(
+      { data: undefined, isLoading: false, error: null } as unknown as ReturnType<typeof useCommitInRef>,
+    );
     mockDiff({ data: FILES });
   });
 
@@ -135,5 +139,74 @@ describe("CommitDetail", () => {
     fireEvent.click(screen.getByRole("button", { name: "Collapse commit details" }));
     rerender(<CommitDetail repoId="r" item={commit({ oid: "ffffffffffffffff" })} />);
     expect(screen.getByRole("button", { name: "Expand commit details" })).toBeInTheDocument();
+  });
+});
+
+describe("CommitDetail — in-branch badge", () => {
+  beforeEach(() => {
+    vi.clearAllMocks();
+    useStore.setState({ fileListView: "path", commitPanelCollapsed: false });
+    vi.mocked(useCommit).mockReturnValue({ data: undefined } as unknown as ReturnType<typeof useCommit>);
+    mockDiff({ data: FILES });
+  });
+
+  it('shows "in {branch}" when the commit is in the checked-out branch', () => {
+    vi.mocked(useCommitInRef).mockReturnValue(
+      { data: true, isLoading: false, error: null } as unknown as ReturnType<typeof useCommitInRef>,
+    );
+    render(<CommitDetail repoId="r" item={commit()} headBranch="master" headOid="abc123" />);
+    expect(screen.getByLabelText("This commit is in master")).toHaveTextContent("in master");
+  });
+
+  it('shows "not in {branch}" when the commit is not in the checked-out branch', () => {
+    vi.mocked(useCommitInRef).mockReturnValue(
+      { data: false, isLoading: false, error: null } as unknown as ReturnType<typeof useCommitInRef>,
+    );
+    render(<CommitDetail repoId="r" item={commit()} headBranch="master" headOid="abc123" />);
+    expect(screen.getByLabelText("This commit is not in master")).toHaveTextContent("not in master");
+  });
+
+  it('labels the badge "HEAD" when HEAD is detached (no branch name)', () => {
+    vi.mocked(useCommitInRef).mockReturnValue(
+      { data: true, isLoading: false, error: null } as unknown as ReturnType<typeof useCommitInRef>,
+    );
+    render(<CommitDetail repoId="r" item={commit()} headBranch={null} headOid="abc123" />);
+    expect(screen.getByLabelText("This commit is in HEAD")).toBeInTheDocument();
+  });
+
+  it("hides the badge when headOid is null (unborn repo)", () => {
+    vi.mocked(useCommitInRef).mockReturnValue(
+      { data: true, isLoading: false, error: null } as unknown as ReturnType<typeof useCommitInRef>,
+    );
+    render(<CommitDetail repoId="r" item={commit()} headBranch="master" headOid={null} />);
+    expect(screen.queryByLabelText(/This commit is/)).not.toBeInTheDocument();
+  });
+
+  it("hides the badge while the answer is still loading", () => {
+    vi.mocked(useCommitInRef).mockReturnValue(
+      { data: undefined, isLoading: true, error: null } as unknown as ReturnType<typeof useCommitInRef>,
+    );
+    render(<CommitDetail repoId="r" item={commit()} headBranch="master" headOid="abc123" />);
+    expect(screen.queryByLabelText(/This commit is/)).not.toBeInTheDocument();
+  });
+
+  it("truncates a long branch name inside the chip, keeping the full name in the title", () => {
+    vi.mocked(useCommitInRef).mockReturnValue(
+      { data: true, isLoading: false, error: null } as unknown as ReturnType<typeof useCommitInRef>,
+    );
+    const longBranch = "feature/a-very-long-branch-name-that-should-be-truncated";
+    render(<CommitDetail repoId="r" item={commit()} headBranch={longBranch} headOid="abc123" />);
+
+    const chip = screen.getByLabelText(`This commit is in ${longBranch}`);
+    expect(chip).toHaveAttribute("title", longBranch);
+    expect(within(chip).getByText(longBranch)).toHaveClass("truncate");
+  });
+
+  it("hides the badge on error", () => {
+    vi.mocked(useCommitInRef).mockReturnValue(
+      { data: undefined, isLoading: false, error: new Error("boom") } as unknown as ReturnType<typeof useCommitInRef>,
+    );
+    render(<CommitDetail repoId="r" item={commit()} headBranch="master" headOid="abc123" />);
+    expect(screen.queryByLabelText(/This commit is/)).not.toBeInTheDocument();
   });
 });
