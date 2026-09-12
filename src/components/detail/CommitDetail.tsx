@@ -1,36 +1,59 @@
-import { useState, useRef, useEffect } from "react";
-import { format } from "date-fns";
-import { Copy, Check, ChevronLeft, ChevronRight } from "lucide-react";
+import { useState, useRef, useEffect, useMemo } from "react";
+import { format, formatDistanceToNowStrict } from "date-fns";
+import { Copy, Check, ChevronLeft, ChevronRight, RefreshCw } from "lucide-react";
 import { useCommit, useCommitDiff } from "@/lib/queries";
 import type { FileDiff, PositionedCommit } from "@/lib/ipc";
-import { DiffViewer } from "./DiffViewer";
-import { Separator } from "@/components/ui/separator";
+import { useStore } from "@/lib/store";
+import { reflowCommitBody } from "@/lib/commitMessage";
+import { CommitFileList } from "./CommitFileList";
+
+/** Short hashes are 7 characters everywhere in the app. */
+const short = (oid: string) => oid.slice(0, 7);
 
 interface Props {
   repoId: string;
   item: PositionedCommit;
+  /** Path of the file currently open in the diff panel, highlighted in the list. */
+  selectedPath?: string | null;
   onFileClick?: (file: FileDiff) => void;
+  /** Jump to another commit (parent chips). */
+  onSelectCommit?: (oid: string) => void;
 }
 
-export function CommitDetail({ repoId, item, onFileClick }: Props) {
+function MetaRow({ label, children }: { label: string; children: React.ReactNode }) {
+  return (
+    <div className="flex gap-2">
+      <dt className="w-14 shrink-0 text-muted-foreground/80">{label}</dt>
+      <dd className="min-w-0 flex-1">{children}</dd>
+    </div>
+  );
+}
+
+export function CommitDetail({ repoId, item, selectedPath = null, onFileClick, onSelectCommit }: Props) {
   const { commit } = item;
-  const { data: diff, isLoading } = useCommitDiff(repoId, commit.oid);
+  const { data: diff, isLoading, error, refetch, isFetching } = useCommitDiff(repoId, commit.oid);
   // The list payload omits the body to stay lean for large repos; fetch it lazily.
   const { data: full } = useCommit(repoId, commit.oid);
   const body = full?.body ?? commit.body;
+  const reflowed = useMemo(() => (body ? reflowCommitBody(body) : ""), [body]);
+
+  const collapsed = useStore((s) => s.commitPanelCollapsed);
+  const setViewPref = useStore((s) => s.setViewPref);
+
   const [copied, setCopied] = useState(false);
-  const [collapsed, setCollapsed] = useState(false);
   const copyTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const scrollRef = useRef<HTMLDivElement>(null);
 
   // Clear the reset-timer if the component unmounts before it fires.
   useEffect(() => () => {
     if (copyTimerRef.current !== null) clearTimeout(copyTimerRef.current);
   }, []);
 
-  // Re-expand when the user selects a different commit.
-  useEffect(() => { setCollapsed(false); }, [commit.oid]);
+  // A new commit starts at the top of the panel.
+  useEffect(() => { scrollRef.current?.scrollTo({ top: 0 }); }, [commit.oid]);
 
   const date = new Date(commit.timestamp * 1000);
+  const isMerge = commit.parent_oids.length > 1;
 
   async function copyHash() {
     try {
@@ -47,9 +70,11 @@ export function CommitDetail({ repoId, item, onFileClick }: Props) {
     return (
       <aside className="w-8 shrink-0 border-l border-border flex flex-col bg-card items-center pt-2 overflow-hidden">
         <button
-          onClick={() => setCollapsed(false)}
-          className="p-1 rounded hover:bg-white/10 text-muted-foreground hover:text-foreground transition-colors"
-          title="Expand commit detail"
+          type="button"
+          onClick={() => setViewPref("commitPanelCollapsed", false)}
+          className="p-1 rounded-md hover:bg-white/[0.07] text-muted-foreground hover:text-foreground transition-colors"
+          aria-label="Expand commit details"
+          title="Expand commit details"
         >
           <ChevronLeft size={14} />
         </button>
@@ -58,76 +83,118 @@ export function CommitDetail({ repoId, item, onFileClick }: Props) {
   }
 
   return (
-    <aside className="w-80 shrink-0 border-l border-border flex flex-col bg-card overflow-hidden">
+    <aside className="w-80 shrink-0 border-l border-border flex flex-col bg-card overflow-hidden" aria-label="Commit details">
       {/* Header */}
-      <div className="px-3 py-2 border-b border-border flex items-center justify-between">
-        <span className="text-xs font-semibold text-muted-foreground uppercase tracking-wider">Commit</span>
+      <div className="shrink-0 h-9 px-3 border-b border-border flex items-center gap-2">
+        <h2 className="text-[10px] font-semibold text-muted-foreground uppercase tracking-[0.12em]">Commit</h2>
         <button
-          onClick={() => setCollapsed(true)}
-          className="p-0.5 rounded hover:bg-white/10 text-muted-foreground hover:text-foreground transition-colors"
-          title="Collapse"
+          type="button"
+          onClick={copyHash}
+          title={`Copy full hash ${commit.oid}`}
+          aria-label={copied ? "Hash copied" : `Copy full hash ${commit.oid}`}
+          className="group flex items-center gap-1 rounded px-1 -mx-0.5 font-mono text-[11px] text-foreground/70 hover:text-foreground hover:bg-white/[0.07] transition-colors"
+        >
+          {short(commit.oid)}
+          {copied
+            ? <Check className="size-3 shrink-0 text-foreground" aria-hidden />
+            : <Copy className="size-3 shrink-0 opacity-0 group-hover:opacity-60 group-focus-visible:opacity-60 transition-opacity" aria-hidden />}
+        </button>
+        <span className="sr-only" aria-live="polite">{copied ? "Hash copied to clipboard" : ""}</span>
+        <button
+          type="button"
+          onClick={() => setViewPref("commitPanelCollapsed", true)}
+          className="ml-auto p-0.5 rounded-md hover:bg-white/[0.07] text-muted-foreground hover:text-foreground transition-colors"
+          aria-label="Collapse commit details"
+          title="Collapse commit details"
         >
           <ChevronRight size={14} />
         </button>
       </div>
 
-      {/* Meta */}
-      <div className="p-3 space-y-2 text-sm shrink-0">
-        <p className="font-medium text-foreground leading-snug">{commit.summary}</p>
-        {body && (
-          <p className="text-xs text-muted-foreground leading-relaxed whitespace-pre-wrap break-words max-h-40 overflow-y-auto">
-            {body}
-          </p>
-        )}
-        <Separator />
-        <div className="space-y-1 text-xs text-muted-foreground">
-          <div className="flex gap-2 items-center">
-            <span className="w-14 shrink-0 font-semibold text-foreground/60">Hash</span>
+      {/* One scroll for message, metadata, and files — no nested scroll boxes. */}
+      <div ref={scrollRef} className="relative flex-1 min-h-0 overflow-y-auto">
+        <div className="px-3 pt-3 pb-3 space-y-3">
+          <div className="space-y-2">
+            <p className="text-[13px] font-medium text-foreground leading-snug break-words">{commit.summary}</p>
+            {reflowed && (
+              <p className="text-xs text-muted-foreground leading-relaxed whitespace-pre-wrap break-words">
+                {reflowed}
+              </p>
+            )}
+          </div>
+
+          <dl className="space-y-1.5 text-xs text-foreground/80">
+            <MetaRow label="Author">
+              <div className="truncate">{commit.author_name}</div>
+              <div className="truncate text-[11px] text-muted-foreground" title={commit.author_email}>
+                {commit.author_email}
+              </div>
+            </MetaRow>
+            <MetaRow label="Date">
+              <span className="tabular-nums" title={format(date, "PPpp")}>
+                {format(date, "PP, p")}
+              </span>
+              <span className="text-muted-foreground"> · {formatDistanceToNowStrict(date, { addSuffix: true })}</span>
+            </MetaRow>
+            <MetaRow label={commit.parent_oids.length > 1 ? "Parents" : "Parent"}>
+              {commit.parent_oids.length === 0 ? (
+                <span className="text-muted-foreground">None — root commit</span>
+              ) : (
+                <span className="flex flex-wrap gap-1">
+                  {commit.parent_oids.map((p) => (
+                    <button
+                      key={p}
+                      type="button"
+                      onClick={() => onSelectCommit?.(p)}
+                      disabled={!onSelectCommit}
+                      title={`Go to parent ${p}`}
+                      aria-label={`Go to parent commit ${short(p)}`}
+                      className="rounded px-1 -mx-0.5 font-mono text-[11px] text-foreground/70 hover:text-foreground hover:bg-white/[0.07] transition-colors disabled:pointer-events-none"
+                    >
+                      {short(p)}
+                    </button>
+                  ))}
+                </span>
+              )}
+            </MetaRow>
+          </dl>
+        </div>
+
+        {isLoading ? (
+          <p className="border-t border-border px-3 py-3 text-xs text-muted-foreground">Loading changes…</p>
+        ) : error ? (
+          <div className="border-t border-border px-3 py-3 space-y-2" role="alert">
+            <p className="text-xs text-foreground/80">Couldn't load this commit's changes.</p>
+            <p className="text-[11px] text-muted-foreground break-words">{String(error)}</p>
             <button
-              onClick={copyHash}
-              title="Copy full hash"
-              className="flex items-center gap-1 font-mono truncate rounded px-1 -mx-1 hover:bg-muted transition-colors cursor-pointer group"
+              type="button"
+              onClick={() => refetch()}
+              disabled={isFetching}
+              className="flex items-center gap-1 rounded-md border border-input bg-white/[0.033] px-2 h-6 text-xs text-foreground hover:bg-white/[0.055] active:translate-y-px disabled:opacity-50 transition-colors"
             >
-              <span className="truncate">{commit.oid.slice(0, 12)}</span>
-              {copied
-                ? <Check className="size-3 shrink-0 text-green-500" />
-                : <Copy className="size-3 shrink-0 opacity-0 group-hover:opacity-60 transition-opacity" />
-              }
+              <RefreshCw size={11} className={isFetching ? "animate-spin" : ""} aria-hidden />
+              Retry
             </button>
           </div>
-          <div className="flex gap-2">
-            <span className="w-14 shrink-0 font-semibold text-foreground/60">Author</span>
-            <span className="truncate">{commit.author_name}</span>
-          </div>
-          <div className="flex gap-2">
-            <span className="w-14 shrink-0 font-semibold text-foreground/60">Email</span>
-            <span className="truncate">{commit.author_email}</span>
-          </div>
-          <div className="flex gap-2">
-            <span className="w-14 shrink-0 font-semibold text-foreground/60">Date</span>
-            <span>{format(date, "PPpp")}</span>
-          </div>
-          {commit.parent_oids.length > 0 && (
-            <div className="flex gap-2">
-              <span className="w-14 shrink-0 font-semibold text-foreground/60">Parents</span>
-              <span className="font-mono truncate">
-                {commit.parent_oids.map((p) => p.slice(0, 8)).join(", ")}
-              </span>
-            </div>
-          )}
-        </div>
+        ) : diff && diff.length === 0 ? (
+          <p className="border-t border-border px-3 py-3 text-xs text-muted-foreground">
+            {commit.parent_oids.length === 0 ? "This commit adds no files." : "No file changes — an empty commit."}
+          </p>
+        ) : diff ? (
+          <CommitFileList
+            files={diff}
+            scrollRef={scrollRef}
+            selectedPath={selectedPath}
+            onFileClick={onFileClick}
+            note={isMerge ? (
+              <p className="px-3 pt-2 text-[11px] text-muted-foreground">
+                Merge commit — changes shown against the first parent,{" "}
+                <span className="font-mono">{short(commit.parent_oids[0])}</span>.
+              </p>
+            ) : undefined}
+          />
+        ) : null}
       </div>
-
-      <Separator />
-
-      {/* Diff */}
-      {isLoading ? (
-        <div className="flex-1 flex items-center justify-center text-xs text-muted-foreground">
-          Loading diff…
-        </div>
-      ) : (
-        diff && <DiffViewer files={diff} onFileClick={onFileClick} />
-      )}
     </aside>
   );
 }

@@ -33,6 +33,7 @@ vi.mock("@/lib/store", () => ({
 }));
 
 vi.mock("@/lib/queries", () => ({
+  useCommitDiff: vi.fn(() => ({ data: undefined })),
   useCommits: vi.fn(),
   useFileStatus: vi.fn(),
   useHeadInfo: vi.fn(),

@@ -39,6 +39,10 @@
     --color-card: var(--card);
     --color-foreground: var(--foreground);
     --color-background: var(--background);
+    --color-diff-add: var(--diff-add);
+    --color-diff-add-bg: var(--diff-add-bg);
+    --color-diff-del: var(--diff-del);
+    --color-diff-del-bg: var(--diff-del-bg);
     --radius-sm: calc(var(--radius) * 0.6);
     --radius-md: calc(var(--radius) * 0.8);
     --radius-lg: var(--radius);
@@ -81,6 +85,11 @@
     --sidebar-accent-foreground: oklch(0.205 0 0);
     --sidebar-border: oklch(0.922 0 0);
     --sidebar-ring: oklch(0.708 0 0);
+    /* Diff lines: text over a 10% fill. Same in both themes — the app is dark-only. */
+    --diff-add: oklch(87.1% 0.15 154.449);
+    --diff-add-bg: oklch(72.3% 0.219 149.579 / 10%);
+    --diff-del: oklch(80.8% 0.114 19.571);
+    --diff-del-bg: oklch(63.7% 0.237 25.331 / 10%);
 }
 
 .dark {

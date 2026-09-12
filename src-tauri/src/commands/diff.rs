@@ -36,10 +36,19 @@ fn collect_diff(diff: git2::Diff) -> Result<Vec<FileDiff>> {
                 _ => DiffStatus::Other,
             };
 
-            files.borrow_mut().push(FileDiff { path, old_path, status, hunks: Vec::new() });
+            let binary = delta.flags().is_binary();
+            files.borrow_mut().push(FileDiff { path, old_path, status, binary, hunks: Vec::new() });
             true
         },
-        None,
+        // Fires for every delta libgit2 classifies as binary — including ones whose
+        // BINARY flag wasn't set yet when the file callback ran (detection can need
+        // the content, which is loaded after that callback).
+        Some(&mut |_delta, _binary| {
+            if let Some(file) = files.borrow_mut().last_mut() {
+                file.binary = true;
+            }
+            true
+        }),
         Some(&mut |_delta, hunk| {
             let header = String::from_utf8_lossy(hunk.header()).to_string();
             if let Some(file) = files.borrow_mut().last_mut() {
@@ -84,6 +93,8 @@ pub struct FileDiff {
     pub path: String,
     pub old_path: Option<String>,
     pub status: DiffStatus,
+    /// libgit2 classified the content as binary — no hunks, no text diff.
+    pub binary: bool,
     pub hunks: Vec<Hunk>,
 }
 
@@ -488,7 +499,8 @@ fn collect_single_hunk(diff: git2::Diff, target_hunk_index: usize) -> Result<Opt
                 git2::Delta::Copied => DiffStatus::Copied,
                 _ => DiffStatus::Other,
             };
-            *file.borrow_mut() = Some(FileDiff { path, old_path, status, hunks: Vec::new() });
+            let binary = delta.flags().is_binary();
+            *file.borrow_mut() = Some(FileDiff { path, old_path, status, binary, hunks: Vec::new() });
             true
         },
         None,
@@ -997,6 +1009,33 @@ mod tests {
 
         let staged = read_index_content(&repo, "file.txt");
         assert_eq!(staged, "a\nb\nB\nc");
+    }
+
+    #[test]
+    fn collect_diff_flags_binary_files() {
+        let (_dir, repo) = make_repo();
+        write_commit(&repo, "text.txt", "one\n", "initial");
+        let workdir = repo.workdir().unwrap().to_path_buf();
+        std::fs::write(workdir.join("text.txt"), "one\ntwo\n").unwrap();
+        std::fs::write(workdir.join("image.bin"), [0u8, 159, 146, 150, 0, 1, 2]).unwrap();
+        let mut index = repo.index().unwrap();
+        index.add_path(Path::new("text.txt")).unwrap();
+        index.add_path(Path::new("image.bin")).unwrap();
+        index.write().unwrap();
+        let tree = repo.find_tree(index.write_tree().unwrap()).unwrap();
+        let sig = repo.signature().unwrap();
+        let parent = repo.head().unwrap().peel_to_commit().unwrap();
+        let oid = repo.commit(Some("HEAD"), &sig, &sig, "add binary", &tree, &[&parent]).unwrap();
+
+        let (commit_tree, parent_tree) = commit_and_parent_tree(&repo, &oid.to_string()).unwrap();
+        let files = collect_diff(repo.diff_tree_to_tree(parent_tree.as_ref(), Some(&commit_tree), None).unwrap()).unwrap();
+
+        let bin = files.iter().find(|f| f.path == "image.bin").unwrap();
+        assert!(bin.binary, "NUL-containing file should be flagged binary");
+        assert!(bin.hunks.is_empty());
+        let text = files.iter().find(|f| f.path == "text.txt").unwrap();
+        assert!(!text.binary);
+        assert_eq!(text.hunks.len(), 1);
     }
 
     #[test]

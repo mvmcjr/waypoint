@@ -1,4 +1,4 @@
-// Generic file-tree builder shared by DiffViewer and StagingPanel.
+// Generic file-tree builder shared by the commit file list and StagingPanel.
 // T only needs a `path` field; the rest of the payload is preserved on leaf nodes.
 
 export type FileNode<T> = { kind: "file"; file: T };
@@ -50,4 +50,28 @@ export function collectDirPaths<T>(nodes: TreeNode<T>[]): string[] {
   }
   collect(nodes);
   return paths;
+}
+
+/** Every ancestor directory path of a file path: "a/b/c.ts" → ["a", "a/b"]. */
+export function ancestorDirs(path: string): string[] {
+  const parts = path.split("/").slice(0, -1);
+  return parts.map((_, i) => parts.slice(0, i + 1).join("/"));
+}
+
+/**
+ * Files in the order a file list displays them: as given in "path" view,
+ * depth-first (dirs before files) in "tree" view. Prev/next file navigation
+ * walks this order so it matches what the user sees.
+ */
+export function orderFiles<T extends { path: string }>(files: T[], view: "path" | "tree" | undefined): T[] {
+  if (view !== "tree") return files;
+  const out: T[] = [];
+  function walk(nodes: TreeNode<T>[]) {
+    for (const n of nodes) {
+      if (n.kind === "file") out.push(n.file);
+      else walk(n.children);
+    }
+  }
+  walk(buildFileTree(files));
+  return out;
 }
