@@ -94,11 +94,9 @@ function mockStoreFor(repoId: string) {
     commits: [],
     selectedOid: null,
     multiSelectedOids: [],
-    searchFilter: "",
     setCommits: vi.fn(),
     selectCommit: mockSelectCommit,
     setMultiSelected: vi.fn(),
-    setSearchFilter: vi.fn(),
   } as any);
 }
 
