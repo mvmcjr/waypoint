@@ -16,7 +16,6 @@ function seed() {
     activeTabId: REPO1,
     commits: [fakeCommit],
     selectedOid: "abc123",
-    searchFilter: "query",
     settingsOpen: false,
   });
 }
@@ -24,7 +23,7 @@ function seed() {
 describe("useStore – switchTab", () => {
   beforeEach(seed);
 
-  it("is a no-op when target is already the active tab (commits/selectedOid/searchFilter preserved)", () => {
+  it("is a no-op when target is already the active tab (commits/selectedOid preserved)", () => {
     useStore.getState().switchTab(REPO1);
 
     const s = useStore.getState();
@@ -32,7 +31,6 @@ describe("useStore – switchTab", () => {
     // BLANK_VIEW must NOT have been applied
     expect(s.commits).toHaveLength(1);
     expect(s.selectedOid).toBe("abc123");
-    expect(s.searchFilter).toBe("query");
   });
 
   it("resets BLANK_VIEW when switching to a different tab", () => {
@@ -42,7 +40,6 @@ describe("useStore – switchTab", () => {
     expect(s.activeTabId).toBe(REPO2);
     expect(s.commits).toHaveLength(0);
     expect(s.selectedOid).toBeNull();
-    expect(s.searchFilter).toBe("");
   });
 });
 

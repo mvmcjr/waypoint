@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useRef, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { getCurrentWindow } from "@tauri-apps/api/window";
 import { listen } from "@tauri-apps/api/event";
 import { useStore } from "@/lib/store";
@@ -11,7 +11,7 @@ import { FileDiffPanel } from "@/components/detail/FileDiffPanel";
 import { StagingFileDiffPanel } from "@/components/detail/StagingFileDiffPanel";
 import { StagingPanel } from "@/components/staging/StagingPanel";
 import { ConflictPanel, MergeCommitPanel } from "@/components/staging/ConflictPanel";
-import { Input } from "@/components/ui/input";
+import { GoToCommit } from "@/components/timeline/GoToCommit";
 import {
   CheckoutCommitDialog,
   CheckoutBranchDialog,
@@ -76,7 +76,7 @@ type DialogState =
 // ─── Main view ─────────────────────────────────────────────────────────────
 
 export function RepoView() {
-  const { activeTabId: repoId, commits, selectedOid, multiSelectedOids, searchFilter, fileListView, setCommits, selectCommit, setMultiSelected, setSearchFilter } =
+  const { activeTabId: repoId, commits, selectedOid, multiSelectedOids, fileListView, setCommits, selectCommit, setMultiSelected } =
     useStore();
   // Anchor commit for shift-click range selection (oid of the last plain/ctrl click).
   const selectionAnchorRef = useRef<string | null>(null);
@@ -90,6 +90,14 @@ export function RepoView() {
   const refresh = useRefreshRepo(repoId);
 
   const timelineRef = useRef<TimelineHandle>(null);
+  // "Go to commit" find state — which oids currently match (null = no active query)
+  // and the tokens to highlight, both reported up by GoToCommit.
+  const [matchOids, setMatchOids] = useState<Set<string> | null>(null);
+  const [matchTokens, setMatchTokens] = useState<string[]>([]);
+  const handleMatchesChange = useCallback((r: { matchOids: Set<string> | null; tokens: string[] }) => {
+    setMatchOids(r.matchOids);
+    setMatchTokens(r.tokens);
+  }, []);
 
   // Always up-to-date ref for the active repo — lets in-flight async handlers
   // detect that the user has switched away and skip stale setDialog() calls.
@@ -254,6 +262,8 @@ export function RepoView() {
     setIsFetching(false);
     setIsPulling(false);
     setIsPushing(false);
+    setMatchOids(null);
+    setMatchTokens([]);
     wasWorkingDirDirtyRef.current = false;
   }, [repoId]);
 
@@ -399,7 +409,7 @@ export function RepoView() {
 
     // Shift-click: select the contiguous range from the anchor to this commit.
     if (mods.shift && selectionAnchorRef.current) {
-      const order = filteredCommits.map((c) => c.commit.oid);
+      const order = commits.map((c) => c.commit.oid);
       const a = order.indexOf(selectionAnchorRef.current);
       const b = order.indexOf(oid);
       if (a !== -1 && b !== -1) {
@@ -445,21 +455,9 @@ export function RepoView() {
     selectCommit(null);
   }
 
-  const filteredCommits = useMemo(() => {
-    const q = searchFilter.trim().toLowerCase();
-    if (!q) return commits;
-    return commits.filter(
-      (c) =>
-        c.commit.summary.toLowerCase().includes(q) ||
-        c.commit.author_name.toLowerCase().includes(q) ||
-        c.commit.author_email.toLowerCase().includes(q) ||
-        c.commit.oid.startsWith(q)
-    );
-  }, [commits, searchFilter]);
-
   const selectedItem = useMemo(
-    () => filteredCommits.find((c) => c.commit.oid === selectedOid) ?? null,
-    [filteredCommits, selectedOid],
+    () => commits.find((c) => c.commit.oid === selectedOid) ?? null,
+    [commits, selectedOid],
   );
 
   // Same query key as CommitDetail's list — served from cache, not refetched.
@@ -479,6 +477,15 @@ export function RepoView() {
     handleSelectCommit(ref.target_oid, { ctrl: false, shift: false });
     // Defer scroll until after React re-renders the selection
     setTimeout(() => timelineRef.current?.scrollToOid(ref.target_oid!), 0);
+  }
+
+  // "Go to commit" (GoToCommit) — navigating a match selects it for real, same
+  // as clicking it, so the detail panel and graph's selected dot both follow.
+  function handleGoToCommit(oid: string) {
+    handleSelectCommit(oid, { ctrl: false, shift: false });
+    // Selecting can close an open diff panel and remount the timeline — defer
+    // the scroll until after that re-render (same pattern as handleRefSelect).
+    setTimeout(() => timelineRef.current?.scrollToOid(oid), 0);
   }
 
   function handleRefAction(action: RefAction) {
@@ -585,7 +592,6 @@ export function RepoView() {
     refresh();
   }
 
-  const searchActive = searchFilter.trim().length > 0;
   const mergeInProgress = !!status?.merge_in_progress;
   const hasRemotes = (remotes?.length ?? 0) > 0;
 
@@ -614,11 +620,12 @@ export function RepoView() {
             )}
           </span>
 
-          <Input
-            className="h-7 text-xs max-w-64"
-            placeholder="Search by message, author, or hash…"
-            value={searchFilter}
-            onChange={(e) => setSearchFilter(e.target.value)}
+          <GoToCommit
+            key={repoId ?? "none"}
+            commits={commits}
+            selectedOid={selectedOid}
+            onGo={handleGoToCommit}
+            onMatchesChange={handleMatchesChange}
           />
 
           {isLoading && (
@@ -681,11 +688,7 @@ export function RepoView() {
             ))}
             {toolbarCmds.length > 0 && <div className="w-px h-3.5 bg-border mx-0.5" />}
             <span className="text-xs text-muted-foreground">
-              {searchActive
-                ? `${filteredCommits.length} / ${commits.length} commits`
-                : commits.length > 0
-                ? `${commits.length} commits`
-                : null}
+              {commits.length > 0 ? `${commits.length} commits` : null}
             </span>
           </div>
         </header>
@@ -729,7 +732,7 @@ export function RepoView() {
             <Timeline
               ref={timelineRef}
               repoId={repoId}
-              commits={filteredCommits}
+              commits={commits}
               selectedOid={selectedOid}
               multiSelectedOids={multiSelectedOids}
               headOid={head?.oid ?? null}
@@ -739,7 +742,8 @@ export function RepoView() {
               onRefAction={handleRefAction}
               onWipClick={handleWipClick}
               wipSelected={wipSelected}
-              searchActive={searchActive}
+              matchOids={matchOids}
+              highlightTokens={matchTokens}
             />
           )}
 

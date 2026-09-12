@@ -56,7 +56,6 @@ interface AppState extends ViewPrefs {
   selectedOid: string | null;
   /** Multi-selection for range operations (e.g. squash). Always contains selectedOid when non-empty. */
   multiSelectedOids: string[];
-  searchFilter: string;
   settingsOpen: boolean;
   /** Folder the user picked that turned out not to be a repo — prompts to run `git init`. */
   initPromptPath: string | null;
@@ -67,13 +66,12 @@ interface AppState extends ViewPrefs {
   setCommits: (commits: PositionedCommit[]) => void;
   selectCommit: (oid: string | null) => void;
   setMultiSelected: (oids: string[]) => void;
-  setSearchFilter: (filter: string) => void;
   setSettingsOpen: (open: boolean) => void;
   setInitPromptPath: (path: string | null) => void;
   setViewPref: <K extends keyof ViewPrefs>(key: K, value: ViewPrefs[K]) => void;
 }
 
-const BLANK_VIEW = { commits: [], selectedOid: null, multiSelectedOids: [], searchFilter: "" };
+const BLANK_VIEW = { commits: [], selectedOid: null, multiSelectedOids: [] };
 
 export const useStore = create<AppState>((set) => ({
   tabs: [],
@@ -115,7 +113,6 @@ export const useStore = create<AppState>((set) => ({
   selectCommit: (selectedOid) =>
     set({ selectedOid, multiSelectedOids: selectedOid ? [selectedOid] : [] }),
   setMultiSelected: (multiSelectedOids) => set({ multiSelectedOids }),
-  setSearchFilter: (searchFilter) => set({ searchFilter }),
   setSettingsOpen: (settingsOpen) => set({ settingsOpen }),
   setInitPromptPath: (initPromptPath) => set({ initPromptPath }),
   setViewPref: (key, value) =>

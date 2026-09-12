@@ -1,8 +1,27 @@
 import { describe, it, expect, vi, beforeEach } from "vitest";
 import { render, screen, fireEvent } from "@testing-library/react";
 import { Timeline } from "./Timeline";
+import { CommitRow } from "./CommitRow";
 import { useRepoStatus, useRefs, useStashes } from "@/lib/queries";
 import type { PositionedCommit } from "@/lib/ipc";
+
+// jsdom has no ResizeObserver — a minimal mock that fires synchronously with a
+// fixed track height lets the match-tick-strip tests compute exact pixel math.
+const RESIZE_OBSERVER_HEIGHT = 10;
+class MockResizeObserver {
+  #callback: ResizeObserverCallback;
+  constructor(callback: ResizeObserverCallback) {
+    this.#callback = callback;
+  }
+  observe() {
+    this.#callback(
+      [{ contentRect: { height: RESIZE_OBSERVER_HEIGHT } } as ResizeObserverEntry],
+      this as unknown as ResizeObserver,
+    );
+  }
+  unobserve() {}
+  disconnect() {}
+}
 
 // Mock the queries
 vi.mock("@/lib/queries", () => ({
@@ -90,7 +109,6 @@ describe("Timeline", () => {
     onCommitAction: mockOnCommitAction,
     onWipClick: mockOnWipClick,
     wipSelected: false,
-    searchActive: false,
   };
 
   beforeEach(() => {
@@ -109,16 +127,13 @@ describe("Timeline", () => {
         store[key] = value;
       },
     });
+
+    vi.stubGlobal("ResizeObserver", MockResizeObserver);
   });
 
   it("renders empty state when there are no commits", () => {
     render(<Timeline {...defaultProps} commits={[]} />);
     expect(screen.getByText("No commits found.")).toBeInTheDocument();
-  });
-
-  it("renders empty state for search when active and no commits", () => {
-    render(<Timeline {...defaultProps} commits={[]} searchActive={true} />);
-    expect(screen.getByText("No matching commits.")).toBeInTheDocument();
   });
 
   it("renders virtualized commit rows", () => {
@@ -134,14 +149,9 @@ describe("Timeline", () => {
     expect(mockOnSelectOid).toHaveBeenCalledWith("c1", { ctrl: false, shift: false });
   });
 
-  it("renders the GraphLayer when search is inactive", () => {
+  it("renders the GraphLayer", () => {
     render(<Timeline {...defaultProps} />);
     expect(screen.getByTestId("graph-layer")).toBeInTheDocument();
-  });
-
-  it("hides the GraphLayer when search is active", () => {
-    render(<Timeline {...defaultProps} searchActive={true} />);
-    expect(screen.queryByTestId("graph-layer")).not.toBeInTheDocument();
   });
 
   it("calculates graph width considering edge routing, not just commit lanes", () => {
@@ -182,15 +192,6 @@ describe("Timeline", () => {
       expect(screen.getByTestId("wip-row")).toBeInTheDocument();
     });
 
-    it("hides WIP row when search is active even if dirty", () => {
-      vi.mocked(useRepoStatus).mockReturnValue({
-        data: { staged_count: 1, unstaged_count: 0, merge_in_progress: false },
-      } as any);
-      
-      render(<Timeline {...defaultProps} searchActive={true} />);
-      expect(screen.queryByTestId("wip-row")).not.toBeInTheDocument();
-    });
-
     it("calls onWipClick when WIP row is clicked", () => {
       vi.mocked(useRepoStatus).mockReturnValue({
         data: { staged_count: 1, unstaged_count: 0, merge_in_progress: false },
@@ -209,12 +210,6 @@ describe("Timeline", () => {
       expect(splitters).toHaveLength(2);
     });
 
-    it("renders only one column splitter when search is active", () => {
-      render(<Timeline {...defaultProps} searchActive={true} />);
-      const splitters = screen.getAllByRole("separator");
-      expect(splitters).toHaveLength(1);
-    });
-
     it("handles dragging the refs splitter", () => {
       render(<Timeline {...defaultProps} />);
       const splitters = screen.getAllByRole("separator");
@@ -230,6 +225,72 @@ describe("Timeline", () => {
       // Mouseup
       fireEvent.mouseUp(window);
       expect(document.body.style.cursor).toBe("");
+    });
+  });
+
+  describe("Find (go to commit)", () => {
+    const c1: PositionedCommit = dummyCommit; // oid "c1", summary "First commit"
+    const c2: PositionedCommit = {
+      ...dummyCommit,
+      commit: { ...dummyCommit.commit, oid: "c2", summary: "Second commit" },
+    };
+
+    function propsPassedTo(oid: string) {
+      const call = vi.mocked(CommitRow).mock.calls.find(([p]: any) => p.item.commit.oid === oid);
+      return call?.[0] as any;
+    }
+
+    it("dims non-matching rows and passes highlight tokens only to matching rows", () => {
+      render(
+        <Timeline {...defaultProps} commits={[c1, c2]} matchOids={new Set(["c1"])} highlightTokens={["first"]} />,
+      );
+      expect(propsPassedTo("c1").isDimmed).toBe(false);
+      expect(propsPassedTo("c1").highlightTokens).toEqual(["first"]);
+      expect(propsPassedTo("c2").isDimmed).toBe(true);
+      expect(propsPassedTo("c2").highlightTokens).toEqual([]);
+    });
+
+    it("dims nothing and highlights nothing when there is no active query (matchOids is null)", () => {
+      render(<Timeline {...defaultProps} commits={[c1, c2]} matchOids={null} />);
+      expect(propsPassedTo("c1").isDimmed).toBe(false);
+      expect(propsPassedTo("c2").isDimmed).toBe(false);
+    });
+
+    it("renders no tick strip when there is no active query", () => {
+      render(<Timeline {...defaultProps} commits={[c1, c2]} matchOids={null} />);
+      expect(screen.queryByTestId("match-tick-strip")).not.toBeInTheDocument();
+    });
+
+    it("renders one tick per matching row, deduped by rounded pixel position", () => {
+      // 100 rows over a 10px track: rows 0-3 all round to pixel 0 (collapse into
+      // one tick); row 90 rounds to pixel 9 (a separate tick).
+      const commits = Array.from({ length: 100 }, (_, i) => ({
+        ...dummyCommit,
+        row: i,
+        commit: { ...dummyCommit.commit, oid: `c${i}` },
+      }));
+      const matchOids = new Set(["c0", "c1", "c2", "c3", "c90"]);
+      render(<Timeline {...defaultProps} commits={commits} headOid={null} matchOids={matchOids} />);
+
+      const ticks = screen.getAllByTestId("match-tick");
+      expect(ticks).toHaveLength(2);
+    });
+
+    it("marks the tick covering the selected commit as selected (bg-foreground)", () => {
+      const commits = Array.from({ length: 100 }, (_, i) => ({
+        ...dummyCommit,
+        row: i,
+        commit: { ...dummyCommit.commit, oid: `c${i}` },
+      }));
+      const matchOids = new Set(["c0", "c1", "c90"]);
+      render(
+        <Timeline {...defaultProps} commits={commits} headOid={null} selectedOid="c1" matchOids={matchOids} />,
+      );
+
+      const ticks = screen.getAllByTestId("match-tick");
+      expect(ticks).toHaveLength(2);
+      expect(ticks.some((t) => t.classList.contains("bg-foreground"))).toBe(true);
+      expect(ticks.some((t) => t.classList.contains("bg-foreground/45"))).toBe(true);
     });
   });
 });

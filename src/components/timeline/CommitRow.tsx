@@ -7,6 +7,7 @@ import { ROW_HEIGHT } from "./GraphLayer";
 import type { CommitAction } from "./CommitContextMenu";
 import { HoverCard, HoverCardTrigger, HoverCardContent } from "@/components/ui/hover-card";
 import { stashLabel } from "@/lib/utils";
+import { splitHighlights } from "@/lib/commitSearch";
 
 interface Props {
   item: PositionedCommit;
@@ -21,12 +22,54 @@ interface Props {
   isStash?: boolean;
   /** For stash rows: the reflog-derived name (reflects renames; commit.summary does not). */
   stashName?: string;
+  /** True while a "go to commit" find is active and this row is NOT a match — dims it. */
+  isDimmed?: boolean;
+  /** Query tokens to highlight in this row (only passed for matching rows — keeps memo effective on the rest). */
+  highlightTokens?: string[];
   onRefAction?: (action: RefAction) => void;
   onCommitAction?: (action: CommitAction) => void;
   onSelect: (oid: string, mods: { ctrl: boolean; shift: boolean }) => void;
 }
 
-export const CommitRow = memo(function CommitRow({ item, refsWidth, graphWidth, isSelected, isContextTarget, isHead, headBranch, pushedTagNames, isStash, stashName, onRefAction, onCommitAction, onSelect }: Props) {
+/** Renders text with <mark> runs around each matched token (see splitHighlights). */
+function Highlighted({ text, tokens }: { text: string; tokens?: string[] }) {
+  if (!tokens || tokens.length === 0) return <>{text}</>;
+  return (
+    <>
+      {splitHighlights(text, tokens).map((seg, i) =>
+        seg.match ? (
+          <mark key={i} className="bg-white/[0.14] text-foreground rounded-[2px]">
+            {seg.text}
+          </mark>
+        ) : (
+          <span key={i}>{seg.text}</span>
+        ),
+      )}
+    </>
+  );
+}
+
+// Oids only match by prefix, and only for tokens >=4 chars (see commitSearch's
+// MIN_OID_TOKEN_LEN) — highlighting the short hash must follow the same rule,
+// not generic substring matching, or e.g. "de" would light up mid-hash on
+// commits that never actually matched by oid.
+function HighlightedHash({ oid, shortHash, tokens }: { oid: string; shortHash: string; tokens?: string[] }) {
+  if (!tokens || tokens.length === 0) return <>{shortHash}</>;
+  const oidLower = oid.toLowerCase();
+  let len = 0;
+  for (const tok of tokens) {
+    if (tok.length >= 4 && oidLower.startsWith(tok)) len = Math.max(len, Math.min(tok.length, shortHash.length));
+  }
+  if (len === 0) return <>{shortHash}</>;
+  return (
+    <>
+      <mark className="bg-white/[0.14] text-foreground rounded-[2px]">{shortHash.slice(0, len)}</mark>
+      {shortHash.slice(len)}
+    </>
+  );
+}
+
+export const CommitRow = memo(function CommitRow({ item, refsWidth, graphWidth, isSelected, isContextTarget, isHead, headBranch, pushedTagNames, isStash, stashName, isDimmed, highlightTokens, onRefAction, onCommitAction, onSelect }: Props) {
   const { commit } = item;
   const relative = formatDistanceToNow(new Date(commit.timestamp * 1000), { addSuffix: true });
   const refGroups = groupRefs(commit.refs, item.commit.local_branches, item.commit.remote_branches, headBranch, pushedTagNames);
@@ -45,10 +88,16 @@ export const CommitRow = memo(function CommitRow({ item, refsWidth, graphWidth, 
       ))
     : undefined;
   const highlighted = isSelected || isContextTarget;
+  // Non-empty highlightTokens is exactly how Timeline signals "this row matches
+  // the active find" (see NO_HIGHLIGHTS) — reuse that instead of a new prop.
+  const isMatchingRow = !!highlightTokens && highlightTokens.length > 0;
 
   const rowClass = [
     "flex items-center cursor-pointer select-none text-sm border-l-2 transition-colors duration-75",
-    isStash ? "opacity-35 italic" : "",
+    // A dimmed (non-matching) stash row stays at its own (lower) opacity rather
+    // than stacking with opacity-40; a *matching* stash row brightens instead,
+    // so it doesn't read the same as a non-match.
+    isStash ? (isMatchingRow ? "opacity-60 italic" : "opacity-35 italic") : isDimmed ? "opacity-40" : "",
     isHead && highlighted
       ? "border-l-teal-400 bg-teal-500/10"
       : isHead
@@ -60,6 +109,7 @@ export const CommitRow = memo(function CommitRow({ item, refsWidth, graphWidth, 
 
   return (
     <div
+      data-testid="commit-row"
       onClick={(e) => onSelect(commit.oid, { ctrl: e.ctrlKey || e.metaKey, shift: e.shiftKey })}
       style={{ height: ROW_HEIGHT }}
       className={rowClass}
@@ -126,16 +176,16 @@ export const CommitRow = memo(function CommitRow({ item, refsWidth, graphWidth, 
         "flex-1 min-w-0 truncate pl-2 text-[13px]",
         isHead ? "text-foreground/95" : "text-foreground/75",
       ].join(" ")}>
-        {isStash ? (stashName ?? stashLabel(commit.summary)) : commit.summary}
+        <Highlighted text={isStash ? (stashName ?? stashLabel(commit.summary)) : commit.summary} tokens={highlightTokens} />
       </span>
 
       {/* Right metadata cluster */}
       <div className="shrink-0 flex items-center gap-2.5 pr-3">
         <span className="text-muted-foreground/50 text-[11px] shrink-0 hidden md:block max-w-[88px] truncate">
-          {commit.author_name}
+          <Highlighted text={commit.author_name} tokens={highlightTokens} />
         </span>
         <span className="font-mono text-[10px] text-muted-foreground/30 shrink-0 hidden lg:block tracking-tight">
-          {shortHash}
+          <HighlightedHash oid={commit.oid} shortHash={shortHash} tokens={highlightTokens} />
         </span>
         <span className="text-muted-foreground/60 text-[11px] shrink-0 w-[90px] text-right tabular-nums">
           {relative}
