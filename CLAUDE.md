@@ -123,7 +123,7 @@ pnpm fixtures
 - All commands receive `state: State<RepoState>` to access the open repos
 - Commands use `git2` crate for all Git operations (libgit2 C bindings)
 - Errors are mapped to custom `Error` enum and serialized back to frontend
-- Commits are walked topologically + by time; entire graph is loaded (up to limit of 2000 commits)
+- Commits are walked topologically + by time; entire graph is loaded (no cap by default; commit bodies are fetched lazily via `get_commit`)
 - Graph layout assigns commits to visual "lanes" (columns) based on ancestry to avoid line crossings
 
 **Data Structures**:
@@ -267,12 +267,12 @@ waypoint/
 ### Recent Repos
 
 - Welcome screen stores recent repo paths in Tauri plugin-store (`waypoint.json` file)
-- Max 10 recent repos; updated each time a repo is opened
+- Max 1000 recent repos (`MAX_RECENT` in `lib/recentRepos.ts`); updated each time a repo is opened
 - Click to reopen without browsing again
 
 ## Notes for Future Development
 
-- **Performance**: Timeline is virtualized; can handle 2000+ commits smoothly
+- **Performance**: Timeline is virtualized; loads the full history with no commit cap
 - **Merge/Cherry-Pick UI**: Conflicts trigger automatic panel switch; user resolves per-file, then commits
 - **Graph Coloring**: Each commit lane gets a color index for visual distinction on timeline
 - **Stash Support**: Stashes appear as special commits in timeline (detected by commit summary prefix)

@@ -10,7 +10,7 @@ Desktop app for macOS, Windows, and Linux, delivered as a Tauri 2 webview. The i
 
 ## Users
 
-Professional developers who use Waypoint as their daily Git client on real team repositories. It sits open all day next to their editor and terminal, and it replaces tools like GitKraken, Fork, SourceTree, or GitHub Desktop. Their jobs: read history and branch topology at a glance, stage and commit carefully (down to hunks and lines), move work between branches (merge, rebase, cherry-pick, squash, revert), resolve conflicts, and sync with remotes, all without breaking their flow.
+Professional developers who use Waypoint as their daily Git client on real team repositories. It sits open all day next to their editor and terminal, and it replaces whatever desktop Git client they used before. Their jobs: read history and branch topology at a glance, stage and commit carefully (down to hunks and lines), move work between branches (merge, rebase, cherry-pick, squash, revert), resolve conflicts, and sync with remotes, all without breaking their flow.
 
 ## Product Purpose
 
@@ -25,7 +25,7 @@ Waypoint is a Git GUI built around a visual commit timeline. It makes the reposi
 ## Operating Context
 
 - Runs alongside an editor and a terminal; the file watcher picks up edits made outside the app, so status stays current.
-- Multiple repositories open at once as tabs; recent repos are listed on the welcome screen (up to 10).
+- Multiple repositories open at once as tabs; recent repos are listed on the welcome screen.
 - Launched from a folder picker, a recent-repo list, the terminal (`waypoint .`), or Windows Explorer's context menu.
 - Remote operations (fetch, pull, push, tag push, remote branch rename) shell out to the system `git` binary, so the user's existing credential helpers and SSH agent behave exactly as they do in the terminal.
 - A global shortcut toggles the command palette.
@@ -38,23 +38,23 @@ Waypoint is a Git GUI built around a visual commit timeline. It makes the reposi
 
 **Terminology:** repo, tab, timeline, lane, ref, HEAD, WIP row, stash, plugin, command palette, surfaces (`commandPalette`, `commitContextMenu`, `branchContextMenu`, `toolbar`).
 
-**Undecided:** no LICENSE file is committed yet, so the specific open-source license is not chosen in-repo.
+**License:** MIT (`LICENSE`). Third-party notices for everything the installers ship live in `THIRD_PARTY_NOTICES.md`.
 
 ## Brand Commitments
 
 - Name: **Waypoint**.
 - Existing tagline on the welcome screen: "A local Git GUI, no account required."
-- App icon: `waypoint-icon.svg` (with platform icon exports in `src-tauri/icons/`).
+- App icon: `public/waypoint-icon.svg` (with platform icon exports in `src-tauri/icons/`).
 
 ## Evidence on Hand
 
 - `README.md`: feature list, download matrix, release process.
 - `docs/plugins.md`: plugin manifest schema, `api` reference, how-tos. `example-plugin/`: a ready-to-copy plugin.
 - `docs/timeline.md`: technical reference for the timeline and lane allocator.
-- `DESIGN_SYSTEM.md`: the incumbent visual system as currently documented.
+- `DESIGN.md`: the incumbent visual system ("The Night Chart") as currently documented.
 - `.github/workflows/release.yml`: tagged releases build installers for macOS (universal `.dmg`), Linux (`.AppImage`, `.deb`), and Windows (`.msi`, NSIS `.exe`) as draft GitHub Releases with a changelog.
 
-**Absent, so never fabricate:** user counts, testimonials, reviews, press, performance benchmarks, product screenshots, a license, and any claim about code signing being active (signing is optional and skipped when secrets are absent).
+**Absent, so never fabricate:** user counts, testimonials, reviews, press, performance benchmarks, product screenshots, and any claim about code signing being active (signing is optional and skipped when secrets are absent).
 
 ## Product Principles
 

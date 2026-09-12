@@ -30,6 +30,15 @@ scripts/fixtures/repos/
 # graphify skill output
 graphify-out/
 
-# impeccable skill binaries (the launcher downloads them on first run)
-.claude/skills/impeccable/scripts/bin/
-.github/skills/impeccable/scripts/bin/
+# Per-user Claude Code settings
+.claude/settings.local.json
+
+# impeccable design tooling (third-party, Apache-2.0): install locally from
+# https://github.com/pbakaus/impeccable rather than vendoring it here
+.claude/skills/impeccable/
+.claude/agents/impeccable-*
+.github/skills/impeccable/
+.github/agents/impeccable-*
+.github/hooks/impeccable.json
+.impeccable/*
+!.impeccable/design.json

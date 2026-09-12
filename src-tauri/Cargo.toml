@@ -2,7 +2,9 @@
 name = "waypoint"
 version = "0.1.0"
 description = "Waypoint - Git GUI"
-authors = ["Waypoint Contributors"]
+authors = ["Marcos Cordeiro"]
+license = "MIT"
+repository = "https://github.com/mvmcjr/waypoint"
 edition = "2021"
 
 [lib]

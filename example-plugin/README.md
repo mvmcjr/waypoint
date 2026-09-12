@@ -20,3 +20,8 @@ A reference Waypoint plugin. Copy this folder as a starting point for your own.
 
 See [`../docs/plugins.md`](../docs/plugins.md) for the full manifest schema and
 `api` reference.
+
+## License
+
+MIT, like the rest of Waypoint. Copy it, rename it, relicense your plugin however
+you like; no attribution needed.

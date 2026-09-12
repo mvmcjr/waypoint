@@ -4,6 +4,7 @@ on:
   push:
     tags:
       - 'v[0-9]+.[0-9]+.[0-9]+'
+      - 'v[0-9]+.[0-9]+.[0-9]+-*'
 
 # Required to create GitHub Releases and upload assets.
 permissions:
@@ -42,8 +43,9 @@ jobs:
       - name: Generate changelog
         id: changelog
         shell: bash
+        env:
+          CURRENT_TAG: ${{ github.ref_name }}
         run: |
-          CURRENT_TAG="${{ github.ref_name }}"
           PREV_TAG=$(git tag --sort=-creatordate | grep -v "^${CURRENT_TAG}$" | head -n 1)
           {
             echo "changelog<<CHANGELOG_EOF"
@@ -76,8 +78,9 @@ jobs:
         with:
           workspaces: src-tauri -> target
 
-      # Tauri 2 on Linux requires WebKit2GTK 4.1 (not 4.0).
-      # git2 vendored build needs cmake + pkg-config + OpenSSL headers.
+      # Tauri 2 on Linux requires WebKit2GTK 4.1 (not 4.0). OpenSSL and
+      # libgit2 are built from source, so libssl-dev/cmake aren't strictly
+      # required, but they're kept as a safety net for the vendored builds.
       - name: Install Linux system dependencies
         if: matrix.platform == 'ubuntu-22.04'
         run: |
@@ -132,11 +135,12 @@ jobs:
           APPLE_PASSWORD: ${{ secrets.APPLE_PASSWORD }}
           APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
 
-          # ── Windows code signing ───────────────────────────────────────────
-          # Tauri 2 supports signing via a PFX file. Set these to enable it:
-          #   TAURI_SIGNING_PRIVATE_KEY   – base64-encoded .pfx certificate
-          #   TAURI_SIGNING_PRIVATE_KEY_PASSWORD – password for the .pfx
-          # (Tauri will skip signing automatically if the vars are absent.)
+          # ── Updater artifact signing ───────────────────────────────────────
+          # Not Windows code signing: this is the minisign key Tauri uses to sign
+          # updater bundles (generate with `pnpm tauri signer generate`). It only
+          # matters once the updater plugin is configured; unset, it's skipped.
+          # Windows Authenticode signing would go through bundle.windows
+          # (certificateThumbprint or signCommand) in tauri.conf.json instead.
           TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
           TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
 
@@ -150,7 +154,7 @@ jobs:
 
             **Platforms**
             - **macOS**: `.dmg` (universal — Apple Silicon + Intel)
-            - **Linux**: `.AppImage` (portable) or `.deb` (Debian/Ubuntu)
+            - **Linux**: `.AppImage` (portable), `.deb` (Debian/Ubuntu) or `.rpm` (Fedora/openSUSE)
             - **Windows**: `.msi` (recommended) or `.exe` (NSIS)
           releaseDraft: true
           # Tags containing a hyphen (e.g. v1.0.0-beta.1) are pre-releases.

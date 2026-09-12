@@ -2,6 +2,13 @@
   "name": "waypoint",
   "private": true,
   "version": "0.1.0",
+  "description": "Git GUI desktop app with a visual commit timeline",
+  "license": "MIT",
+  "author": "Marcos Cordeiro",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/mvmcjr/waypoint.git"
+  },
   "type": "module",
   "scripts": {
     "dev": "vite",
@@ -9,7 +16,8 @@
     "preview": "vite preview",
     "tauri": "tauri",
     "test": "vitest",
-    "fixtures": "node scripts/fixtures/make-fixtures.mjs"
+    "fixtures": "node scripts/fixtures/make-fixtures.mjs",
+    "notices": "node scripts/generate-notices.mjs"
   },
   "dependencies": {
     "@base-ui/react": "^1.6.0",
