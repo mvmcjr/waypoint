@@ -28,7 +28,7 @@ Waypoint is a Git GUI built around a visual commit timeline. It makes the reposi
 - Multiple repositories open at once as tabs; recent repos are listed on the welcome screen.
 - Launched from a folder picker, a recent-repo list, the terminal (`waypoint .`), or Windows Explorer's context menu.
 - Remote operations (fetch, pull, push, tag push, remote branch rename) shell out to the system `git` binary, so the user's existing credential helpers and SSH agent behave exactly as they do in the terminal.
-- A global shortcut toggles the command palette.
+- Ctrl/Cmd+Shift+P toggles the command palette while the window has focus.
 
 ## Capabilities and Constraints
 

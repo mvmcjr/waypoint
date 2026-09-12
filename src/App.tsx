@@ -1,5 +1,4 @@
 import { useState, useEffect, useCallback } from "react";
-import { register, unregister } from "@tauri-apps/plugin-global-shortcut";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { TooltipProvider } from "@/components/ui/tooltip";
 import { useStore } from "@/lib/store";
@@ -56,10 +55,16 @@ function Inner() {
     }
   };
 
+  // Ctrl/Cmd+Shift+P toggles the palette while Waypoint has focus. A window
+  // listener rather than an OS-level hotkey, so other apps keep the shortcut.
   useEffect(() => {
-    const shortcut = "CommandOrControl+Shift+P";
-    register(shortcut, (e) => { if (e.state === "Pressed") togglePalette(); }).catch(console.error);
-    return () => { unregister(shortcut).catch(console.error); };
+    function onKeyDown(e: KeyboardEvent) {
+      if (!(e.ctrlKey || e.metaKey) || !e.shiftKey || e.key.toLowerCase() !== "p") return;
+      e.preventDefault();
+      togglePalette();
+    }
+    window.addEventListener("keydown", onKeyDown);
+    return () => window.removeEventListener("keydown", onKeyDown);
   }, [togglePalette]);
 
   // Prompt Windows Explorer integration on startup if not yet asked

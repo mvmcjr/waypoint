@@ -43,7 +43,7 @@ A Git GUI desktop application with a visual commit timeline. Built with Tauri 2,
 
 | Shortcut | Action |
 |---|---|
-| Ctrl/Cmd+Shift+P | Command palette (registered system-wide while Waypoint runs) |
+| Ctrl/Cmd+Shift+P | Command palette |
 | Ctrl/Cmd+F | Go to commit |
 | Enter / Shift+Enter, F3 / Ctrl+G | Next / previous match |
 | Ctrl/Cmd+Enter | Commit |

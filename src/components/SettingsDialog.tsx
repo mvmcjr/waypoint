@@ -2,6 +2,7 @@ import { useState, useEffect } from "react";
 import { useStore } from "@/lib/store";
 import { ipc } from "@/lib/ipc";
 import { load } from "@tauri-apps/plugin-store";
+import { getVersion } from "@tauri-apps/api/app";
 import {
   Dialog,
   DialogContent,
@@ -17,6 +18,11 @@ export function SettingsDialog() {
 
   const [activeTab, setActiveTab] = useState<SettingsTab>("general");
   const [isWin, setIsWin] = useState(false);
+  const [version, setVersion] = useState<string | null>(null);
+
+  useEffect(() => {
+    getVersion().then(setVersion);
+  }, []);
 
   // ── Explorer context menu (Windows only) ──────────────────────────────────
   const [contextMenuEnabled, setContextMenuEnabled] = useState(false);
@@ -301,7 +307,9 @@ export function SettingsDialog() {
                   W
                 </div>
                 <h3 className="text-base font-semibold text-foreground tracking-tight">Waypoint</h3>
-                <span className="text-[10px] font-mono text-muted-foreground mt-0.5">v0.1.0 (Beta)</span>
+                {version && (
+                  <span className="text-[10px] font-mono text-muted-foreground mt-0.5">v{version}</span>
+                )}
                 <p className="text-xs text-muted-foreground mt-3 leading-relaxed max-w-xs">
                   A beautiful, lightweight, local-first Git client. Fully client-side, zero accounts required.
                 </p>
@@ -309,7 +317,7 @@ export function SettingsDialog() {
 
               <div className="mt-auto border-t border-border/40 pt-4 flex justify-between items-center text-[10px] text-muted-foreground select-none shrink-0">
                 <span>Designed for Developers</span>
-                <span>© 2026 Waypoint contributors</span>
+                <span>© 2026 Marcos Cordeiro · MIT License</span>
               </div>
             </div>
           )}
