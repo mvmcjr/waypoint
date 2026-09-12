@@ -5,8 +5,8 @@
   No account. No telemetry. No paywall.</p>
   <p>
     <a href="LICENSE"><img src="https://img.shields.io/badge/license-MIT-2dd4bf?style=flat-square" alt="MIT license"></a>
-    <img src="https://img.shields.io/badge/platforms-macOS%20%7C%20Windows%20%7C%20Linux-1f2937?style=flat-square" alt="macOS, Windows, Linux">
-    <img src="https://img.shields.io/badge/built%20with-Tauri%202%20%2B%20React-1f2937?style=flat-square" alt="Built with Tauri 2 and React">
+    <img src="https://img.shields.io/badge/platforms-macOS%20%7C%20Windows%20%7C%20Linux-475569?style=flat-square" alt="macOS, Windows, Linux">
+    <img src="https://img.shields.io/badge/built%20with-Tauri%202%20%2B%20React-475569?style=flat-square" alt="Built with Tauri 2 and React">
   </p>
   <p>
     <a href="#download">Download</a> ·
