@@ -11,7 +11,45 @@ function labelFromPath(path: string): string {
   return path.split(/[/\\]/).filter(Boolean).pop() ?? path;
 }
 
-interface AppState {
+export type FileListView = "path" | "tree";
+export type DiffLayout = "unified" | "split";
+export type DiffScope = "hunks" | "full";
+
+/** How the user likes to look at files and diffs — kept across tabs, files, and restarts. */
+export interface ViewPrefs {
+  fileListView: FileListView;
+  diffLayout: DiffLayout;
+  diffScope: DiffScope;
+  commitPanelCollapsed: boolean;
+}
+
+const VIEW_PREFS_KEY = "waypoint.viewPrefs";
+const DEFAULT_VIEW_PREFS: ViewPrefs = {
+  fileListView: "path",
+  diffLayout: "unified",
+  diffScope: "hunks",
+  commitPanelCollapsed: false,
+};
+
+function loadViewPrefs(): ViewPrefs {
+  try {
+    const raw = JSON.parse(localStorage.getItem(VIEW_PREFS_KEY) ?? "{}");
+    return {
+      fileListView: raw.fileListView === "tree" ? "tree" : "path",
+      diffLayout: raw.diffLayout === "split" ? "split" : "unified",
+      diffScope: raw.diffScope === "full" ? "full" : "hunks",
+      commitPanelCollapsed: raw.commitPanelCollapsed === true,
+    };
+  } catch {
+    return DEFAULT_VIEW_PREFS;
+  }
+}
+
+function saveViewPrefs(prefs: ViewPrefs) {
+  try { localStorage.setItem(VIEW_PREFS_KEY, JSON.stringify(prefs)); } catch { /* ignore */ }
+}
+
+interface AppState extends ViewPrefs {
   tabs: Tab[];
   activeTabId: string | null;
   commits: PositionedCommit[];
@@ -32,6 +70,7 @@ interface AppState {
   setSearchFilter: (filter: string) => void;
   setSettingsOpen: (open: boolean) => void;
   setInitPromptPath: (path: string | null) => void;
+  setViewPref: <K extends keyof ViewPrefs>(key: K, value: ViewPrefs[K]) => void;
 }
 
 const BLANK_VIEW = { commits: [], selectedOid: null, multiSelectedOids: [], searchFilter: "" };
@@ -42,6 +81,7 @@ export const useStore = create<AppState>((set) => ({
   settingsOpen: false,
   initPromptPath: null,
   ...BLANK_VIEW,
+  ...loadViewPrefs(),
 
   openTab: (id, path) =>
     set((state) => {
@@ -78,4 +118,16 @@ export const useStore = create<AppState>((set) => ({
   setSearchFilter: (searchFilter) => set({ searchFilter }),
   setSettingsOpen: (settingsOpen) => set({ settingsOpen }),
   setInitPromptPath: (initPromptPath) => set({ initPromptPath }),
+  setViewPref: (key, value) =>
+    set((state) => {
+      const prefs: ViewPrefs = {
+        fileListView: state.fileListView,
+        diffLayout: state.diffLayout,
+        diffScope: state.diffScope,
+        commitPanelCollapsed: state.commitPanelCollapsed,
+        [key]: value,
+      };
+      saveViewPrefs(prefs);
+      return prefs;
+    }),
 }));

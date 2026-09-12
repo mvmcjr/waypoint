@@ -2,7 +2,8 @@ import { useEffect, useMemo, useRef, useState } from "react";
 import { getCurrentWindow } from "@tauri-apps/api/window";
 import { listen } from "@tauri-apps/api/event";
 import { useStore } from "@/lib/store";
-import { useCommits, useFileStatus, useHeadInfo, useRefreshRepo, useRefs, useRemotes, useRepoStatus } from "@/lib/queries";
+import { useCommitDiff, useCommits, useFileStatus, useHeadInfo, useRefreshRepo, useRefs, useRemotes, useRepoStatus } from "@/lib/queries";
+import { orderFiles } from "@/lib/fileTree";
 import { Timeline, type TimelineHandle } from "@/components/timeline/Timeline";
 import { Sidebar } from "@/components/sidebar/Sidebar";
 import { CommitDetail } from "@/components/detail/CommitDetail";
@@ -34,7 +35,7 @@ import {
 } from "@/components/actions/Dialogs";
 import type { CommitAction } from "@/components/timeline/CommitContextMenu";
 import type { RefAction } from "@/components/sidebar/RefTree";
-import { ipc, type FileDiff, type RefInfo, type RemoteInfo } from "@/lib/ipc";
+import { ipc, type RefInfo, type RemoteInfo } from "@/lib/ipc";
 import { RefreshCw, ArrowDown, ArrowUp, Puzzle } from "lucide-react";
 import { usePluginRegistry, commandsForSurface } from "@/lib/plugins/registry";
 import { usePluginRunner } from "@/components/plugins/PluginRunnerProvider";
@@ -75,7 +76,7 @@ type DialogState =
 // ─── Main view ─────────────────────────────────────────────────────────────
 
 export function RepoView() {
-  const { activeTabId: repoId, commits, selectedOid, multiSelectedOids, searchFilter, setCommits, selectCommit, setMultiSelected, setSearchFilter } =
+  const { activeTabId: repoId, commits, selectedOid, multiSelectedOids, searchFilter, fileListView, setCommits, selectCommit, setMultiSelected, setSearchFilter } =
     useStore();
   // Anchor commit for shift-click range selection (oid of the last plain/ctrl click).
   const selectionAnchorRef = useRef<string | null>(null);
@@ -101,7 +102,9 @@ export function RepoView() {
 
   const [dialog, setDialog] = useState<DialogState>({ kind: "none" });
   const [wipSelected, setWipSelected] = useState(false);
-  const [focusedFile, setFocusedFile] = useState<FileDiff | null>(null);
+  // Path of the commit file open in the diff panel; the file itself is looked
+  // up in the commit's (cached) diff so prev/next can walk the same list.
+  const [focusedFilePath, setFocusedFilePath] = useState<string | null>(null);
   // repoId is stored alongside path so we can skip the one-render flash where
   // the old path is paired with a new repoId before the reset effect fires.
   const [focusedStagingFile, setFocusedStagingFile] = useState<{ repoId: string; path: string; section: "staged" | "unstaged" } | null>(null);
@@ -238,13 +241,13 @@ export function RepoView() {
 
   // RepoView is a single persistent component instance shared across all tabs
   // (App.tsx renders one <RepoView /> regardless of which tab is active).
-  // Local panel state — focusedFile, focusedStagingFile, wipSelected, dialog —
+  // Local panel state — focusedFilePath, focusedStagingFile, wipSelected, dialog —
   // is NOT cleared by switchTab in the Zustand store, so without this reset
   // those panels survive the tab switch and show stale/wrong-repo content.
   // isFetching/isPulling/isPushing are also reset so the new repo's toolbar
   // buttons aren't frozen in a spinner from the previous repo's in-flight op.
   useEffect(() => {
-    setFocusedFile(null);
+    setFocusedFilePath(null);
     setFocusedStagingFile(null);
     setWipSelected(false);
     setDialog({ kind: "none" });
@@ -391,7 +394,7 @@ export function RepoView() {
 
   function handleSelectCommit(oid: string, mods: { ctrl: boolean; shift: boolean }) {
     setWipSelected(false);
-    setFocusedFile(null);
+    setFocusedFilePath(null);
     setFocusedStagingFile(null);
 
     // Shift-click: select the contiguous range from the anchor to this commit.
@@ -437,7 +440,7 @@ export function RepoView() {
 
   function handleWipClick() {
     setWipSelected(true);
-    setFocusedFile(null);
+    setFocusedFilePath(null);
     setFocusedStagingFile(null);
     selectCommit(null);
   }
@@ -458,6 +461,18 @@ export function RepoView() {
     () => filteredCommits.find((c) => c.commit.oid === selectedOid) ?? null,
     [filteredCommits, selectedOid],
   );
+
+  // Same query key as CommitDetail's list — served from cache, not refetched.
+  const { data: selectedDiff } = useCommitDiff(repoId, selectedItem?.commit.oid ?? null);
+  const orderedFiles = useMemo(() => orderFiles(selectedDiff ?? [], fileListView), [selectedDiff, fileListView]);
+  const focusedIndex = focusedFilePath ? orderedFiles.findIndex((f) => f.path === focusedFilePath) : -1;
+  const focusedFile = focusedIndex === -1 ? null : orderedFiles[focusedIndex];
+
+  function handleSelectParent(oid: string) {
+    handleSelectCommit(oid, { ctrl: false, shift: false });
+    // Defer scroll until after React re-renders the selection
+    setTimeout(() => timelineRef.current?.scrollToOid(oid), 0);
+  }
 
   function handleRefSelect(ref: RefInfo) {
     if (!ref.target_oid) return;
@@ -681,7 +696,14 @@ export function RepoView() {
               key={`${selectedItem.commit.oid}:${focusedFile.path}`}
               file={focusedFile}
               commitSummary={selectedItem.commit.summary}
-              onClose={() => setFocusedFile(null)}
+              commitOid={selectedItem.commit.oid}
+              onClose={() => setFocusedFilePath(null)}
+              nav={{
+                index: focusedIndex,
+                total: orderedFiles.length,
+                onPrev: () => setFocusedFilePath(orderedFiles[focusedIndex - 1]?.path ?? focusedFilePath),
+                onNext: () => setFocusedFilePath(orderedFiles[focusedIndex + 1]?.path ?? focusedFilePath),
+              }}
               fetchFullFile={
                 repoId
                   ? () => ipc.getCommitFileDiff(repoId, selectedItem.commit.oid, focusedFile.path)
@@ -731,6 +753,7 @@ export function RepoView() {
                   repoId={repoId}
                   onCommitSuccess={handleCommitSuccess}
                   onFileClick={(path, section) => setFocusedStagingFile({ repoId: repoId!, path, section })}
+                  selectedFile={focusedStagingFile?.repoId === repoId ? focusedStagingFile : null}
                 />
               )}
             </div>
@@ -739,7 +762,9 @@ export function RepoView() {
             <CommitDetail
               repoId={repoId}
               item={selectedItem}
-              onFileClick={(file) => setFocusedFile(file)}
+              selectedPath={focusedFile?.path ?? null}
+              onFileClick={(file) => setFocusedFilePath(file.path)}
+              onSelectCommit={handleSelectParent}
             />
           )}
         </div>

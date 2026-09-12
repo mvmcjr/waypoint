@@ -1,8 +1,7 @@
-import { useState, useMemo, useEffect } from "react";
+import { useState, useMemo, useEffect, useRef } from "react";
 import { useQueryClient } from "@tanstack/react-query";
 import {
   PlusCircle, MinusCircle, ChevronsUp, GitCommitHorizontal,
-  ChevronRight, ChevronDown, Folder, FolderOpen,
   Archive, Trash2,
 } from "lucide-react";
 import { Button } from "@/components/ui/button";
@@ -23,13 +22,28 @@ import {
 } from "@/components/ui/context-menu";
 import { ipc, type FileStatus } from "@/lib/ipc";
 import { useFileStatus, useHeadInfo, useRefs, useRefreshRepo } from "@/lib/queries";
-import { buildFileTree, type TreeNode, type DirNode } from "@/lib/fileTree";
+import { useStore } from "@/lib/store";
+import { buildFileTree, collectDirPaths, type TreeNode, type DirNode } from "@/lib/fileTree";
+import { DirRow as BaseDirRow, FileRow as BaseFileRow, handleFileListKeyDown } from "@/components/files/FileRow";
+import { SegmentedToggle } from "@/components/SegmentedToggle";
+
+type Section = "staged" | "unstaged";
 
 interface Props {
   repoId: string;
   onCommitSuccess: () => void;
-  onFileClick?: (path: string, section: "staged" | "unstaged") => void;
+  onFileClick?: (path: string, section: Section) => void;
+  /** The file open in the diff panel, highlighted in its section. */
+  selectedFile?: { path: string; section: Section } | null;
 }
+
+const VIEW_OPTIONS = [
+  { value: "path", label: "Path" },
+  { value: "tree", label: "Tree" },
+] as const;
+
+const SECTION_LABEL = "px-3 pt-2 pb-1 flex items-center gap-1.5 text-[10px] font-semibold uppercase tracking-[0.12em] text-muted-foreground";
+const ROW_ACTION = "flex size-5 items-center justify-center rounded text-muted-foreground hover:text-foreground hover:bg-white/[0.07] disabled:opacity-30";
 
 // ── Tree helpers ─────────────────────────────────────────────────────────────
 
@@ -38,66 +52,48 @@ function collectPaths(node: TreeNode<FileStatus>): string[] {
   return node.children.flatMap(collectPaths);
 }
 
-// ── Status styling ────────────────────────────────────────────────────────────
-
-const STATUS_STYLE: Record<string, { label: string; color: string }> = {
-  added:     { label: "A", color: "text-green-400" },
-  modified:  { label: "M", color: "text-yellow-400" },
-  deleted:   { label: "D", color: "text-red-400" },
-  renamed:   { label: "R", color: "text-blue-400" },
-  // Untracked = a new file, just not staged yet — show it like a staged add ("A")
-  // rather than a cryptic "?". The status key stays "untracked" for stage/discard logic.
-  untracked: { label: "A", color: "text-green-400" },
-};
-const FALLBACK_STYLE = { label: "?", color: "text-muted-foreground" };
-
 // ── FileRow ──────────────────────────────────────────────────────────────────
 
 function FileRow({
-  file, statusKind, actionIcon, onAction, onDiscard, onRowClick, disabled, indent = 0, treeMode,
+  file, section, onAction, onDiscard, onRowClick, disabled, depth = 0, treeMode, selected,
 }: {
   file: FileStatus;
-  statusKind: string | null;
-  actionIcon: React.ReactNode;
+  section: Section;
   onAction: () => void;
   onDiscard: () => void;
   onRowClick?: () => void;
   disabled: boolean;
-  indent?: number;
+  depth?: number;
   treeMode: boolean;
+  selected: boolean;
 }) {
-  const { label, color } = STATUS_STYLE[statusKind ?? ""] ?? FALLBACK_STYLE;
-  const parts = file.path.split("/");
-  const filename = parts[parts.length - 1];
-  const dir = !treeMode && parts.length > 1 ? parts.slice(0, -1).join("/") : "";
+  const statusKind = section === "staged" ? file.staged : file.unstaged;
+  const actionLabel = section === "staged" ? "Unstage file" : "Stage file";
 
   return (
     <ContextMenu>
       <ContextMenuTrigger>
-        <div
-          className="group flex items-center gap-2 py-0.5 pr-3 hover:bg-white/5 rounded text-xs cursor-pointer"
-          style={{ paddingLeft: `${12 + indent * 16}px` }}
-          onClick={onRowClick}
-        >
-          <span className={`font-mono font-bold w-3 shrink-0 ${color}`}>{label}</span>
-          <span className="flex-1 min-w-0 truncate">
-            {treeMode ? (
-              <span className="text-foreground/90">{filename}</span>
-            ) : (
-              <>
-                <span className="text-foreground/90">{filename}</span>
-                {dir && <span className="text-muted-foreground ml-1.5 text-[10px]">{dir}</span>}
-              </>
-            )}
-          </span>
-          <button
-            onClick={(e) => { e.stopPropagation(); onAction(); }}
-            disabled={disabled}
-            className="opacity-0 group-hover:opacity-100 text-muted-foreground hover:text-foreground transition-opacity disabled:opacity-30"
-          >
-            {actionIcon}
-          </button>
-        </div>
+        <BaseFileRow
+          path={file.path}
+          status={statusKind}
+          treeMode={treeMode}
+          depth={depth}
+          selected={selected}
+          onOpen={onRowClick}
+          revealTrailing
+          trailing={
+            <button
+              type="button"
+              onClick={onAction}
+              disabled={disabled}
+              aria-label={`${actionLabel} ${file.path}`}
+              title={actionLabel}
+              className={ROW_ACTION}
+            >
+              {section === "staged" ? <MinusCircle size={13} /> : <PlusCircle size={13} />}
+            </button>
+          }
+        />
       </ContextMenuTrigger>
       <ContextMenuContent>
         <ContextMenuItem variant="destructive" onClick={onDiscard} disabled={disabled}>
@@ -112,43 +108,42 @@ function FileRow({
 // ── DirRow ────────────────────────────────────────────────────────────────────
 
 function DirRow({
-  node, section, expanded, onToggle, onBatch, onDiscardBatch, disabled, indent, children,
+  node, section, expanded, onToggle, onBatch, onDiscardBatch, disabled, depth, children,
 }: {
   node: DirNode<FileStatus>;
-  section: "staged" | "unstaged";
+  section: Section;
   expanded: boolean;
   onToggle: () => void;
   onBatch: (paths: string[]) => void;
   onDiscardBatch: (paths: string[]) => void;
   disabled: boolean;
-  indent: number;
+  depth: number;
   children: React.ReactNode;
 }) {
+  const actionLabel = section === "staged" ? "Unstage folder" : "Stage folder";
   return (
     <>
       <ContextMenu>
         <ContextMenuTrigger>
-          <div
-            className="group flex items-center gap-1.5 py-0.5 pr-3 hover:bg-white/5 rounded text-xs cursor-pointer select-none"
-            style={{ paddingLeft: `${12 + indent * 16}px` }}
-            onClick={onToggle}
-          >
-            {expanded
-              ? <ChevronDown size={11} className="text-muted-foreground shrink-0" />
-              : <ChevronRight size={11} className="text-muted-foreground shrink-0" />}
-            {expanded
-              ? <FolderOpen size={12} className="text-yellow-400/70 shrink-0" />
-              : <Folder size={12} className="text-yellow-400/70 shrink-0" />}
-            <span className="flex-1 text-foreground/75">{node.name}</span>
-            <button
-              onClick={(e) => { e.stopPropagation(); onBatch(collectPaths(node)); }}
-              disabled={disabled}
-              className="opacity-0 group-hover:opacity-100 text-muted-foreground hover:text-foreground transition-opacity disabled:opacity-30"
-              title={section === "staged" ? "Unstage folder" : "Stage folder"}
-            >
-              {section === "staged" ? <MinusCircle size={12} /> : <PlusCircle size={12} />}
-            </button>
-          </div>
+          <BaseDirRow
+            name={node.name}
+            expanded={expanded}
+            onToggle={onToggle}
+            depth={depth}
+            revealTrailing
+            trailing={
+              <button
+                type="button"
+                onClick={() => onBatch(collectPaths(node))}
+                disabled={disabled}
+                aria-label={`${actionLabel} ${node.path}`}
+                title={actionLabel}
+                className={ROW_ACTION}
+              >
+                {section === "staged" ? <MinusCircle size={12} /> : <PlusCircle size={12} />}
+              </button>
+            }
+          />
         </ContextMenuTrigger>
         <ContextMenuContent>
           <ContextMenuItem variant="destructive" onClick={() => onDiscardBatch(collectPaths(node))} disabled={disabled}>
@@ -165,10 +160,10 @@ function DirRow({
 // ── TreeNodes (recursive) ────────────────────────────────────────────────────
 
 function TreeNodes({
-  nodes, section, expandedDirs, toggleDir, onBatch, onSingleFile, onDiscard, onDiscardBatch, onFileClick, disabled, indent = 0,
+  nodes, section, expandedDirs, toggleDir, onBatch, onSingleFile, onDiscard, onDiscardBatch, onFileClick, selectedPath, disabled, depth = 0,
 }: {
   nodes: TreeNode<FileStatus>[];
-  section: "staged" | "unstaged";
+  section: Section;
   expandedDirs: Set<string>;
   toggleDir: (p: string) => void;
   onBatch: (paths: string[]) => void;
@@ -176,25 +171,25 @@ function TreeNodes({
   onDiscard: (path: string) => void;
   onDiscardBatch: (paths: string[]) => void;
   onFileClick?: (path: string) => void;
+  selectedPath: string | null;
   disabled: boolean;
-  indent?: number;
+  depth?: number;
 }) {
   return (
     <>
       {nodes.map((node) => {
         if (node.kind === "file") {
-          const statusKind = section === "staged" ? node.file.staged : node.file.unstaged;
           return (
             <FileRow
               key={node.file.path + "-" + section}
               file={node.file}
-              statusKind={statusKind}
-              actionIcon={section === "staged" ? <MinusCircle size={13} /> : <PlusCircle size={13} />}
+              section={section}
               onAction={() => onSingleFile(node.file.path)}
               onDiscard={() => onDiscard(node.file.path)}
               onRowClick={() => onFileClick?.(node.file.path)}
               disabled={disabled}
-              indent={indent}
+              depth={depth}
+              selected={node.file.path === selectedPath}
               treeMode
             />
           );
@@ -210,7 +205,7 @@ function TreeNodes({
             onBatch={onBatch}
             onDiscardBatch={onDiscardBatch}
             disabled={disabled}
-            indent={indent}
+            depth={depth}
           >
             <TreeNodes
               nodes={node.children}
@@ -222,8 +217,9 @@ function TreeNodes({
               onDiscard={onDiscard}
               onDiscardBatch={onDiscardBatch}
               onFileClick={onFileClick}
+              selectedPath={selectedPath}
               disabled={disabled}
-              indent={indent + 1}
+              depth={depth + 1}
             />
           </DirRow>
         );
@@ -234,7 +230,7 @@ function TreeNodes({
 
 // ── Main panel ────────────────────────────────────────────────────────────────
 
-export function StagingPanel({ repoId, onCommitSuccess, onFileClick }: Props) {
+export function StagingPanel({ repoId, onCommitSuccess, onFileClick, selectedFile = null }: Props) {
   const qc = useQueryClient();
   const { data: files = [], isLoading } = useFileStatus(repoId);
   const refresh = useRefreshRepo(repoId);
@@ -244,7 +240,11 @@ export function StagingPanel({ repoId, onCommitSuccess, onFileClick }: Props) {
   const [committing, setCommitting] = useState(false);
   const [working, setWorking] = useState(false);
   const [error, setError] = useState<string | null>(null);
-  const [view, setView] = useState<"path" | "tree">("path");
+  // Shared with the commit panel's file list — one Path/Tree preference.
+  const view = useStore((s) => s.fileListView);
+  const setViewPref = useStore((s) => s.setViewPref);
+  const selectedStaged = selectedFile?.section === "staged" ? selectedFile.path : null;
+  const selectedUnstaged = selectedFile?.section === "unstaged" ? selectedFile.path : null;
   const [expandedDirs, setExpandedDirs] = useState<Set<string>>(new Set());
   const [discardArmed, setDiscardArmed] = useState(false);
   const [stashOpen, setStashOpen] = useState(false);
@@ -269,6 +269,18 @@ export function StagingPanel({ repoId, onCommitSuccess, onFileClick }: Props) {
   const unstaged = files.filter((f) => f.unstaged !== null);
   const stagedTree   = useMemo(() => buildFileTree(staged),   [staged]);
   const unstagedTree = useMemo(() => buildFileTree(unstaged), [unstaged]);
+
+  // Folders open the first time they appear (same as the commit file list), so
+  // the tree never hides the file open in the diff panel. Ones the user closed
+  // stay closed across status polls.
+  const seenDirsRef = useRef<Set<string>>(new Set());
+  useEffect(() => {
+    const fresh = [...collectDirPaths(stagedTree), ...collectDirPaths(unstagedTree)]
+      .filter((d) => !seenDirsRef.current.has(d));
+    if (fresh.length === 0) return;
+    for (const d of fresh) seenDirsRef.current.add(d);
+    setExpandedDirs((prev) => new Set([...prev, ...fresh]));
+  }, [stagedTree, unstagedTree]);
 
   const disabled = committing || working;
 
@@ -399,26 +411,17 @@ export function StagingPanel({ repoId, onCommitSuccess, onFileClick }: Props) {
   return (
     <div className="flex flex-col h-full border-l border-border text-sm overflow-hidden">
       {/* Header */}
-      <div className="shrink-0 flex items-center justify-between gap-2 px-3 py-2 border-b border-border">
-        <span className="font-semibold text-foreground/80 text-xs uppercase tracking-wide shrink-0">
+      <div className="shrink-0 h-9 flex items-center justify-between gap-2 px-3 border-b border-border">
+        <h2 className="text-[10px] font-semibold text-muted-foreground uppercase tracking-[0.12em] shrink-0">
           Changes
-        </span>
+        </h2>
 
-        {/* View toggle */}
-        <div className="flex items-center gap-0.5 bg-white/5 rounded p-0.5">
-          {(["path", "tree"] as const).map((v) => (
-            <button
-              key={v}
-              onClick={() => setView(v)}
-              className={[
-                "text-[10px] capitalize px-1.5 py-0.5 rounded transition-colors",
-                view === v ? "bg-white/15 text-foreground" : "text-muted-foreground hover:text-foreground",
-              ].join(" ")}
-            >
-              {v}
-            </button>
-          ))}
-        </div>
+        <SegmentedToggle
+          label="File list view"
+          value={view}
+          options={VIEW_OPTIONS}
+          onChange={(v) => setViewPref("fileListView", v)}
+        />
 
         <div className="flex items-center gap-0.5 ml-auto">
           {/* Stash */}
@@ -429,6 +432,7 @@ export function StagingPanel({ repoId, onCommitSuccess, onFileClick }: Props) {
             onClick={() => { setStashError(null); setStashOpen(true); }}
             disabled={staged.length === 0 && unstaged.length === 0 || disabled}
             title="Stash all changes"
+            aria-label="Stash all changes"
           >
             <Archive size={12} />
           </Button>
@@ -440,6 +444,7 @@ export function StagingPanel({ repoId, onCommitSuccess, onFileClick }: Props) {
             onClick={handleDiscard}
             disabled={staged.length === 0 && unstaged.length === 0 || disabled}
             title={discardArmed ? "Click again to confirm discard" : "Discard all changes (including untracked files)"}
+            aria-label={discardArmed ? "Confirm: discard all changes" : "Discard all changes, including untracked files"}
             className={[
               "h-6 px-2 text-xs gap-1 shrink-0 transition-colors",
               discardArmed ? "text-destructive hover:text-destructive" : "",
@@ -463,24 +468,24 @@ export function StagingPanel({ repoId, onCommitSuccess, onFileClick }: Props) {
       </div>
 
       {/* File lists */}
-      <div className="flex-1 overflow-y-auto min-h-0 py-1">
+      <div className="flex-1 overflow-y-auto min-h-0 pb-1" onKeyDown={handleFileListKeyDown}>
         {isLoading && (
           <p className="text-xs text-muted-foreground px-3 py-2">Loading…</p>
         )}
 
         {staged.length > 0 && (
-          <section>
-            <div className="px-3 py-1 text-[10px] uppercase tracking-wider text-muted-foreground font-semibold">
-              Staged ({staged.length})
-            </div>
+          <section aria-label="Staged files">
+            <h3 className={SECTION_LABEL}>
+              Staged <span className="font-normal tabular-nums text-muted-foreground/70">{staged.length}</span>
+            </h3>
             {view === "path" ? staged.map((f) => (
               <FileRow
                 key={f.path + "-staged"}
-                file={f} statusKind={f.staged}
-                actionIcon={<MinusCircle size={13} />}
+                file={f} section="staged"
                 onAction={() => unstageFile(f.path)}
                 onDiscard={() => discardFile(f.path)}
                 onRowClick={() => onFileClick?.(f.path, "staged")}
+                selected={f.path === selectedStaged}
                 disabled={disabled} treeMode={false}
               />
             )) : (
@@ -490,6 +495,7 @@ export function StagingPanel({ repoId, onCommitSuccess, onFileClick }: Props) {
                 onBatch={unstagePaths} onSingleFile={unstageFile}
                 onDiscard={discardFile} onDiscardBatch={discardBatch}
                 onFileClick={(p) => onFileClick?.(p, "staged")}
+                selectedPath={selectedStaged}
                 disabled={disabled}
               />
             )}
@@ -497,18 +503,18 @@ export function StagingPanel({ repoId, onCommitSuccess, onFileClick }: Props) {
         )}
 
         {unstaged.length > 0 && (
-          <section className={staged.length > 0 ? "mt-2" : ""}>
-            <div className="px-3 py-1 text-[10px] uppercase tracking-wider text-muted-foreground font-semibold">
-              Unstaged ({unstaged.length})
-            </div>
+          <section aria-label="Unstaged files" className={staged.length > 0 ? "mt-2" : ""}>
+            <h3 className={SECTION_LABEL}>
+              Unstaged <span className="font-normal tabular-nums text-muted-foreground/70">{unstaged.length}</span>
+            </h3>
             {view === "path" ? unstaged.map((f) => (
               <FileRow
                 key={f.path + "-unstaged"}
-                file={f} statusKind={f.unstaged}
-                actionIcon={<PlusCircle size={13} />}
+                file={f} section="unstaged"
                 onAction={() => stageFile(f.path)}
                 onDiscard={() => discardFile(f.path)}
                 onRowClick={() => onFileClick?.(f.path, "unstaged")}
+                selected={f.path === selectedUnstaged}
                 disabled={disabled} treeMode={false}
               />
             )) : (
@@ -518,6 +524,7 @@ export function StagingPanel({ repoId, onCommitSuccess, onFileClick }: Props) {
                 onBatch={stagePaths} onSingleFile={stageFile}
                 onDiscard={discardFile} onDiscardBatch={discardBatch}
                 onFileClick={(p) => onFileClick?.(p, "unstaged")}
+                selectedPath={selectedUnstaged}
                 disabled={disabled}
               />
             )}

@@ -1,12 +1,37 @@
-import { useEffect, useState } from "react";
-import { ArrowLeft, ChevronRight } from "lucide-react";
+import { useEffect, useRef, useState } from "react";
+import { ArrowLeft, ChevronLeft, ChevronRight } from "lucide-react";
 import type { FileDiff, Hunk, DiffLine } from "@/lib/ipc";
-import { DIFF_STATUS_COLOR } from "@/lib/ipc";
+import { useStore } from "@/lib/store";
+import { fileLineStats, fileStatusStyle, splitPath } from "@/lib/fileStatus";
+import { cn } from "@/lib/utils";
+import { SegmentedToggle } from "@/components/SegmentedToggle";
+
+const LAYOUT_OPTIONS = [
+  { value: "unified", label: "Unified" },
+  { value: "split", label: "Split" },
+] as const;
+
+const SCOPE_OPTIONS = [
+  { value: "hunks", label: "Hunks" },
+  { value: "full", label: "Full file" },
+] as const;
+
+/** Prev/next through the file list the diff was opened from. */
+export interface FileNav {
+  index: number;
+  total: number;
+  onPrev: () => void;
+  onNext: () => void;
+}
 
 interface Props {
   file: FileDiff;
+  /** What the diff belongs to — a commit summary, or "Staged changes". */
   commitSummary: string;
+  /** Short hash shown beside the summary when the diff belongs to a commit. */
+  commitOid?: string;
   onClose: () => void;
+  nav?: FileNav;
   /**
    * When set, shows a per-hunk button (e.g. "Stage hunk" / "Unstage hunk").
    * `onClick`'s `fullFile` flag reflects whichever scope is currently active
@@ -59,9 +84,10 @@ function HunkActionButton({
 }) {
   return (
     <button
+      type="button"
       onClick={() => hunkAction.onClick(index)}
       disabled={hunkAction.pendingIndex !== null}
-      className="text-[10px] normal-case font-sans text-blue-200 hover:text-white hover:bg-blue-500/20 rounded px-1.5 py-0.5 disabled:opacity-40"
+      className="text-[10px] normal-case font-sans text-foreground/80 hover:text-foreground bg-white/[0.04] hover:bg-white/[0.08] rounded px-1.5 py-0.5 active:translate-y-px disabled:opacity-40"
     >
       {hunkAction.pendingIndex === index ? "…" : hunkAction.label}
     </button>
@@ -101,17 +127,30 @@ function LineNumberCell({
 
   return (
     <button
+      type="button"
       onClick={() => lineAction.onClick(hunkIndex, lineIndex)}
       disabled={lineAction.pending !== null}
       title={lineAction.label}
-      className="group relative w-10 shrink-0 text-right pr-2 border-r border-border text-muted-foreground/50 hover:bg-blue-500/20 disabled:opacity-40 disabled:cursor-default"
+      aria-label={`${lineAction.label} ${value}`}
+      className="group relative w-10 shrink-0 text-right pr-2 border-r border-border text-muted-foreground/50 hover:bg-white/[0.08] focus-visible:bg-white/[0.08] outline-none disabled:opacity-40 disabled:cursor-default"
     >
-      <span className="group-hover:opacity-0 transition-opacity">{isPending ? "…" : value}</span>
+      <span className="group-hover:opacity-0 group-focus-visible:opacity-0 transition-opacity">{isPending ? "…" : value}</span>
       <ChevronRight
         size={12}
-        className="absolute inset-0 m-auto opacity-0 group-hover:opacity-100 text-blue-200 transition-opacity"
+        aria-hidden
+        className="absolute inset-0 m-auto opacity-0 group-hover:opacity-100 group-focus-visible:opacity-100 text-foreground transition-opacity"
       />
     </button>
+  );
+}
+
+/** Neutral band — hunk headers are structure, not a state, so they carry no hue. */
+function HunkHeader({ header, children }: { header: string; children?: React.ReactNode }) {
+  return (
+    <div className="bg-white/[0.03] text-muted-foreground px-3 py-0.5 select-none flex items-center justify-between gap-3">
+      <span className="truncate">{header}</span>
+      {children}
+    </div>
   );
 }
 
@@ -152,25 +191,23 @@ function HunkBlock({
   });
 
   return (
-    <div className="mb-0 font-mono text-xs">
-      {/* Hunk header */}
-      <div className="bg-blue-500/10 text-blue-300 px-3 py-0.5 select-none flex items-center justify-between">
-        <span>{hunk.header}</span>
+    <div className="font-mono text-xs border-t border-border first:border-t-0">
+      <HunkHeader header={hunk.header}>
         {hunkAction && <HunkActionButton hunkAction={hunkAction} index={index} />}
-      </div>
+      </HunkHeader>
 
       {rows.map(({ key, oldNo, newNo, line }) => {
         const bg =
           line.kind === "addition"
-            ? "bg-green-500/10"
+            ? "bg-diff-add-bg"
             : line.kind === "deletion"
-            ? "bg-red-500/10"
+            ? "bg-diff-del-bg"
             : "";
         const fg =
           line.kind === "addition"
-            ? "text-green-300"
+            ? "text-diff-add"
             : line.kind === "deletion"
-            ? "text-red-300"
+            ? "text-diff-del"
             : "text-foreground/75";
         const prefix =
           line.kind === "addition" ? "+" : line.kind === "deletion" ? "-" : " ";
@@ -261,9 +298,9 @@ function buildSideBySideRows(hunk: Hunk): { left: SplitCell; right: SplitCell }[
 }
 
 function splitCellClasses(cell: SplitCell): string {
-  if (cell.kind === "addition") return "bg-green-500/10 text-green-300";
-  if (cell.kind === "deletion") return "bg-red-500/10 text-red-300";
-  if (cell.kind === "empty") return "bg-muted/20";
+  if (cell.kind === "addition") return "bg-diff-add-bg text-diff-add";
+  if (cell.kind === "deletion") return "bg-diff-del-bg text-diff-del";
+  if (cell.kind === "empty") return "bg-white/[0.02]";
   return "text-foreground/75";
 }
 
@@ -281,11 +318,10 @@ function SideBySideHunkBlock({
   const rows = buildSideBySideRows(hunk);
 
   return (
-    <div className="mb-0 font-mono text-xs">
-      <div className="bg-blue-500/10 text-blue-300 px-3 py-0.5 select-none flex items-center justify-between">
-        <span>{hunk.header}</span>
+    <div className="font-mono text-xs border-t border-border first:border-t-0">
+      <HunkHeader header={hunk.header}>
         {hunkAction && <HunkActionButton hunkAction={hunkAction} index={index} />}
-      </div>
+      </HunkHeader>
 
       {rows.map((row, i) => (
         <div key={i} className="flex">
@@ -317,9 +353,38 @@ function SideBySideHunkBlock({
 
 // ── Main panel ───────────────────────────────────────────────────────────────
 
-export function FileDiffPanel({ file, commitSummary, onClose, hunkAction, fetchFullFile, lineAction }: Props) {
-  const [scope, setScope] = useState<"hunks" | "full">("hunks");
-  const [layout, setLayout] = useState<"unified" | "split">("unified");
+/** Keys typed into a field or while a dialog/menu is open belong to that, not to the diff. */
+function isForeignKeyTarget(e: KeyboardEvent): boolean {
+  if (e.defaultPrevented) return true;
+  const t = e.target as HTMLElement | null;
+  if (t && (t.isContentEditable || /^(INPUT|TEXTAREA|SELECT)$/.test(t.tagName))) return true;
+  return document.querySelector('[role="dialog"], [role="alertdialog"], [role="menu"]') !== null;
+}
+
+function NavButton({ onClick, disabled, label, children }: {
+  onClick: () => void; disabled: boolean; label: string; children: React.ReactNode;
+}) {
+  return (
+    <button
+      type="button"
+      onClick={onClick}
+      disabled={disabled}
+      aria-label={label}
+      title={label}
+      className="flex size-6 items-center justify-center rounded-md text-muted-foreground hover:text-foreground hover:bg-white/[0.07] active:translate-y-px disabled:opacity-30 disabled:pointer-events-none transition-colors"
+    >
+      {children}
+    </button>
+  );
+}
+
+export function FileDiffPanel({ file, commitSummary, commitOid, onClose, nav, hunkAction, fetchFullFile, lineAction }: Props) {
+  // Layout and scope are preferences, not per-file state: they survive moving
+  // between files (this panel remounts per file) and restarts.
+  const layout = useStore((s) => s.diffLayout);
+  const storedScope = useStore((s) => s.diffScope);
+  const setViewPref = useStore((s) => s.setViewPref);
+  const scope = fetchFullFile ? storedScope : "hunks";
   const [fullFileData, setFullFileData] = useState<FileDiff | null>(null);
   const [loadingFull, setLoadingFull] = useState(false);
   const [fullFileError, setFullFileError] = useState(false);
@@ -355,74 +420,110 @@ export function FileDiffPanel({ file, commitSummary, onClose, hunkAction, fetchF
     onClick: (hunkIndex, lineIndex) => lineAction.onClick(hunkIndex, lineIndex, fullFile),
   };
 
+  // Esc → back to the timeline; [ ] or Alt+↑/↓ → previous/next file.
+  // Read through a ref so the listener isn't re-bound on every render.
+  const keysRef = useRef({ onClose, nav });
+  keysRef.current = { onClose, nav };
+  useEffect(() => {
+    function onKeyDown(e: KeyboardEvent) {
+      if (isForeignKeyTarget(e)) return;
+      const { onClose, nav } = keysRef.current;
+      const plain = !e.ctrlKey && !e.metaKey && !e.altKey;
+      if (e.key === "Escape" && plain) {
+        e.preventDefault();
+        onClose();
+      } else if (nav && ((e.key === "]" && plain) || (e.key === "ArrowDown" && e.altKey))) {
+        e.preventDefault();
+        if (nav.index < nav.total - 1) nav.onNext();
+      } else if (nav && ((e.key === "[" && plain) || (e.key === "ArrowUp" && e.altKey))) {
+        e.preventDefault();
+        if (nav.index > 0) nav.onPrev();
+      }
+    }
+    window.addEventListener("keydown", onKeyDown);
+    return () => window.removeEventListener("keydown", onKeyDown);
+  }, []);
+
+  const status = fileStatusStyle(file.status);
+  const { dir, name } = splitPath(file.path);
+  const stats = fileLineStats(file);
+
   return (
     <div className="flex-1 flex flex-col overflow-hidden border-r border-border bg-background min-w-0">
-      {/* Header */}
-      <div className="shrink-0 border-b border-border flex items-center gap-2 px-2 py-1.5">
+      {/* Header: back · file · (commit context) · file navigation */}
+      <div className="shrink-0 h-9 border-b border-border flex items-center gap-2 px-2">
         <button
+          type="button"
           onClick={onClose}
-          className="flex items-center gap-1 text-xs text-muted-foreground hover:text-foreground px-1.5 py-0.5 rounded hover:bg-white/5"
+          title="Back to timeline (Esc)"
+          className="flex shrink-0 items-center gap-1 h-6 text-xs text-muted-foreground hover:text-foreground px-1.5 rounded-md hover:bg-white/[0.07] active:translate-y-px transition-colors"
         >
-          <ArrowLeft size={13} />
+          <ArrowLeft size={13} aria-hidden />
           Timeline
         </button>
 
-        <span className="text-muted-foreground/40 text-xs">|</span>
+        <div className="w-px h-3.5 bg-border shrink-0" aria-hidden />
 
-        <span className={`text-xs font-bold uppercase ${DIFF_STATUS_COLOR[file.status]}`}>
-          {file.status[0].toUpperCase()}
+        <span className={cn("shrink-0 font-mono text-[11px] font-semibold", status.color)} title={status.label}>
+          {status.letter}
         </span>
+        <h2 className="min-w-0 truncate font-mono text-xs" title={file.old_path ? `${file.old_path} → ${file.path}` : file.path}>
+          {dir && <span className="text-muted-foreground">{dir}/</span>}
+          <span className="text-foreground">{name}</span>
+          {file.old_path && <span className="text-muted-foreground"> ← {file.old_path}</span>}
+        </h2>
 
-        <span className="font-mono text-sm text-foreground/90 truncate min-w-0">
-          {file.path}
-        </span>
-        {file.old_path && (
-          <span className="text-muted-foreground text-xs shrink-0">← {file.old_path}</span>
-        )}
+        <div className="ml-auto flex shrink-0 items-center gap-2 min-w-0">
+          <span className="hidden lg:flex items-center gap-1.5 min-w-0 max-w-64 text-xs text-muted-foreground" title={commitSummary}>
+            {commitOid && <span className="font-mono text-[11px] text-foreground/60">{commitOid.slice(0, 7)}</span>}
+            <span className="truncate">{commitSummary}</span>
+          </span>
 
-        <span className="ml-auto text-xs text-muted-foreground truncate max-w-48 hidden lg:block" title={commitSummary}>
-          {commitSummary}
-        </span>
+          {nav && nav.total > 1 && (
+            <div className="flex items-center gap-0.5" role="group" aria-label="File navigation">
+              <NavButton onClick={nav.onPrev} disabled={nav.index <= 0} label="Previous file ([)">
+                <ChevronLeft size={14} aria-hidden />
+              </NavButton>
+              <span className="min-w-12 text-center text-[11px] tabular-nums text-muted-foreground" aria-live="polite">
+                {nav.index + 1} / {nav.total}
+              </span>
+              <NavButton onClick={nav.onNext} disabled={nav.index >= nav.total - 1} label="Next file (])">
+                <ChevronRight size={14} aria-hidden />
+              </NavButton>
+            </div>
+          )}
+        </div>
       </div>
 
-      {/* Toolbar: scope (hunks/full file) + layout (unified/split) toggles */}
-      <div className="shrink-0 border-b border-border flex items-center gap-2 px-2 py-1">
-        {fetchFullFile && (
-          <div className="flex items-center gap-0.5 bg-white/5 rounded p-0.5">
-            {(["hunks", "full"] as const).map((s) => (
-              <button
-                key={s}
-                onClick={() => setScope(s)}
-                className={[
-                  "text-[10px] px-1.5 py-0.5 rounded transition-colors",
-                  scope === s ? "bg-white/15 text-foreground" : "text-muted-foreground hover:text-foreground",
-                ].join(" ")}
-              >
-                {s === "hunks" ? "Hunks" : "Full file"}
-              </button>
-            ))}
-          </div>
+      {/* Toolbar: line counts · scope (hunks/full file) · layout (unified/split) */}
+      <div className="shrink-0 h-8 border-b border-border flex items-center gap-3 px-3">
+        {!file.binary && (stats.added > 0 || stats.removed > 0) && (
+          <span className="flex gap-1.5 font-mono text-[11px] tabular-nums" aria-label={`${stats.added} lines added, ${stats.removed} removed`}>
+            <span className="text-diff-add">+{stats.added}</span>
+            <span className="text-diff-del">−{stats.removed}</span>
+          </span>
         )}
-
-        <div className="flex items-center gap-0.5 bg-white/5 rounded p-0.5 ml-auto">
-          {(["unified", "split"] as const).map((l) => (
-            <button
-              key={l}
-              onClick={() => setLayout(l)}
-              className={[
-                "text-[10px] capitalize px-1.5 py-0.5 rounded transition-colors",
-                layout === l ? "bg-white/15 text-foreground" : "text-muted-foreground hover:text-foreground",
-              ].join(" ")}
-            >
-              {l}
-            </button>
-          ))}
+        <div className="ml-auto flex items-center gap-2">
+          {fetchFullFile && (
+            <SegmentedToggle
+              label="Diff scope"
+              value={scope}
+              options={SCOPE_OPTIONS}
+              onChange={(v) => setViewPref("diffScope", v)}
+            />
+          )}
+          <SegmentedToggle
+            label="Diff layout"
+            value={layout}
+            options={LAYOUT_OPTIONS}
+            onChange={(v) => setViewPref("diffLayout", v)}
+          />
         </div>
       </div>
 
       {scope === "full" && fullFileError && (
-        <div className="shrink-0 border-b border-border bg-yellow-500/10 text-yellow-400 text-xs px-3 py-1.5">
-          Couldn't load full-file view — showing the regular hunk view instead.
+        <div className="shrink-0 border-b border-border bg-amber-500/10 text-amber-300 text-xs px-3 py-1.5" role="status">
+          Couldn't load the full-file view — showing hunks instead.
         </div>
       )}
 
@@ -436,7 +537,9 @@ export function FileDiffPanel({ file, commitSummary, onClose, hunkAction, fetchF
           <div className="px-4 py-6 text-xs text-muted-foreground">Loading full file…</div>
         ) : activeHunks.length === 0 ? (
           <div className="px-4 py-6 text-xs text-muted-foreground">
-            Binary or empty file — no textual diff available.
+            {file.binary
+              ? "Binary file — there's no text diff to show."
+              : "No content changes — the file is empty, or only its mode changed."}
           </div>
         ) : (
           <div className="border-b border-border">

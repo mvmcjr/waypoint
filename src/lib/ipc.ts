@@ -43,17 +43,10 @@ export interface FileDiff {
   path: string;
   old_path: string | null;
   status: "added" | "deleted" | "modified" | "renamed" | "copied" | "other";
+  /** libgit2 classified the content as binary — `hunks` is empty and no text diff exists. */
+  binary: boolean;
   hunks: Hunk[];
 }
-
-export const DIFF_STATUS_COLOR: Record<FileDiff["status"], string> = {
-  added:    "text-green-400",
-  deleted:  "text-red-400",
-  modified: "text-yellow-400",
-  renamed:  "text-blue-400",
-  copied:   "text-cyan-400",
-  other:    "text-muted-foreground",
-};
 
 export interface Hunk {
   header: string;
