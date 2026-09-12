@@ -1,43 +1,73 @@
-# Waypoint
+<div align="center">
+  <img src="public/waypoint-icon.svg" width="112" height="112" alt="Waypoint logo">
+  <h1>Waypoint</h1>
+  <p><strong>A fast, local Git GUI built around a visual commit timeline.</strong><br>
+  No account. No telemetry. No paywall.</p>
+  <p>
+    <a href="LICENSE"><img src="https://img.shields.io/badge/license-MIT-2dd4bf?style=flat-square" alt="MIT license"></a>
+    <img src="https://img.shields.io/badge/platforms-macOS%20%7C%20Windows%20%7C%20Linux-1f2937?style=flat-square" alt="macOS, Windows, Linux">
+    <img src="https://img.shields.io/badge/built%20with-Tauri%202%20%2B%20React-1f2937?style=flat-square" alt="Built with Tauri 2 and React">
+  </p>
+  <p>
+    <a href="#download">Download</a> ·
+    <a href="#features">Features</a> ·
+    <a href="docs/plugins.md">Plugins</a> ·
+    <a href="#development">Build from source</a>
+  </p>
+</div>
 
-A Git GUI desktop application with a visual commit timeline. Built with Tauri 2, React 19, and TypeScript. No account, no telemetry, no paywall: it talks only to your local repositories and the remotes you already have configured.
+<br>
+
+![Waypoint showing a repository's commit timeline, with merge lanes, branches, and tags](docs/screenshots/timeline.png)
+
+Waypoint talks only to your local repositories and the remotes you already have configured. It's built with Tauri 2 and a Rust + libgit2 backend, so it starts fast, stays small, and loads your whole history with no commit cap.
 
 ## Features
 
-**History**
-- Visual commit graph with lane-based layout; the full history loads, with no commit cap
-- Go to commit: search by message, author, email, hash, or branch/tag and step through matches in place
-- "Check if in branch…" on any commit
-- Stashes shown as rows on the timeline, plus a pinned WIP row for uncommitted changes
+### Read history at a glance
 
-**Staging and committing**
+The timeline lays out branches and merges in colored lanes, with refs, tags, and stashes inline and a pinned row for uncommitted work.
+
+- **Go to commit:** search by message, author, email, hash, or branch/tag and step through matches in place (Ctrl/Cmd+F)
+- **"Check if in branch…"** on any commit
+- Refreshes live when files change outside the app
+
+### Review every change
+
+![Commit diff with the commit's details and changed files alongside](docs/screenshots/diff.png)
+
+- Unified or split view, changed hunks or the full file
+- Commit details and the file list beside the diff; move between files with `[` / `]`
+
+### Stage exactly what you mean
+
+![Staging panel with per-hunk "Stage hunk" buttons and a commit message in progress](docs/screenshots/staging.png)
+
 - Stage or unstage by folder, file, hunk, or single line
-- Commit, amend (with a warning when the commit is already pushed), and edit the message of any commit
+- Commit, amend (with a warning if the commit is already pushed), or edit the message of any commit
 - Discard changes per file, per folder, or everything
 
-**Branches and history editing**
-- Create, rename, delete, and check out branches (including detached and remote branches)
-- Merge, rebase, cherry-pick, revert, soft/mixed/hard reset, and squash a selected range with a preview
-- Conflict resolver: per hunk, take ours, theirs, both, or pick individual lines, in a stacked or side-by-side view
+### Resolve conflicts hunk by hunk
 
-**Remotes**
-- Fetch, pull, and push from the toolbar, with a force-push offer when a push is rejected
-- Push and delete remote tags; rename a branch locally and on the remote
-- Remote operations run through your system `git`, so credential helpers and SSH agents work as they do in your terminal
+![Merge conflict resolver showing ours and theirs side by side with a result preview](docs/screenshots/conflicts.png)
 
-**Tags and stashes**
-- Annotated and lightweight tags
-- Named stashes; pop, apply, drop, and rename
+- For each conflict, take ours, theirs, or both, or pick individual lines
+- Stacked or side-by-side view, with a preview of the result before it's written
 
-**Everything else**
-- Diff viewer: unified or split, hunks or full file, keyboard navigation between files
-- Multiple repos as tabs, recent repos on the welcome screen, and a folder scan to find repos
-- Offers `git init` when you open a folder that isn't a repository
-- Refreshes live when files change outside the app
-- Command palette (Ctrl/Cmd+Shift+P)
-- `waypoint .` terminal command (enable in Settings → Integrations) and, on Windows, an "Open in Waypoint" Explorer context menu
-- **Plugins**: add your own commands to the palette, context menus, and toolbar
-- Dark theme
+### Everything a keystroke away
+
+![Command palette open over the timeline](docs/screenshots/palette.png)
+
+The command palette (Ctrl/Cmd+Shift+P) reaches repo actions, settings, and any commands your plugins add.
+
+### And the rest
+
+- **Branches:** create, rename, delete, and check out (including detached and remote branches)
+- **History editing:** merge, rebase, cherry-pick, revert, soft/mixed/hard reset, and squash a selected range with a preview
+- **Remotes:** fetch, pull, and push, with a force-push offer when a push is rejected; push and delete remote tags; rename a branch on the remote. Remote operations run through your system `git`, so credential helpers and SSH agents work as they do in your terminal
+- **Tags and stashes:** annotated and lightweight tags; named stashes you can pop, apply, drop, and rename
+- **Repos:** multiple repos as tabs, recent repos on the welcome screen, a folder scan to find repos, and `git init` for folders that aren't repositories yet
+- **Integrations:** a `waypoint .` terminal command (Settings → Integrations) and, on Windows, an "Open in Waypoint" Explorer context menu
 
 ### Keyboard shortcuts
 
@@ -52,13 +82,13 @@ A Git GUI desktop application with a visual commit timeline. Built with Tauri 2,
 
 ## Plugins
 
-Plugins are small JavaScript packages (local folders or GitHub repos) that add custom commands to the command palette, commit/branch context menus, and the toolbar. For example, a one-click "create the next release branch" for your team's workflow.
+Plugins are small JavaScript packages (local folders or GitHub repos) that add your own commands to the command palette, commit and branch context menus, and the toolbar. For example, a one-click "create the next release branch" for your team's workflow.
 
 See **[docs/plugins.md](docs/plugins.md)** for the manifest schema, the full `api` reference, and how-tos. A ready-to-copy starting point lives in **[`example-plugin/`](example-plugin)**.
 
 ## Download
 
-Pre-built installers are attached to each [release](../../releases):
+Installers are attached to each [release](../../releases):
 
 | Platform | Format |
 |---|---|
@@ -106,7 +136,7 @@ After changing dependencies, regenerate the bundled license notices with `pnpm n
 - **Desktop:** Tauri 2, with a Rust backend using libgit2 (`git2` crate) for local operations
 - **Build:** Vite, pnpm
 
-## Releasing
+### Releasing
 
 Push a version tag to trigger the release workflow:
 
