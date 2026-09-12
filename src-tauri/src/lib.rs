@@ -98,6 +98,7 @@ pub fn run() {
             commands::repo::list_refs,
             commands::history::walk_commits,
             commands::history::get_commit,
+            commands::history::is_commit_in_ref,
             commands::diff::get_commit_diff,
             commands::diff::get_workdir_diff,
             commands::diff::get_workdir_file_full,

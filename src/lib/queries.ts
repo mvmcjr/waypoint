@@ -23,6 +23,26 @@ export function useCommit(repoId: string | null, oid: string | null) {
   });
 }
 
+/**
+ * Whether `oid` is in the history of `refName` (or HEAD, when `refName` is
+ * null). `tipOid` is the current tip of that ref — including it in the query
+ * key means the answer recomputes whenever that branch/HEAD moves, with no
+ * manual invalidation needed.
+ */
+export function useCommitInRef(
+  repoId: string | null,
+  oid: string | null,
+  refName: string | null,
+  tipOid: string | null,
+) {
+  return useQuery({
+    queryKey: ["commit-in-ref", repoId, oid, refName, tipOid],
+    queryFn: () => ipc.isCommitInRef(repoId!, oid!, refName),
+    enabled: !!repoId && !!oid && !!tipOid,
+    staleTime: Infinity,
+  });
+}
+
 export function useRefs(repoId: string | null) {
   return useQuery({
     queryKey: ["refs", repoId],
