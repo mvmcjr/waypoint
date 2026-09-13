@@ -10,3 +10,4 @@ pub mod repo;
 pub mod staging;
 pub mod stash;
 pub mod tags;
+pub mod worktrees;

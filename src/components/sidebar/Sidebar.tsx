@@ -1,17 +1,20 @@
 import { useState, useEffect } from "react";
 import { Search } from "lucide-react";
-import type { RefInfo } from "@/lib/ipc";
+import type { RefInfo, WorktreeInfo } from "@/lib/ipc";
 import { useRefs } from "@/lib/queries";
 import { RefTree, type RefAction } from "./RefTree";
 import { StashList } from "./StashList";
+import { WorktreeList } from "./WorktreeList";
 
 interface Props {
   repoId: string | null;
   onSelectRef?: (ref: RefInfo) => void;
   onRefAction?: (action: RefAction) => void;
+  onSelectOid?: (oid: string) => void;
+  onRemoveWorktree?: (wt: WorktreeInfo) => void;
 }
 
-export function Sidebar({ repoId, onSelectRef, onRefAction }: Props) {
+export function Sidebar({ repoId, onSelectRef, onRefAction, onSelectOid, onRemoveWorktree }: Props) {
   const { data: refs, isLoading } = useRefs(repoId);
   const [filter, setFilter] = useState("");
 
@@ -52,7 +55,24 @@ export function Sidebar({ repoId, onSelectRef, onRefAction }: Props) {
         </div>
       )}
 
-      {refs && <RefTree refs={refs} filter={filter} onSelectRef={onSelectRef} onRefAction={onRefAction} />}
+      {refs && (
+        <RefTree
+          refs={refs}
+          filter={filter}
+          onSelectRef={onSelectRef}
+          onRefAction={onRefAction}
+          afterBranches={
+            repoId && (
+              <WorktreeList
+                repoId={repoId}
+                filter={filter}
+                onSelectOid={onSelectOid}
+                onRemove={onRemoveWorktree}
+              />
+            )
+          }
+        />
+      )}
       {repoId && <StashList repoId={repoId} />}
 
       {!repoId && (

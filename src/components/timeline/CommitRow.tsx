@@ -26,6 +26,8 @@ interface Props {
   isDimmed?: boolean;
   /** Query tokens to highlight in this row (only passed for matching rows — keeps memo effective on the rest). */
   highlightTokens?: string[];
+  /** Local branch shorthand -> the other worktree's path it's checked out in (see RefInfo.worktree_path). */
+  worktreeByBranch?: Map<string, string>;
   onRefAction?: (action: RefAction) => void;
   onCommitAction?: (action: CommitAction) => void;
   onSelect: (oid: string, mods: { ctrl: boolean; shift: boolean }) => void;
@@ -69,7 +71,7 @@ function HighlightedHash({ oid, shortHash, tokens }: { oid: string; shortHash: s
   );
 }
 
-export const CommitRow = memo(function CommitRow({ item, refsWidth, graphWidth, isSelected, isContextTarget, isHead, headBranch, pushedTagNames, isStash, stashName, isDimmed, highlightTokens, onRefAction, onCommitAction, onSelect }: Props) {
+export const CommitRow = memo(function CommitRow({ item, refsWidth, graphWidth, isSelected, isContextTarget, isHead, headBranch, pushedTagNames, isStash, stashName, isDimmed, highlightTokens, worktreeByBranch, onRefAction, onCommitAction, onSelect }: Props) {
   const { commit } = item;
   const relative = formatDistanceToNow(new Date(commit.timestamp * 1000), { addSuffix: true });
   const refGroups = groupRefs(commit.refs, item.commit.local_branches, item.commit.remote_branches, headBranch, pushedTagNames);
@@ -129,7 +131,7 @@ export const CommitRow = memo(function CommitRow({ item, refsWidth, graphWidth, 
         ) : (
           <>
         {visibleRefs.map((g) => (
-          <RefBadge key={g.name} {...g} oid={commit.oid} onAction={onRefAction} onCommitAction={onCommitAction} commitSummary={commit.summary} maxWidth={badgeMaxWidth} />
+          <RefBadge key={g.name} {...g} oid={commit.oid} onAction={onRefAction} onCommitAction={onCommitAction} commitSummary={commit.summary} maxWidth={badgeMaxWidth} worktreePath={!g.isTag ? worktreeByBranch?.get(g.name) : undefined} />
         ))}
         {hiddenCount > 0 && (
           <HoverCard>
@@ -158,6 +160,7 @@ export const CommitRow = memo(function CommitRow({ item, refsWidth, graphWidth, 
                     onCommitAction={onCommitAction}
                     commitSummary={commit.summary}
                     maxWidth={200}
+                    worktreePath={!g.isTag ? worktreeByBranch?.get(g.name) : undefined}
                   />
                 ))}
               </div>

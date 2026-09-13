@@ -21,7 +21,7 @@ import {
   SelectValue,
 } from "@/components/ui/select";
 import { ipc, type CheckoutRemoteResult, type RemoteInfo } from "@/lib/ipc";
-import { useRefs, useCommitInRef } from "@/lib/queries";
+import { useRefs, useCommitInRef, useWorktreeStatus } from "@/lib/queries";
 
 // ─── Shared helpers ────────────────────────────────────────────────────────
 
@@ -45,7 +45,7 @@ function ErrorNote({ msg }: { msg: string }) {
  * that rewrite history but stay recoverable via reflog (rebase, squash).
  * Keeps the destructive button variant reserved for the "danger" tier only.
  */
-function RiskBanner({ level, children }: { level: "caution" | "danger"; children: React.ReactNode }) {
+export function RiskBanner({ level, children }: { level: "caution" | "danger"; children: React.ReactNode }) {
   const styles =
     level === "danger"
       ? "border-destructive/30 bg-destructive/10 text-destructive"
@@ -489,11 +489,15 @@ interface MergeProps extends BaseProps {
   label: string;
   currentBranch: string | null;
   onConflicts: () => void;
+  /** The other worktree holding `label` checked out, if any (null for a plain branch). */
+  worktree?: { name: string; path: string } | null;
 }
 
-export function MergeDialog({ repoId, oid, label, currentBranch, onClose, onSuccess, onConflicts }: MergeProps) {
+export function MergeDialog({ repoId, oid, label, currentBranch, onClose, onSuccess, onConflicts, worktree }: MergeProps) {
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const { data: worktreeStatus } = useWorktreeStatus(worktree?.path ?? null, { enabled: !!worktree });
+  const changed = worktreeStatus?.changed ?? 0;
 
   async function run() {
     setLoading(true);
@@ -526,6 +530,12 @@ export function MergeDialog({ repoId, oid, label, currentBranch, onClose, onSucc
               : "the current branch"}.
           </DialogDescription>
         </DialogHeader>
+        {worktree && changed > 0 && (
+          <RiskBanner level="caution">
+            {worktree.name} has {changed} uncommitted change(s) that won't be merged. Only committed
+            work on {label} is merged.
+          </RiskBanner>
+        )}
         {error && <ErrorNote msg={error} />}
         <DialogFooter>
           <Button variant="outline" onClick={onClose} disabled={loading}>Cancel</Button>

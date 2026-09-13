@@ -1,12 +1,12 @@
 import { useState, useEffect, useRef, useCallback } from "react";
 import { Dialog as DialogPrimitive } from "@base-ui/react/dialog";
-import { FolderOpen, Search, ArrowLeft, ExternalLink, Download, Settings, Puzzle } from "lucide-react";
+import { FolderOpen, FolderGit2, Search, ArrowLeft, ExternalLink, Download, Settings, Puzzle } from "lucide-react";
 import { open as openDialog } from "@tauri-apps/plugin-dialog";
 import { revealItemInDir } from "@tauri-apps/plugin-opener";
-import { cn, repoLabel, truncatePath } from "@/lib/utils";
-import { ipc } from "@/lib/ipc";
+import { cn, repoLabel, truncatePath, explorerName } from "@/lib/utils";
+import { ipc, type WorktreeInfo } from "@/lib/ipc";
 import { useStore } from "@/lib/store";
-import { useOpenRepo } from "@/lib/useOpenRepo";
+import { useOpenRepo, useOpenWorktree } from "@/lib/useOpenRepo";
 import { getRecentRepos, addManyToRecentRepos } from "@/lib/recentRepos";
 import { usePluginRegistry, commandsForSurface } from "@/lib/plugins/registry";
 import { usePluginRunner } from "@/components/plugins/PluginRunnerProvider";
@@ -16,7 +16,7 @@ interface Props {
   onClose: () => void;
 }
 
-type Mode = "commands" | "repo-picker";
+type Mode = "commands" | "repo-picker" | "worktree-picker";
 
 interface CommandDef {
   id: string;
@@ -26,23 +26,23 @@ interface CommandDef {
   execute: () => void | Promise<void>;
 }
 
-function explorerName(): string {
-  const ua = navigator.userAgent;
-  if (ua.includes("Mac OS X")) return "Finder";
-  if (ua.includes("Linux")) return "Files";
-  return "Explorer";
-}
-
 export function CommandPalette({ open, onClose }: Props) {
   const [mode, setMode] = useState<Mode>("commands");
   const [query, setQuery] = useState("");
   const [selectedIdx, setSelectedIdx] = useState(0);
   const [repos, setRepos] = useState<string[]>([]);
+  const [worktrees, setWorktrees] = useState<WorktreeInfo[]>([]);
+  const [worktreesLoading, setWorktreesLoading] = useState(false);
   const [feedback, setFeedback] = useState<string | null>(null);
   const inputRef = useRef<HTMLInputElement>(null);
+  // Monotonic id guards against a stale listWorktrees() resolving after a
+  // newer load (e.g. the palette reopened for a different active tab) and
+  // overwriting the newer tab's list.
+  const worktreeReqIdRef = useRef(0);
 
   const activeTab = useStore((s) => s.tabs.find((t) => t.id === s.activeTabId));
   const openRepoAndRecent = useOpenRepo();
+  const openWorktreeInTab = useOpenWorktree(activeTab?.id ?? null);
   const pluginList = usePluginRegistry((s) => s.plugins);
   const runner = usePluginRunner();
 
@@ -52,6 +52,8 @@ export function CommandPalette({ open, onClose }: Props) {
       setQuery("");
       setSelectedIdx(0);
       setFeedback(null);
+      setWorktrees([]);
+      setWorktreesLoading(false);
       getRecentRepos().then(setRepos);
     }
   }, [open]);
@@ -72,6 +74,7 @@ export function CommandPalette({ open, onClose }: Props) {
     setMode("commands");
     setQuery("");
     setSelectedIdx(0);
+    setFeedback(null);
   }, []);
 
   async function openRepo(path: string) {
@@ -91,6 +94,33 @@ export function CommandPalette({ open, onClose }: Props) {
       title: "Open Repository",
     });
     if (picked) await openRepo(picked as string);
+  }
+
+  async function openWorktree(path: string) {
+    await openWorktreeInTab(path);
+    onClose();
+  }
+
+  function pickWorktree() {
+    if (!activeTab) return;
+    setMode("worktree-picker");
+    setQuery("");
+    setFeedback(null);
+    setWorktrees([]);
+    setWorktreesLoading(true);
+    const reqId = ++worktreeReqIdRef.current;
+    ipc
+      .listWorktrees(activeTab.id)
+      .then((wts) => {
+        if (worktreeReqIdRef.current !== reqId) return; // stale — a newer load has since started
+        setWorktrees(wts);
+        setWorktreesLoading(false);
+      })
+      .catch((e) => {
+        if (worktreeReqIdRef.current !== reqId) return;
+        setWorktreesLoading(false);
+        setFeedback(`Failed to load worktrees: ${String(e)}`);
+      });
   }
 
   async function openInExplorer() {
@@ -141,6 +171,13 @@ export function CommandPalette({ open, onClose }: Props) {
       execute: openInExplorer,
     },
     {
+      id: "open-worktree",
+      label: "Open Worktree…",
+      icon: FolderGit2,
+      disabled: !activeTab,
+      execute: pickWorktree,
+    },
+    {
       id: "load-recent",
       label: "Load Repos into Recent",
       icon: Download,
@@ -177,12 +214,21 @@ export function CommandPalette({ open, onClose }: Props) {
     (p) => !query || p.toLowerCase().includes(query.toLowerCase())
   );
 
+  const otherWorktrees = worktrees.filter((w) => !w.is_current && !w.is_missing);
+  const filteredWorktrees = otherWorktrees.filter((w) => {
+    if (!query) return true;
+    const q = query.toLowerCase();
+    return w.name.toLowerCase().includes(q) || (w.branch?.toLowerCase().includes(q) ?? false);
+  });
+
   // Keyboard handler lives on the Popup so it works regardless of which child has focus
   function handleKeyDown(e: React.KeyboardEvent) {
     const itemCount =
       mode === "commands"
         ? filteredCommands.length
-        : filteredRepos.length + 1; // +1 for Browse
+        : mode === "repo-picker"
+        ? filteredRepos.length + 1 // +1 for Browse
+        : filteredWorktrees.length;
 
     if (e.key === "ArrowDown") {
       e.preventDefault();
@@ -195,12 +241,15 @@ export function CommandPalette({ open, onClose }: Props) {
       if (mode === "commands") {
         const cmd = filteredCommands[selectedIdx];
         if (cmd && !cmd.disabled) cmd.execute();
-      } else {
+      } else if (mode === "repo-picker") {
         if (selectedIdx < filteredRepos.length) {
           openRepo(filteredRepos[selectedIdx]);
         } else {
           pickRepo();
         }
+      } else {
+        const wt = filteredWorktrees[selectedIdx];
+        if (wt) openWorktree(wt.path);
       }
     }
   }
@@ -227,6 +276,15 @@ export function CommandPalette({ open, onClose }: Props) {
                 <ArrowLeft className="size-3" />
                 Open Repo
               </button>
+            ) : mode === "worktree-picker" ? (
+              <button
+                tabIndex={-1}
+                onClick={goBack}
+                className="flex items-center gap-1 text-xs text-muted-foreground hover:text-foreground py-3 shrink-0 cursor-pointer transition-colors"
+              >
+                <ArrowLeft className="size-3" />
+                Open Worktree
+              </button>
             ) : (
               <Search className="size-4 text-muted-foreground/50 shrink-0" />
             )}
@@ -234,7 +292,13 @@ export function CommandPalette({ open, onClose }: Props) {
               ref={inputRef}
               value={query}
               onChange={(e) => setQuery(e.target.value)}
-              placeholder={mode === "commands" ? "Type a command…" : "Filter recent repos…"}
+              placeholder={
+                mode === "commands"
+                  ? "Type a command…"
+                  : mode === "repo-picker"
+                  ? "Filter recent repos…"
+                  : "Filter worktrees…"
+              }
               className="flex-1 bg-transparent py-3 text-sm text-foreground outline-none placeholder:text-muted-foreground/40"
               autoCorrect="off"
               autoComplete="off"
@@ -255,12 +319,23 @@ export function CommandPalette({ open, onClose }: Props) {
                 onSelect={(cmd) => cmd.execute()}
                 onHover={setSelectedIdx}
               />
-            ) : (
+            ) : mode === "repo-picker" ? (
               <RepoItems
                 repos={filteredRepos}
                 selectedIdx={selectedIdx}
                 onSelect={openRepo}
                 onBrowse={pickRepo}
+                onHover={setSelectedIdx}
+              />
+            ) : worktreesLoading ? (
+              <p className="px-4 py-6 text-center text-sm text-muted-foreground">
+                Loading worktrees…
+              </p>
+            ) : (
+              <WorktreeItems
+                worktrees={filteredWorktrees}
+                selectedIdx={selectedIdx}
+                onSelect={openWorktree}
                 onHover={setSelectedIdx}
               />
             )}
@@ -387,6 +462,61 @@ function RepoItems({
           Browse for Repository…
         </button>
       </li>
+    </ul>
+  );
+}
+
+function WorktreeItems({
+  worktrees,
+  selectedIdx,
+  onSelect,
+  onHover,
+}: {
+  worktrees: WorktreeInfo[];
+  selectedIdx: number;
+  onSelect: (path: string) => void;
+  onHover: (i: number) => void;
+}) {
+  if (!worktrees.length) {
+    return (
+      <p className="px-4 py-6 text-center text-sm text-muted-foreground">
+        No other worktrees.
+      </p>
+    );
+  }
+  return (
+    <ul className="py-1">
+      {worktrees.map((wt, i) => {
+        const shortHash = wt.head_oid ? wt.head_oid.slice(0, 7) : "";
+        return (
+          <li key={wt.path}>
+            <button
+              tabIndex={-1}
+              onMouseEnter={() => onHover(i)}
+              onClick={() => onSelect(wt.path)}
+              className={cn(
+                "w-full flex items-start gap-3 px-4 py-2.5 text-left cursor-pointer transition-colors",
+                i === selectedIdx ? "bg-muted" : "hover:bg-muted/50"
+              )}
+            >
+              <FolderGit2 className="size-4 text-muted-foreground mt-0.5 shrink-0" />
+              <div className="min-w-0 flex-1">
+                <div className="flex items-center gap-2 text-sm text-foreground/85 min-w-0">
+                  <span className="min-w-0 truncate">{wt.name}</span>
+                  {wt.is_detached ? (
+                    <span className="font-mono text-[11px] text-amber-300/80 shrink truncate max-w-[6rem]">{shortHash}</span>
+                  ) : wt.branch ? (
+                    <span className="font-mono text-[11px] text-muted-foreground/70 shrink truncate max-w-[6rem]">{wt.branch}</span>
+                  ) : null}
+                </div>
+                <div className="text-[11px] font-mono text-muted-foreground/50 truncate">
+                  {truncatePath(wt.path)}
+                </div>
+              </div>
+            </button>
+          </li>
+        );
+      })}
     </ul>
   );
 }

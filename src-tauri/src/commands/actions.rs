@@ -46,6 +46,11 @@ pub struct StatusInfo {
 pub fn get_repo_status(repo_id: String, state: State<RepoState>) -> Result<StatusInfo> {
     let repos = state.0.lock().unwrap();
     let repo = repos.get(&repo_id).ok_or_else(|| Error::RepoNotFound(repo_id.clone()))?;
+    repo_status_impl(repo)
+}
+
+fn repo_status_impl(repo: &git2::Repository) -> Result<StatusInfo> {
+    crate::repo::ensure_present(repo)?;
 
     let mut opts = git2::StatusOptions::new();
     opts.include_untracked(true).include_ignored(false);
@@ -148,6 +153,37 @@ pub fn checkout_commit(repo_id: String, oid: String, force: bool, state: State<R
 
 fn do_checkout(repo: &git2::Repository, refspec: &str, force: bool) -> Result<()> {
     let (obj, reference) = repo.revparse_ext(refspec)?;
+
+    // Refuse BEFORE any mutation if this resolves to a local branch checked out in
+    // another worktree. `checkout_tree` runs before `set_head` below, so checking
+    // only there would leave the working tree half-switched; and from a detached
+    // HEAD libgit2's own `set_head` guard doesn't fire at all, so this precheck is
+    // required in both cases.
+    if let Some(gref) = &reference {
+        if gref.is_branch() {
+            if let Some(refname) = gref.name() {
+                if let Some(path) = crate::repo::checked_out_elsewhere(repo, refname) {
+                    let short = gref.shorthand().unwrap_or(refname);
+                    if !path.exists() {
+                        // Deleted-but-unpruned: the worktree's folder is gone, but
+                        // git still counts the branch as checked out there. Name
+                        // the next step instead of pointing at a path that no
+                        // longer exists.
+                        let wt_name = path.file_name().and_then(|n| n.to_str()).unwrap_or("");
+                        return Err(Error::InvalidArg(format!(
+                            "'{}' is checked out in worktree '{}', whose folder no longer exists. Prune missing worktrees first.",
+                            short, wt_name
+                        )));
+                    }
+                    return Err(Error::InvalidArg(format!(
+                        "'{}' is already checked out in another worktree at {}",
+                        short,
+                        path.display()
+                    )));
+                }
+            }
+        }
+    }
 
     let mut opts = git2::build::CheckoutBuilder::new();
     if force {
@@ -619,7 +655,10 @@ pub enum CheckoutRemoteResult {
 pub fn checkout_remote_branch(repo_id: String, remote_branch: String, force: bool, state: State<RepoState>) -> Result<CheckoutRemoteResult> {
     let repos = state.0.lock().unwrap();
     let repo = repos.get(&repo_id).ok_or_else(|| Error::RepoNotFound(repo_id.clone()))?;
+    checkout_remote_branch_impl(repo, &remote_branch, force)
+}
 
+fn checkout_remote_branch_impl(repo: &git2::Repository, remote_branch: &str, force: bool) -> Result<CheckoutRemoteResult> {
     let slash = remote_branch.find('/').ok_or_else(|| {
         Error::InvalidArg(format!("'{}' is not a valid remote tracking branch", remote_branch))
     })?;
@@ -647,7 +686,7 @@ pub fn checkout_remote_branch(repo_id: String, remote_branch: String, force: boo
         // No local branch yet — create it at the remote tip and track it.
         None => {
             let mut b = repo.branch(local_name, &remote_commit, false)?;
-            let _ = b.set_upstream(Some(&remote_branch));
+            let _ = b.set_upstream(Some(remote_branch));
             do_checkout(repo, &local_ref, force)?;
             Ok(CheckoutRemoteResult::Created)
         }
@@ -657,7 +696,15 @@ pub fn checkout_remote_branch(repo_id: String, remote_branch: String, force: boo
                 do_checkout(repo, &local_ref, force)?;
                 return Ok(CheckoutRemoteResult::UpToDate);
             }
-            // Behind: fast-forward the local ref forward to the remote tip.
+            // Behind: fast-forward the local ref forward to the remote tip. Refuse
+            // BEFORE moving the ref if another worktree has this branch checked out.
+            if let Some(path) = crate::repo::checked_out_elsewhere(repo, &local_ref) {
+                return Err(Error::InvalidArg(format!(
+                    "'{}' is already checked out in another worktree at {}",
+                    local_name,
+                    path.display()
+                )));
+            }
             repo.find_reference(&local_ref)?
                 .set_target(remote_oid, "checkout: fast-forward to remote")?;
             do_checkout(repo, &local_ref, force)?;
@@ -680,7 +727,10 @@ pub fn checkout_remote_branch(repo_id: String, remote_branch: String, force: boo
 pub fn reset_branch_to_remote(repo_id: String, remote_branch: String, state: State<RepoState>) -> Result<()> {
     let repos = state.0.lock().unwrap();
     let repo = repos.get(&repo_id).ok_or_else(|| Error::RepoNotFound(repo_id.clone()))?;
+    reset_branch_to_remote_impl(repo, &remote_branch)
+}
 
+fn reset_branch_to_remote_impl(repo: &git2::Repository, remote_branch: &str) -> Result<()> {
     let slash = remote_branch.find('/').ok_or_else(|| {
         Error::InvalidArg(format!("'{}' is not a valid remote tracking branch", remote_branch))
     })?;
@@ -694,13 +744,23 @@ pub fn reset_branch_to_remote(repo_id: String, remote_branch: String, state: Sta
     let remote_oid = remote_commit.id();
 
     let local_ref = format!("refs/heads/{}", local_name);
+
+    // Refuse BEFORE moving the ref if another worktree has this branch checked out.
+    if let Some(path) = crate::repo::checked_out_elsewhere(repo, &local_ref) {
+        return Err(Error::InvalidArg(format!(
+            "'{}' is already checked out in another worktree at {}",
+            local_name,
+            path.display()
+        )));
+    }
+
     // Force-move the local branch onto the remote tip, then force-checkout so the
     // working tree matches — equivalent to `reset --hard` to the remote.
     repo.reference(&local_ref, remote_oid, true, "reset to remote")?;
     do_checkout(repo, &local_ref, true)?;
 
     if let Ok(mut b) = repo.find_branch(local_name, git2::BranchType::Local) {
-        let _ = b.set_upstream(Some(&remote_branch));
+        let _ = b.set_upstream(Some(remote_branch));
     }
     Ok(())
 }
@@ -711,17 +771,29 @@ pub fn reset_branch_to_remote(repo_id: String, remote_branch: String, state: Sta
 pub fn delete_branch(repo_id: String, name: String, state: State<RepoState>) -> Result<()> {
     let repos = state.0.lock().unwrap();
     let repo = repos.get(&repo_id).ok_or_else(|| Error::RepoNotFound(repo_id.clone()))?;
+    delete_branch_impl(repo, &name)
+}
 
+fn delete_branch_impl(repo: &git2::Repository, name: &str) -> Result<()> {
     if let Ok(head) = repo.head() {
-        if head.is_branch() && head.shorthand() == Some(name.as_str()) {
+        if head.is_branch() && head.shorthand() == Some(name) {
             return Err(Error::InvalidArg(format!(
                 "Cannot delete '{}': it is the currently checked-out branch", name
             )));
         }
     }
 
+    let refname = format!("refs/heads/{}", name);
+    if let Some(path) = crate::repo::checked_out_elsewhere(repo, &refname) {
+        return Err(Error::InvalidArg(format!(
+            "Cannot delete '{}': it is checked out in another worktree at {}",
+            name,
+            path.display()
+        )));
+    }
+
     let mut branch = repo
-        .find_branch(&name, git2::BranchType::Local)
+        .find_branch(name, git2::BranchType::Local)
         .map_err(|_| Error::InvalidArg(format!("Branch '{}' not found", name)))?;
     branch.delete().map_err(Error::Git)?;
     Ok(())
@@ -738,14 +810,17 @@ pub fn rename_branch(
 ) -> Result<()> {
     let repos = state.0.lock().unwrap();
     let repo = repos.get(&repo_id).ok_or_else(|| Error::RepoNotFound(repo_id.clone()))?;
+    rename_branch_impl(repo, &old_name, &new_name)
+}
 
+fn rename_branch_impl(repo: &git2::Repository, old_name: &str, new_name: &str) -> Result<()> {
     let new = new_name.trim();
     if new.is_empty() {
         return Err(Error::InvalidArg("New branch name cannot be empty.".into()));
     }
 
     let mut branch = repo
-        .find_branch(&old_name, git2::BranchType::Local)
+        .find_branch(old_name, git2::BranchType::Local)
         .map_err(|_| Error::InvalidArg(format!("Branch '{}' not found", old_name)))?;
     branch.rename(new, false).map_err(Error::Git)?;
     Ok(())
@@ -786,6 +861,238 @@ mod tests {
         // so assert only that the pending branch name came through.
         assert!(info.branch.is_some());
         let _ = std::fs::remove_dir_all(dir);
+    }
+
+    /// Checking out a branch that another worktree has checked out must be refused
+    /// BEFORE any mutation — the working tree and HEAD in the checking-out worktree
+    /// must be left exactly as they were.
+    #[test]
+    fn checkout_refuses_branch_checked_out_in_another_worktree() {
+        use crate::repo::test_support::{add_worktree, make_repo_with_commit};
+
+        let (main_dir, main_repo) = make_repo_with_commit();
+        let main_branch = main_repo.head().unwrap().shorthand().unwrap().to_string();
+        let (wt_dir, wt_repo) = add_worktree(&main_repo, "feat", "feat");
+
+        let before_head_name = wt_repo.head().unwrap().name().unwrap().to_string();
+        let before_content = std::fs::read_to_string(wt_dir.join("a.txt")).unwrap();
+
+        let err = do_checkout(&wt_repo, &format!("refs/heads/{}", main_branch), false)
+            .expect_err("must refuse: branch is checked out in the main worktree");
+        match err {
+            Error::InvalidArg(msg) => {
+                assert!(msg.contains(&main_branch), "message should name the branch: {msg}");
+                assert!(msg.to_lowercase().contains("worktree"), "message should mention worktree: {msg}");
+            }
+            other => panic!("expected InvalidArg, got {:?}", other),
+        }
+
+        let after_head_name = wt_repo.head().unwrap().name().unwrap().to_string();
+        assert_eq!(before_head_name, after_head_name, "HEAD must be unchanged");
+        let after_content = std::fs::read_to_string(wt_dir.join("a.txt")).unwrap();
+        assert_eq!(before_content, after_content, "working tree must be unchanged");
+
+        let _ = std::fs::remove_dir_all(&wt_dir);
+        let _ = std::fs::remove_dir_all(&main_dir);
+    }
+
+    /// The original phantom-changes bug: a worktree's folder is deleted (not
+    /// pruned), so `wt.validate()` fails and the old guard silently dropped it
+    /// from `other_worktree_heads` — letting `checkout_tree` rewrite files before
+    /// `set_head` refused. Checkout must be refused up front and leave the
+    /// checking-out worktree's HEAD and files completely unchanged.
+    #[test]
+    fn checkout_refuses_branch_held_by_a_deleted_but_unpruned_worktree() {
+        use crate::repo::test_support::{add_worktree, make_repo_with_commit};
+
+        let (main_dir, main_repo) = make_repo_with_commit();
+        let main_branch = main_repo.head().unwrap().shorthand().unwrap().to_string();
+        let (wt_dir, wt_repo) = add_worktree(&main_repo, "feat", "feat");
+        drop(wt_repo);
+        std::fs::remove_dir_all(&wt_dir).unwrap();
+
+        let before_head_name = main_repo.head().unwrap().name().unwrap().to_string();
+        let before_content = std::fs::read_to_string(main_dir.join("a.txt")).unwrap();
+
+        let err = do_checkout(&main_repo, "refs/heads/feat", false)
+            .expect_err("must refuse: feat is held by a deleted-but-unpruned worktree");
+        match err {
+            Error::InvalidArg(msg) => {
+                assert!(msg.contains("feat"), "message should name the branch: {msg}");
+                assert!(msg.contains("no longer exists"), "message should say the folder is gone: {msg}");
+                assert!(msg.to_lowercase().contains("prune"), "message should suggest pruning: {msg}");
+            }
+            other => panic!("expected InvalidArg, got {:?}", other),
+        }
+
+        let after_head_name = main_repo.head().unwrap().name().unwrap().to_string();
+        assert_eq!(before_head_name, after_head_name, "HEAD must be unchanged");
+        assert_eq!(main_branch, before_head_name.rsplit('/').next().unwrap());
+        let after_content = std::fs::read_to_string(main_dir.join("a.txt")).unwrap();
+        assert_eq!(before_content, after_content, "working tree must be unchanged");
+
+        let _ = std::fs::remove_dir_all(&main_dir);
+    }
+
+    /// Advance a commit chain by one empty commit on top of `parent`, without
+    /// moving any ref. Used to simulate "the remote has moved ahead" without a
+    /// real remote.
+    fn advance_commit(repo: &Repository, parent: git2::Oid, msg: &str) -> git2::Oid {
+        let parent_commit = repo.find_commit(parent).unwrap();
+        let tree = parent_commit.tree().unwrap();
+        let sig = repo.signature().unwrap();
+        repo.commit(None, &sig, &sig, msg, &tree, &[&parent_commit]).unwrap()
+    }
+
+    /// `checkout_remote_branch`'s fast-forward path must refuse to move the local
+    /// branch ref when another worktree has it checked out — otherwise that
+    /// worktree's HEAD would silently point past its own working tree contents.
+    #[test]
+    fn checkout_remote_branch_fast_forward_refuses_when_checked_out_elsewhere() {
+        use crate::repo::test_support::add_worktree;
+
+        let (main_dir, main_repo) = make_repo();
+        let sig = main_repo.signature().unwrap();
+        let tree = main_repo.find_tree(main_repo.index().unwrap().write_tree().unwrap()).unwrap();
+        let base_oid = main_repo.commit(Some("HEAD"), &sig, &sig, "initial", &tree, &[]).unwrap();
+
+        let (wt_dir, _wt_repo) = add_worktree(&main_repo, "feat", "feat");
+        let feat_before = main_repo.find_branch("feat", git2::BranchType::Local).unwrap()
+            .get().target().unwrap();
+        assert_eq!(feat_before, base_oid);
+
+        // Simulate the remote having moved ahead of local `feat`.
+        let remote_oid = advance_commit(&main_repo, base_oid, "remote advance");
+        main_repo.reference("refs/remotes/origin/feat", remote_oid, true, "test remote ref").unwrap();
+
+        let err = checkout_remote_branch_impl(&main_repo, "origin/feat", false)
+            .expect_err("must refuse: feat is checked out in the linked worktree");
+        assert!(matches!(err, Error::InvalidArg(_)));
+
+        let feat_after = main_repo.find_branch("feat", git2::BranchType::Local).unwrap()
+            .get().target().unwrap();
+        assert_eq!(feat_after, feat_before, "refs/heads/feat must not have moved");
+
+        let _ = std::fs::remove_dir_all(&wt_dir);
+        let _ = std::fs::remove_dir_all(&main_dir);
+    }
+
+    #[test]
+    fn reset_branch_to_remote_refuses_when_checked_out_elsewhere() {
+        use crate::repo::test_support::add_worktree;
+
+        let (main_dir, main_repo) = make_repo();
+        let sig = main_repo.signature().unwrap();
+        let tree = main_repo.find_tree(main_repo.index().unwrap().write_tree().unwrap()).unwrap();
+        let base_oid = main_repo.commit(Some("HEAD"), &sig, &sig, "initial", &tree, &[]).unwrap();
+
+        let (wt_dir, wt_repo) = add_worktree(&main_repo, "feat", "feat");
+        let wt_file_before = std::fs::read_to_string(wt_dir.join("a.txt"));
+
+        let remote_oid = advance_commit(&main_repo, base_oid, "remote advance");
+        main_repo.reference("refs/remotes/origin/feat", remote_oid, true, "test remote ref").unwrap();
+
+        let err = reset_branch_to_remote_impl(&main_repo, "origin/feat")
+            .expect_err("must refuse: feat is checked out in the linked worktree");
+        assert!(matches!(err, Error::InvalidArg(_)));
+
+        let feat_after = main_repo.find_branch("feat", git2::BranchType::Local).unwrap()
+            .get().target().unwrap();
+        assert_eq!(feat_after, base_oid, "refs/heads/feat must not have moved");
+
+        let wt_file_after = std::fs::read_to_string(wt_dir.join("a.txt"));
+        assert_eq!(wt_file_before.ok(), wt_file_after.ok(), "other worktree's files must be untouched");
+
+        let _ = wt_repo;
+        let _ = std::fs::remove_dir_all(&wt_dir);
+        let _ = std::fs::remove_dir_all(&main_dir);
+    }
+
+    #[test]
+    fn delete_branch_refuses_when_checked_out_in_another_worktree() {
+        use crate::repo::test_support::add_worktree;
+
+        let (main_dir, main_repo) = make_repo();
+        let sig = main_repo.signature().unwrap();
+        let tree = main_repo.find_tree(main_repo.index().unwrap().write_tree().unwrap()).unwrap();
+        main_repo.commit(Some("HEAD"), &sig, &sig, "initial", &tree, &[]).unwrap();
+
+        let (wt_dir, _wt_repo) = add_worktree(&main_repo, "feat", "feat");
+
+        let err = delete_branch_impl(&main_repo, "feat")
+            .expect_err("must refuse: feat is checked out in the linked worktree");
+        match err {
+            Error::InvalidArg(msg) => {
+                assert!(msg.contains(&wt_dir.display().to_string()) || msg.to_lowercase().contains("worktree"),
+                    "message should mention the worktree path: {msg}");
+            }
+            other => panic!("expected InvalidArg, got {:?}", other),
+        }
+
+        assert!(main_repo.find_branch("feat", git2::BranchType::Local).is_ok(), "branch must still exist");
+
+        let _ = std::fs::remove_dir_all(&wt_dir);
+        let _ = std::fs::remove_dir_all(&main_dir);
+    }
+
+    /// Regression test: renaming a branch checked out in another worktree must
+    /// update that worktree's HEAD to follow the new name (libgit2's
+    /// `git_reference_rename` does this for us — no code change expected here).
+    #[test]
+    fn rename_branch_updates_other_worktrees_head() {
+        use crate::repo::test_support::add_worktree;
+
+        let (main_dir, main_repo) = make_repo();
+        let sig = main_repo.signature().unwrap();
+        let tree = main_repo.find_tree(main_repo.index().unwrap().write_tree().unwrap()).unwrap();
+        main_repo.commit(Some("HEAD"), &sig, &sig, "initial", &tree, &[]).unwrap();
+
+        let (wt_dir, wt_repo) = add_worktree(&main_repo, "feat", "feat");
+
+        rename_branch_impl(&main_repo, "feat", "feat2").unwrap();
+
+        let head_target = wt_repo.find_reference("HEAD").unwrap().symbolic_target().unwrap().to_string();
+        assert_eq!(head_target, "refs/heads/feat2");
+
+        let _ = std::fs::remove_dir_all(&wt_dir);
+        let _ = std::fs::remove_dir_all(&main_dir);
+    }
+
+    /// Same refusal must apply even when the checking-out worktree currently has a
+    /// detached HEAD — libgit2's own `set_head` guard only fires from a symbolic
+    /// HEAD, so this path needs our own precheck.
+    #[test]
+    fn checkout_refuses_branch_checked_out_elsewhere_from_detached_head() {
+        use crate::repo::test_support::{add_worktree, make_repo_with_commit};
+
+        let (main_dir, main_repo) = make_repo_with_commit();
+        let main_branch = main_repo.head().unwrap().shorthand().unwrap().to_string();
+        let (wt_dir, wt_repo) = add_worktree(&main_repo, "feat", "feat");
+
+        let head_oid = wt_repo.head().unwrap().target().unwrap();
+        wt_repo.set_head_detached(head_oid).unwrap();
+        assert!(!wt_repo.head().unwrap().is_branch());
+
+        let err = do_checkout(&wt_repo, &format!("refs/heads/{}", main_branch), false)
+            .expect_err("must refuse even from a detached HEAD");
+        assert!(matches!(err, Error::InvalidArg(_)));
+
+        let head = wt_repo.head().unwrap();
+        assert!(!head.is_branch(), "HEAD must still be detached");
+        assert_eq!(head.target(), Some(head_oid));
+
+        let _ = std::fs::remove_dir_all(&wt_dir);
+        let _ = std::fs::remove_dir_all(&main_dir);
+    }
+
+    #[test]
+    fn repo_status_reports_repo_gone_when_worktree_deleted() {
+        let (main_dir, main) = crate::repo::test_support::make_repo_with_commit();
+        let (wt_dir, wt) = crate::repo::test_support::add_worktree(&main, "stgone2", "feat");
+        std::fs::remove_dir_all(&wt_dir).unwrap();
+        let err = repo_status_impl(&wt).unwrap_err();
+        assert!(err.to_string().starts_with("repo gone:"), "{err}");
+        let _ = std::fs::remove_dir_all(main_dir);
     }
 
     #[test]

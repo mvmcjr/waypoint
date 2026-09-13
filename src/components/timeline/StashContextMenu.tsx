@@ -12,7 +12,12 @@ import { StashRenameDialog } from "@/components/StashRenameDialog";
 
 interface Props {
   repoId: string;
-  /** Stash index (stash@{index}). */
+  /** Stash OID — Pop/Apply/Drop address the stash by identity, not position
+   * (see StashList.tsx), since the shared stash list can shift under a
+   * pending action. */
+  oid: string;
+  /** Stash index (stash@{index}) — only rename still uses it (git has no
+   * native stash-rename; it edits the reflog entry at this position). */
   index: number;
   /** Current stash name (for the rename dialog's initial value). */
   currentName: string;
@@ -25,7 +30,7 @@ interface Props {
  * Context menu for stash rows in the timeline. Stashes aren't real commits, so
  * they get Pop / Apply / Drop instead of the checkout/merge/rebase commit menu.
  */
-export function StashContextMenu({ repoId, index, currentName, onOpenChange, children }: Props) {
+export function StashContextMenu({ repoId, oid, index, currentName, onOpenChange, children }: Props) {
   const refresh = useRefreshRepo(repoId);
   const [busy, setBusy] = useState(false);
   const [renaming, setRenaming] = useState(false);
@@ -46,11 +51,11 @@ export function StashContextMenu({ repoId, index, currentName, onOpenChange, chi
     <ContextMenu onOpenChange={onOpenChange}>
       <ContextMenuTrigger>{children}</ContextMenuTrigger>
       <ContextMenuContent className="w-44">
-        <ContextMenuItem disabled={busy} onClick={() => act(() => ipc.popStash(repoId, index))}>
+        <ContextMenuItem disabled={busy} onClick={() => act(() => ipc.popStash(repoId, oid))}>
           Pop
           <span className="ml-auto text-xs text-muted-foreground">apply + drop</span>
         </ContextMenuItem>
-        <ContextMenuItem disabled={busy} onClick={() => act(() => ipc.applyStash(repoId, index))}>
+        <ContextMenuItem disabled={busy} onClick={() => act(() => ipc.applyStash(repoId, oid))}>
           Apply
           <span className="ml-auto text-xs text-muted-foreground">keep stash</span>
         </ContextMenuItem>
@@ -61,7 +66,7 @@ export function StashContextMenu({ repoId, index, currentName, onOpenChange, chi
         <ContextMenuSeparator />
         <ContextMenuItem
           disabled={busy}
-          onClick={() => act(() => ipc.dropStash(repoId, index))}
+          onClick={() => act(() => ipc.dropStash(repoId, oid))}
           className="text-destructive focus:text-destructive"
         >
           Drop

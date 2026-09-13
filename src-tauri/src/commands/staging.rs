@@ -377,6 +377,24 @@ fn discard_all_in(repo: &git2::Repository) -> Result<()> {
         };
 
         let workdir = repo.workdir().ok_or_else(|| Error::InvalidArg("bare repository has no working directory".into()))?;
+
+        // Registered worktree paths (main excluded — it's never untracked relative
+        // to itself), canonicalized once up front. A registered worktree can sit at
+        // ANY depth under an untracked folder (e.g. `tmp/a/b/c/wt`), well beyond
+        // the depth-3 `.git`-entry walk below, which only catches unregistered
+        // nested repos/worktrees an agent created without `git worktree add`.
+        let registered_worktrees: Vec<std::path::PathBuf> = repo
+            .worktrees()
+            .map(|names| {
+                names
+                    .iter()
+                    .flatten()
+                    .filter_map(|name| repo.find_worktree(name).ok())
+                    .map(|wt| crate::repo::canonical_path(wt.path()))
+                    .collect()
+            })
+            .unwrap_or_default();
+
         let mut opts = git2::StatusOptions::new();
         opts.include_untracked(true)
             .include_ignored(false)
@@ -389,6 +407,19 @@ fn discard_all_in(repo: &git2::Repository) -> Result<()> {
                         continue;
                     }
                     let full = workdir.join(path);
+                    // Never delete a registered worktree, at any depth: canonicalize
+                    // this candidate and check whether any registered worktree path
+                    // equals it or lies underneath it.
+                    let full_canon = crate::repo::canonical_path(&full);
+                    if registered_worktrees.iter().any(|wt| *wt == full_canon || wt.starts_with(&full_canon)) {
+                        continue;
+                    }
+                    // Never delete a nested repository or worktree (agents create
+                    // them inside the repo, e.g. .worktrees/x): its `.git` entry
+                    // (dir or file) marks someone else's working tree.
+                    if full.join(".git").exists() || contains_git_entry(&full) {
+                        continue;
+                    }
                     if path.ends_with('/') {
                         let _ = std::fs::remove_dir_all(&full);
                     } else {
@@ -399,6 +430,17 @@ fn discard_all_in(repo: &git2::Repository) -> Result<()> {
         }
     }
     Ok(())
+}
+
+/// True if `dir` or any directory up to 3 levels below it contains a `.git` entry.
+fn contains_git_entry(dir: &std::path::Path) -> bool {
+    fn walk(d: &std::path::Path, depth: usize) -> bool {
+        if d.join(".git").exists() { return true; }
+        if depth == 0 { return false; }
+        let Ok(rd) = std::fs::read_dir(d) else { return false };
+        rd.flatten().any(|e| e.file_type().map(|t| t.is_dir()).unwrap_or(false) && walk(&e.path(), depth - 1))
+    }
+    dir.is_dir() && walk(dir, 3)
 }
 
 /// Create a commit from the current index with the given message.
@@ -527,5 +569,51 @@ mod tests {
         assert_eq!(std::fs::read_to_string(dir.join("a.txt")).unwrap(), "original");
         assert!(!dir.join("new.txt").exists());
         let _ = std::fs::remove_dir_all(dir);
+    }
+
+    /// A registered worktree can sit at any depth under an untracked folder —
+    /// well beyond the depth-3 `.git`-entry walk `contains_git_entry` performs.
+    /// `discard_all_in` must still spare it by checking the actual registered
+    /// worktree paths (from `repo.worktrees()`), not just probing for `.git`.
+    #[test]
+    fn discard_all_never_deletes_a_registered_worktree_at_any_depth() {
+        let (main_dir, main) = crate::repo::test_support::make_repo_with_commit();
+        // 5 levels deep: tmp/a/b/c/wt
+        let nested = main_dir.join("tmp").join("a").join("b").join("c").join("wt");
+        std::fs::create_dir_all(nested.parent().unwrap()).unwrap();
+        let head = main.head().unwrap().peel_to_commit().unwrap();
+        let branch = main.branch("deepwt", &head, false).unwrap();
+        let mut opts = git2::WorktreeAddOptions::new();
+        opts.reference(Some(branch.get()));
+        main.worktree("deepwt", &nested, Some(&opts)).unwrap();
+        std::fs::write(nested.join("agent-wip.txt"), "uncommitted agent work").unwrap();
+
+        discard_all_in(&main).unwrap();
+
+        assert!(nested.join("agent-wip.txt").exists(), "deeply nested registered worktree must survive");
+        let _ = std::fs::remove_dir_all(main_dir);
+    }
+
+    #[test]
+    fn discard_all_never_deletes_a_nested_worktree() {
+        let (main_dir, main) = crate::repo::test_support::make_repo_with_commit();
+        // Agent-style nested worktree that is NOT gitignored.
+        std::fs::create_dir_all(main_dir.join(".worktrees")).unwrap();
+        let nested = main_dir.join(".worktrees").join("agent");
+        let head = main.head().unwrap().peel_to_commit().unwrap();
+        let branch = main.branch("agent", &head, false).unwrap();
+        let mut opts = git2::WorktreeAddOptions::new();
+        opts.reference(Some(branch.get()));
+        main.worktree("agent", &nested, Some(&opts)).unwrap();
+        std::fs::write(nested.join("agent-wip.txt"), "uncommitted agent work").unwrap();
+        // Also a plain untracked dir that SHOULD still be cleaned.
+        std::fs::create_dir_all(main_dir.join("junk")).unwrap();
+        std::fs::write(main_dir.join("junk").join("x.txt"), "x").unwrap();
+
+        discard_all_in(&main).unwrap();
+
+        assert!(nested.join("agent-wip.txt").exists(), "nested worktree must survive");
+        assert!(!main_dir.join("junk").exists(), "ordinary untracked dirs are still removed");
+        let _ = std::fs::remove_dir_all(main_dir);
     }
 }

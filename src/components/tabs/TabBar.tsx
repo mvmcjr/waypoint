@@ -1,5 +1,7 @@
 import { open as openDialog } from "@tauri-apps/plugin-dialog";
-import { useStore } from "@/lib/store";
+import { FolderGit2 } from "lucide-react";
+import { useStore, tabLabels } from "@/lib/store";
+import { repoLabel } from "@/lib/utils";
 import { useOpenRepo } from "@/lib/useOpenRepo";
 
 export function TabBar() {
@@ -7,6 +9,7 @@ export function TabBar() {
   const activeTabId = useStore((s) => s.activeTabId);
   const { switchTab, closeTab } = useStore();
   const openRepo = useOpenRepo();
+  const labels = tabLabels(tabs);
 
   async function handleOpenNew() {
     const selected = await openDialog({
@@ -26,11 +29,14 @@ export function TabBar() {
     <div className="flex items-end h-9 bg-muted/10 border-b border-border shrink-0 overflow-x-auto">
       {tabs.map((tab) => {
         const isActive = tab.id === activeTabId;
+        const label = labels.get(tab.id) ?? tab.label;
         return (
           <div
             key={tab.id}
             role="tab"
             aria-selected={isActive}
+            aria-label={tab.mainPath ? `${label}, worktree of ${repoLabel(tab.mainPath)}` : undefined}
+            title={tab.path}
             onClick={() => switchTab(tab.id)}
             className={[
               "group relative flex items-center gap-2 h-full pl-3 pr-2 min-w-0 max-w-52",
@@ -45,8 +51,11 @@ export function TabBar() {
               <span className="absolute top-0 inset-x-0 h-0.5 bg-primary rounded-b-full" />
             )}
 
+            {/* Linked-worktree glyph */}
+            {tab.mainPath && <FolderGit2 size={11} className="shrink-0 opacity-60" />}
+
             {/* Repo folder name */}
-            <span className="truncate text-xs font-medium">{tab.label}</span>
+            <span className="truncate text-xs font-medium">{label}</span>
 
             {/* Close button — always visible on active, hover-visible on inactive */}
             <button
@@ -54,7 +63,7 @@ export function TabBar() {
                 e.stopPropagation();
                 closeTab(tab.id);
               }}
-              aria-label={`Close ${tab.label}`}
+              aria-label={`Close ${label}`}
               className={[
                 "shrink-0 flex items-center justify-center w-4 h-4 rounded",
                 "text-muted-foreground hover:text-foreground hover:bg-muted/40 transition-opacity",

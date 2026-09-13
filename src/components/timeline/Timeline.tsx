@@ -82,6 +82,15 @@ export const Timeline = forwardRef<TimelineHandle, Props>(function Timeline(
     () => new Set(refs.filter((r) => r.kind === "tag" && r.is_pushed).map((r) => r.shorthand)),
     [refs],
   );
+  // Local branch shorthand -> the other worktree's path it's checked out in.
+  // Only local branches can carry worktree_path (see RefInfo).
+  const worktreeByBranch = useMemo(() => {
+    const map = new Map<string, string>();
+    for (const r of refs) {
+      if (r.kind === "local_branch" && r.worktree_path) map.set(r.shorthand, r.worktree_path);
+    }
+    return map;
+  }, [refs]);
   const stashOids = useMemo(() => new Set(stashes.map((s) => s.oid)), [stashes]);
   const stashByOid = useMemo(() => new Map(stashes.map((s) => [s.oid, s])), [stashes]);
 
@@ -277,6 +286,7 @@ export const Timeline = forwardRef<TimelineHandle, Props>(function Timeline(
                   stashName={stashEntry ? stashLabel(stashEntry.message) : undefined}
                   isDimmed={matchOids != null && !matchOids.has(item.commit.oid)}
                   highlightTokens={matchOids?.has(item.commit.oid) ? highlightTokens : NO_HIGHLIGHTS}
+                  worktreeByBranch={worktreeByBranch}
                   onRefAction={stableRefAction}
                   onCommitAction={stableCommitAction}
                   onSelect={stableSelectOid}
@@ -294,6 +304,7 @@ export const Timeline = forwardRef<TimelineHandle, Props>(function Timeline(
                   <StashContextMenu
                     key={oid}
                     repoId={repoId}
+                    oid={stashEntry.oid}
                     index={stashEntry.index}
                     currentName={stashLabel(stashEntry.message)}
                     onOpenChange={handleMenuOpenChange}
@@ -308,6 +319,8 @@ export const Timeline = forwardRef<TimelineHandle, Props>(function Timeline(
                   key={oid}
                   item={item}
                   onAction={stableCommitAction}
+                  onRefAction={stableRefAction}
+                  worktreeByBranch={worktreeByBranch}
                   selectedOids={multiSelectedOids}
                   onOpenChange={handleMenuOpenChange}
                 >

@@ -15,6 +15,8 @@ pub enum Error {
     InvalidArg(String),
     #[error("rebase conflict: {0}")]
     RebaseConflict(String),
+    #[error("repo gone: {0}")]
+    RepoGone(String),
 }
 
 impl Serialize for Error {

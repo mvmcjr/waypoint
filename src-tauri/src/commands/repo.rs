@@ -16,6 +16,10 @@ pub struct RefInfo {
     pub target_oid: Option<String>,
     pub is_head: bool,
     pub is_pushed: bool,
+    /// For a local branch checked out in ANOTHER worktree, that worktree's
+    /// working-directory path; `null` otherwise (including for this repo's own
+    /// current branch, and for non-local-branch refs).
+    pub worktree_path: Option<String>,
 }
 
 #[derive(Debug, Serialize)]
@@ -27,29 +31,65 @@ pub enum RefKind {
     Other,
 }
 
+/// Directories to watch for external repo changes (commits, branch moves,
+/// fetches, etc.). In a normal repo that's just `<repo>/.git`. In a linked
+/// worktree, `<wt>/.git` is a FILE (a "gitdir: ..." pointer) with no useful
+/// content to watch, and the per-worktree state (HEAD, index, MERGE_HEAD...)
+/// actually lives under `commondir()/worktrees/<name>/` — i.e. `repo.path()`
+/// itself — while shared state (refs, objects, logs/refs/stash) lives in
+/// `commondir()`. So watch `commondir()` always, plus `repo.path()` too
+/// unless it's already nested inside `commondir()` (which is the common case
+/// for a normal, non-worktree repo, and also covers `--separate-git-dir`).
+pub(crate) fn watch_roots(repo: &git2::Repository) -> Vec<std::path::PathBuf> {
+    let commondir = repo.commondir().to_path_buf();
+    let repo_path = repo.path();
+
+    let commondir_canon = std::fs::canonicalize(&commondir).unwrap_or_else(|_| commondir.clone());
+    let repo_path_canon = std::fs::canonicalize(repo_path).unwrap_or_else(|_| repo_path.to_path_buf());
+
+    let mut roots = vec![commondir];
+    if !repo_path_canon.starts_with(&commondir_canon) {
+        roots.push(repo_path.to_path_buf());
+    }
+    roots
+}
+
+#[derive(Debug, Serialize)]
+pub struct OpenedRepo {
+    /// Canonical working-directory path; also the tab id and RepoState key.
+    pub id: String,
+    /// Set when the opened folder is a linked worktree (non-bare main repo).
+    pub main_worktree_path: Option<String>,
+}
+
 #[tauri::command]
 pub fn open_repo(
     path: String,
     app: tauri::AppHandle,
     state: State<RepoState>,
     watchers: State<WatcherState>,
-) -> Result<String> {
+) -> Result<OpenedRepo> {
     // Distinguish "folder is gone/unreadable" from "folder exists but isn't a repo":
     // only the latter should lead the UI to offer `git init` here.
     if !std::path::Path::new(&path).is_dir() {
         return Err(Error::InvalidArg(format!("folder does not exist: {path}")));
     }
 
-    let repo = git2::Repository::open(&path)
+    let canon = crate::repo::canonical_string(std::path::Path::new(&path));
+    let repo = git2::Repository::open(&canon)
         .map_err(|_| Error::NotARepo(path.clone()))?;
 
-    let id = path.clone();
+    let main_worktree_path = crate::repo::main_worktree_path(&repo);
+
+    // Compute the watch roots before `repo` is moved into the state map below.
+    let roots = watch_roots(&repo);
+
+    let id = canon.clone();
     state.0.lock().unwrap().insert(id.clone(), repo);
 
-    // Watch .git/ for external changes (commits, branch moves, fetches, etc.).
-    // Skip .lock files (transient during any git op) and the index file
+    // Watch the git dir(s) for external changes (commits, branch moves, fetches,
+    // etc.). Skip .lock files (transient during any git op) and the index file
     // (updated on every stage/unstage — handled by the frontend's own polling).
-    let git_dir = std::path::Path::new(&path).join(".git");
     let repo_id = id.clone();
     let app_handle = app.clone();
 
@@ -66,13 +106,17 @@ pub fn open_repo(
         }
     }) {
         Ok(mut debouncer) => {
-            let _ = debouncer.watcher().watch(&git_dir, RecursiveMode::Recursive);
+            for root in &roots {
+                if let Err(e) = debouncer.watcher().watch(root, RecursiveMode::Recursive) {
+                    eprintln!("FS watcher failed to watch {} for {path}: {e}", root.display());
+                }
+            }
             watchers.0.lock().unwrap().insert(id.clone(), debouncer);
         }
         Err(e) => eprintln!("FS watcher failed to start for {path}: {e}"),
     }
 
-    Ok(id)
+    Ok(OpenedRepo { id, main_worktree_path })
 }
 
 #[derive(Debug, Serialize)]
@@ -130,9 +174,21 @@ pub fn init_repo(path: String, allow_nested: bool) -> Result<()> {
 pub fn list_refs(repo_id: String, state: State<RepoState>) -> Result<Vec<RefInfo>> {
     let repos = state.0.lock().unwrap();
     let repo = repos.get(&repo_id).ok_or_else(|| Error::RepoNotFound(repo_id.clone()))?;
+    list_refs_impl(repo)
+}
 
-    let head_oid = repo.head().ok().and_then(|h| h.target()).map(|o| o.to_string());
-    let head_ref = repo.head().ok().and_then(|h| h.shorthand().map(|s| s.to_owned()));
+fn list_refs_impl(repo: &git2::Repository) -> Result<Vec<RefInfo>> {
+    // Computed once per call (not per ref) since it walks every worktree.
+    let other_heads = crate::repo::other_worktree_heads(repo);
+
+    // The symbolic target of THIS tab's HEAD (e.g. "refs/heads/main"), so
+    // `is_head` below matches by ref identity, not by "happens to point at the
+    // same commit" — a `None` here (detached HEAD) means no local branch is
+    // ever `is_head`.
+    let head_symbolic_target = repo
+        .find_reference("HEAD")
+        .ok()
+        .and_then(|h| h.symbolic_target().map(|t| t.to_owned()));
 
     // Single pass: build RefInfo structs AND seed the BFS from remote tips.
     // Remote tracking refs are always direct commit refs, so their target_oid
@@ -177,8 +233,13 @@ pub fn list_refs(repo_id: String, state: State<RepoState>) -> Result<Vec<RefInfo
             RefKind::Other
         };
 
-        let is_head = head_ref.as_deref() == Some(&shorthand)
-            || target_oid.as_deref() == head_oid.as_deref();
+        // Only THIS tab's actual checked-out local branch is `is_head` — not any
+        // ref (including a remote-tracking branch) that merely happens to share
+        // HEAD's commit, and never true when HEAD is detached (no symbolic
+        // target). A branch whose tip commit equals HEAD's commit right after
+        // `git worktree add ../x -b feat` must not read as "current" here.
+        let is_head = matches!(kind, RefKind::LocalBranch)
+            && head_symbolic_target.as_deref() == Some(name.as_str());
 
         // Collect the commit OID for the post-BFS reachability check.
         // Remote refs are always pushed; local branches use target_oid directly
@@ -192,7 +253,13 @@ pub fn list_refs(repo_id: String, state: State<RepoState>) -> Result<Vec<RefInfo
             reference.peel_to_commit().ok().map(|c| c.id())
         };
 
-        refs.push(RefInfo { name, shorthand, kind, target_oid, is_head, is_pushed: is_remote });
+        let worktree_path = if matches!(kind, RefKind::LocalBranch) {
+            other_heads.get(&name).map(|p| p.display().to_string())
+        } else {
+            None
+        };
+
+        refs.push(RefInfo { name, shorthand, kind, target_oid, is_head, is_pushed: is_remote, worktree_path });
         push_oids.push(push_oid);
     }
 
@@ -268,5 +335,116 @@ mod tests {
         let missing = std::env::temp_dir().join(format!("wpt_missing_{}", uuid::Uuid::new_v4()));
         assert!(init_repo(missing.display().to_string(), false).is_err());
         assert!(!missing.exists(), "must not create the folder");
+    }
+
+    #[test]
+    fn watch_roots_for_normal_repo_is_just_dot_git() {
+        let dir = temp_dir("plainrepo");
+        let repo = git2::Repository::init(&dir).unwrap();
+
+        let roots = watch_roots(&repo);
+
+        assert_eq!(roots.len(), 1);
+        assert_eq!(roots[0], dir.join(".git"));
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn watch_roots_for_linked_worktree_is_commondir_only() {
+        use crate::repo::test_support::{add_worktree, make_repo_with_commit};
+
+        let (main_dir, main_repo) = make_repo_with_commit();
+        let (wt_dir, wt_repo) = add_worktree(&main_repo, "feat", "feat");
+
+        let roots = watch_roots(&wt_repo);
+
+        let commondir = std::fs::canonicalize(wt_repo.commondir()).unwrap();
+        assert_eq!(roots.len(), 1, "expected exactly one watch root: {:?}", roots);
+        assert_eq!(std::fs::canonicalize(&roots[0]).unwrap(), commondir);
+
+        // repo.path() (the per-worktree state dir) must lie under commondir.
+        let repo_path = std::fs::canonicalize(wt_repo.path()).unwrap();
+        assert!(repo_path.starts_with(&commondir));
+
+        let _ = std::fs::remove_dir_all(&wt_dir);
+        let _ = std::fs::remove_dir_all(&main_dir);
+    }
+
+    #[test]
+    fn list_refs_reports_worktree_path_only_for_the_other_worktrees_branch() {
+        use crate::repo::test_support::{add_worktree, make_repo_with_commit};
+
+        let (main_dir, main_repo) = make_repo_with_commit();
+        let main_branch = main_repo.head().unwrap().shorthand().unwrap().to_string();
+        let (wt_dir, wt_repo) = add_worktree(&main_repo, "feat", "feat");
+        let expected_wt_path = crate::repo::canonical_string(wt_repo.workdir().unwrap());
+
+        let refs = list_refs_impl(&main_repo).unwrap();
+
+        let feat_ref = refs.iter().find(|r| r.name == "refs/heads/feat")
+            .expect("feat branch must be listed");
+        assert_eq!(feat_ref.worktree_path.as_deref(), Some(expected_wt_path.as_str()));
+
+        let main_ref = refs.iter().find(|r| r.name == format!("refs/heads/{}", main_branch))
+            .expect("main branch must be listed");
+        assert_eq!(main_ref.worktree_path, None, "own current branch must not report a worktree_path");
+
+        let _ = std::fs::remove_dir_all(&wt_dir);
+        let _ = std::fs::remove_dir_all(&main_dir);
+    }
+
+    /// `is_head` must mean "this tab's checked-out branch" only — not any ref
+    /// (local, remote, or otherwise) that merely shares HEAD's commit oid. A
+    /// branch other than HEAD whose tip happens to equal HEAD's commit (the
+    /// state right after `git worktree add ../x -b other` at the current tip)
+    /// must read as NOT current; a remote ref at the same commit must never be
+    /// painted as current either; and a detached HEAD must give no `is_head`.
+    #[test]
+    fn is_head_matches_only_this_tabs_checked_out_branch() {
+        use crate::repo::test_support::make_repo_with_commit;
+
+        let (dir, repo) = make_repo_with_commit();
+        let head_branch = repo.head().unwrap().shorthand().unwrap().to_string();
+        let head_commit = repo.head().unwrap().peel_to_commit().unwrap();
+
+        // Another local branch at the exact same commit as HEAD.
+        repo.branch("other", &head_commit, false).unwrap();
+        // A remote-tracking ref at the same commit.
+        repo.reference("refs/remotes/origin/main", head_commit.id(), true, "test").unwrap();
+
+        let refs = list_refs_impl(&repo).unwrap();
+        let head_ref = refs.iter().find(|r| r.name == format!("refs/heads/{head_branch}")).unwrap();
+        assert!(head_ref.is_head, "the actually checked-out branch must be is_head");
+
+        let other_ref = refs.iter().find(|r| r.name == "refs/heads/other").unwrap();
+        assert!(!other_ref.is_head, "a branch merely sharing HEAD's commit must not be is_head");
+
+        let remote_ref = refs.iter().find(|r| r.name == "refs/remotes/origin/main").unwrap();
+        assert!(!remote_ref.is_head, "a remote ref must never be is_head");
+
+        // Detached HEAD: no local branch is is_head, including the one HEAD used to be on.
+        repo.set_head_detached(head_commit.id()).unwrap();
+        let refs_detached = list_refs_impl(&repo).unwrap();
+        assert!(refs_detached.iter().all(|r| !r.is_head), "detached HEAD must give no is_head at all");
+
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn list_refs_worktree_path_is_none_for_remotes_and_tags() {
+        use crate::repo::test_support::make_repo_with_commit;
+
+        let (dir, repo) = make_repo_with_commit();
+        let head_oid = repo.head().unwrap().target().unwrap();
+        repo.tag_lightweight("v1", &repo.find_object(head_oid, None).unwrap(), false).unwrap();
+        repo.reference("refs/remotes/origin/main", head_oid, true, "test remote ref").unwrap();
+
+        let refs = list_refs_impl(&repo).unwrap();
+        for r in &refs {
+            if !matches!(r.kind, RefKind::LocalBranch) {
+                assert_eq!(r.worktree_path, None, "{} must not report a worktree_path", r.name);
+            }
+        }
+        let _ = std::fs::remove_dir_all(dir);
     }
 }

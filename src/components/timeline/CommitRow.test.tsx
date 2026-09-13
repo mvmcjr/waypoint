@@ -34,6 +34,20 @@ const BASE_PROPS = {
   onSelect: vi.fn(),
 };
 
+describe("CommitRow — worktreeByBranch wiring", () => {
+  it("passes worktreePath through to a remote-only badge, keyed by its local branch name", () => {
+    const worktreeByBranch = new Map([["feature", "E:\\repo-agent"]]);
+    render(
+      <CommitRow
+        {...BASE_PROPS}
+        item={commit({ refs: ["origin/feature"], remote_branches: ["origin/feature"] })}
+        worktreeByBranch={worktreeByBranch}
+      />,
+    );
+    expect(screen.getByText(/checked out in worktree repo-agent/)).toBeInTheDocument();
+  });
+});
+
 describe("CommitRow — dimming", () => {
   it("applies opacity-40 when isDimmed and not a stash row", () => {
     render(<CommitRow {...BASE_PROPS} item={commit()} isDimmed />);

@@ -7,9 +7,10 @@ import {
   PushRejectedDialog,
   SquashDialog,
   CheckInBranchDialog,
+  MergeDialog,
 } from "./Dialogs";
 import { ipc } from "@/lib/ipc";
-import { useRefs, useCommitInRef } from "@/lib/queries";
+import { useRefs, useCommitInRef, useWorktreeStatus } from "@/lib/queries";
 import type { RefInfo } from "@/lib/ipc";
 
 vi.mock("@/lib/ipc", () => ({
@@ -23,12 +24,14 @@ vi.mock("@/lib/ipc", () => ({
     doCommit: vi.fn(),
     getSquashPreview: vi.fn(),
     squashCommits: vi.fn(),
+    mergeCommit: vi.fn(),
   },
 }));
 
 vi.mock("@/lib/queries", () => ({
   useRefs: vi.fn(),
   useCommitInRef: vi.fn(),
+  useWorktreeStatus: vi.fn(),
 }));
 
 describe("Dialogs", () => {
@@ -418,10 +421,10 @@ describe("Dialogs", () => {
 
   describe("CheckInBranchDialog", () => {
     const REFS: RefInfo[] = [
-      { name: "refs/heads/main", shorthand: "main", kind: "local_branch", target_oid: "aaa111", is_head: true, is_pushed: true },
-      { name: "refs/heads/feature", shorthand: "feature", kind: "local_branch", target_oid: "bbb222", is_head: false, is_pushed: false },
-      { name: "refs/remotes/origin/main", shorthand: "origin/main", kind: "remote_branch", target_oid: "aaa111", is_head: false, is_pushed: false },
-      { name: "refs/remotes/origin/HEAD", shorthand: "origin/HEAD", kind: "remote_branch", target_oid: "aaa111", is_head: false, is_pushed: false },
+      { name: "refs/heads/main", shorthand: "main", kind: "local_branch", target_oid: "aaa111", is_head: true, is_pushed: true, worktree_path: null },
+      { name: "refs/heads/feature", shorthand: "feature", kind: "local_branch", target_oid: "bbb222", is_head: false, is_pushed: false, worktree_path: null },
+      { name: "refs/remotes/origin/main", shorthand: "origin/main", kind: "remote_branch", target_oid: "aaa111", is_head: false, is_pushed: false, worktree_path: null },
+      { name: "refs/remotes/origin/HEAD", shorthand: "origin/HEAD", kind: "remote_branch", target_oid: "aaa111", is_head: false, is_pushed: false, worktree_path: null },
     ];
 
     const defaultProps = {
@@ -512,14 +515,54 @@ describe("Dialogs", () => {
     it("never defaults to a remote-tracking */HEAD entry", () => {
       vi.mocked(useRefs).mockReturnValue({
         data: [
-          { name: "refs/remotes/origin/HEAD", shorthand: "origin/HEAD", kind: "remote_branch", target_oid: "aaa111", is_head: false, is_pushed: false },
-          { name: "refs/heads/main", shorthand: "main", kind: "local_branch", target_oid: "aaa111", is_head: true, is_pushed: true },
+          { name: "refs/remotes/origin/HEAD", shorthand: "origin/HEAD", kind: "remote_branch", target_oid: "aaa111", is_head: false, is_pushed: false, worktree_path: null },
+          { name: "refs/heads/main", shorthand: "main", kind: "local_branch", target_oid: "aaa111", is_head: true, is_pushed: true, worktree_path: null },
         ],
       } as any);
       vi.mocked(useCommitInRef).mockReturnValue({ data: true, isLoading: false, error: null } as any);
       render(<CheckInBranchDialog {...defaultProps} currentBranch={null} />);
 
       expect(useCommitInRef).toHaveBeenCalledWith("repo1", "c123456789", "main", "aaa111");
+    });
+  });
+
+  describe("MergeDialog", () => {
+    const defaultProps = {
+      repoId: "r",
+      oid: "abc",
+      label: "sinalizacao",
+      currentBranch: "master",
+      onClose: mockOnClose,
+      onSuccess: mockOnSuccess,
+      onConflicts: mockOnConflicts,
+    };
+
+    it("warns when the merged branch's worktree has uncommitted changes", () => {
+      vi.mocked(useWorktreeStatus).mockReturnValue({ data: { changed: 2, conflicted: false } } as any);
+      render(
+        <MergeDialog
+          {...defaultProps}
+          worktree={{ name: "alugar-sinalizacao", path: "E:\\alugar-sinalizacao" }}
+        />,
+      );
+
+      expect(
+        screen.getByText(/alugar-sinalizacao has 2 uncommitted change\(s\) that won't be merged/),
+      ).toBeInTheDocument();
+    });
+
+    it("no banner for a clean worktree or a plain branch", () => {
+      vi.mocked(useWorktreeStatus).mockReturnValue({ data: { changed: 0, conflicted: false } } as any);
+      render(<MergeDialog {...defaultProps} label="feat" worktree={null} />);
+
+      expect(screen.queryByText(/won't be merged/)).toBeNull();
+    });
+
+    it("calls useWorktreeStatus with enabled: false when there is no worktree", () => {
+      vi.mocked(useWorktreeStatus).mockReturnValue({ data: undefined } as any);
+      render(<MergeDialog {...defaultProps} worktree={null} />);
+
+      expect(useWorktreeStatus).toHaveBeenCalledWith(null, { enabled: false });
     });
   });
 });

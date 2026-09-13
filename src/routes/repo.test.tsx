@@ -4,6 +4,7 @@ import { RepoView } from "./repo";
 import { useStore } from "@/lib/store";
 import { useCommits, useFileStatus, useHeadInfo, useRefreshRepo, useRefs, useRemotes, useRepoStatus } from "@/lib/queries";
 import { ipc } from "@/lib/ipc";
+import { useOpenWorktree } from "@/lib/useOpenRepo";
 
 // Mock Tauri window
 vi.mock("@tauri-apps/api/window", () => ({
@@ -55,13 +56,42 @@ vi.mock("@/components/plugins/PluginRunnerProvider", () => ({
   usePluginRunner: () => ({ run: vi.fn() }),
 }));
 
-// Mock child components to keep tests simple and focused on RepoView
+// Mock useOpenWorktree — RepoView uses it for the "Open worktree" branch
+// action; it handles deleted-folder toasts itself, so RepoView just calls it.
+vi.mock("@/lib/useOpenRepo", () => ({
+  useOpenWorktree: vi.fn(),
+  isRepoGoneError: (e: unknown) => /repo gone:|folder does not exist/i.test(String(e)),
+}));
+
+// Mock child components to keep tests simple and focused on RepoView.
+// Sidebar forwards onRefAction through a test button so tests can exercise
+// RepoView's dispatch (e.g. "open-worktree") without driving the real ref tree UI.
 vi.mock("@/components/sidebar/Sidebar", () => ({
-  Sidebar: () => <div data-testid="sidebar">Sidebar</div>,
+  Sidebar: ({ onRefAction }: { onRefAction?: (action: unknown) => void }) => (
+    <div data-testid="sidebar">
+      Sidebar
+      <button onClick={() => onRefAction?.({ kind: "open-worktree", path: "/repos/other-checkout" })}>
+        trigger-open-worktree
+      </button>
+      <button onClick={() => onRefAction?.({ kind: "merge", oid: "aaa111", label: "sinalizacao" })}>
+        trigger-merge-held
+      </button>
+      <button onClick={() => onRefAction?.({ kind: "merge", oid: "bbb222", label: "feat" })}>
+        trigger-merge-plain
+      </button>
+    </div>
+  ),
 }));
 
 vi.mock("@/components/timeline/Timeline", () => ({
-  Timeline: () => <div data-testid="timeline">Timeline</div>,
+  // Exposes onWipClick via a test button so tests can select the WIP row
+  // without driving the real (virtualized) timeline UI.
+  Timeline: ({ onWipClick }: { onWipClick?: () => void }) => (
+    <div data-testid="timeline">
+      Timeline
+      <button onClick={onWipClick}>trigger-wip-click</button>
+    </div>
+  ),
 }));
 
 vi.mock("@/components/detail/CommitDetail", () => ({
@@ -74,7 +104,14 @@ vi.mock("@/components/staging/ConflictPanel", () => ({
 }));
 
 vi.mock("@/components/staging/StagingPanel", () => ({
-  StagingPanel: () => <div data-testid="staging-panel">StagingPanel</div>,
+  // Exposes onFileClick via a test button so tests can open a staging file
+  // diff without driving the real staging UI.
+  StagingPanel: ({ onFileClick }: { onFileClick?: (path: string, section: "staged" | "unstaged") => void }) => (
+    <div data-testid="staging-panel">
+      StagingPanel
+      <button onClick={() => onFileClick?.("src/foo.ts", "unstaged")}>trigger-file-click</button>
+    </div>
+  ),
 }));
 
 vi.mock("@/components/detail/StagingFileDiffPanel", () => ({
@@ -85,11 +122,23 @@ vi.mock("@/components/detail/StagingFileDiffPanel", () => ({
   ),
 }));
 
+// MergeDialog is spied on (rather than mocking the whole Dialogs module) so we
+// can assert on the `worktree` prop RepoView computes for it, without needing
+// the real dialog's ipc/query dependencies wired up in this test file.
+vi.mock("@/components/actions/Dialogs", () => ({
+  MergeDialog: ({ worktree }: { worktree: { name: string; path: string } | null }) => (
+    <div data-testid="merge-dialog" data-worktree={JSON.stringify(worktree)}>
+      MergeDialog
+    </div>
+  ),
+}));
+
 // Helpers for consistent mock state
 const mockSelectCommit = vi.fn();
 const mockRefresh = vi.fn();
+const mockCloseTab = vi.fn();
 
-function mockStoreFor(repoId: string) {
+function mockStoreFor(repoId: string, openSeq = 0) {
   vi.mocked(useStore).mockReturnValue({
     activeTabId: repoId,
     commits: [],
@@ -98,6 +147,8 @@ function mockStoreFor(repoId: string) {
     setCommits: vi.fn(),
     selectCommit: mockSelectCommit,
     setMultiSelected: vi.fn(),
+    closeTab: mockCloseTab,
+    openSeq,
   } as any);
 }
 
@@ -115,6 +166,7 @@ describe("RepoView", () => {
     vi.mocked(useRefs).mockReturnValue({ data: [] } as any);
     vi.mocked(useFileStatus).mockReturnValue({ data: [] } as any);
     vi.mocked(useRefreshRepo).mockReturnValue(mockRefresh);
+    vi.mocked(useOpenWorktree).mockReturnValue(vi.fn().mockResolvedValue(undefined));
   });
 
   it("renders the sidebar and timeline by default", () => {
@@ -258,5 +310,179 @@ describe("RepoView", () => {
     // Initially no staging panel
     render(<RepoView />);
     expect(screen.queryByTestId("staging-diff-panel")).not.toBeInTheDocument();
+  });
+
+  // ── Worktree awareness: "Open worktree" ────────────────────────────────────
+
+  it('"Open worktree" (open-worktree) invokes useOpenWorktree with the path', () => {
+    const mockOpen = vi.fn().mockResolvedValue(undefined);
+    vi.mocked(useOpenWorktree).mockReturnValue(mockOpen);
+
+    render(<RepoView />);
+    fireEvent.click(screen.getByText("trigger-open-worktree"));
+
+    expect(mockOpen).toHaveBeenCalledWith("/repos/other-checkout");
+  });
+
+  // ── Merge dialog worktree awareness ─────────────────────────────────────────
+
+  it("passes the held worktree to MergeDialog for a branch checked out elsewhere", () => {
+    vi.mocked(useRefs).mockReturnValue({
+      data: [
+        {
+          name: "refs/heads/sinalizacao",
+          shorthand: "sinalizacao",
+          kind: "local_branch",
+          target_oid: "aaa111",
+          is_head: false,
+          is_pushed: false,
+          worktree_path: "E:\\alugar-sinalizacao",
+        },
+      ],
+    } as any);
+
+    render(<RepoView />);
+    fireEvent.click(screen.getByText("trigger-merge-held"));
+
+    const dialog = screen.getByTestId("merge-dialog");
+    expect(JSON.parse(dialog.getAttribute("data-worktree")!)).toEqual({
+      name: "alugar-sinalizacao",
+      path: "E:\\alugar-sinalizacao",
+    });
+  });
+
+  it("passes worktree: null to MergeDialog for a plain branch", () => {
+    vi.mocked(useRefs).mockReturnValue({
+      data: [
+        {
+          name: "refs/heads/feat",
+          shorthand: "feat",
+          kind: "local_branch",
+          target_oid: "bbb222",
+          is_head: false,
+          is_pushed: false,
+          worktree_path: null,
+        },
+      ],
+    } as any);
+
+    render(<RepoView />);
+    fireEvent.click(screen.getByText("trigger-merge-plain"));
+
+    const dialog = screen.getByTestId("merge-dialog");
+    expect(dialog.getAttribute("data-worktree")).toBe("null");
+  });
+
+  // ── Removed-worktree state ─────────────────────────────────────────────────
+
+  it("shows the removed-worktree state when status reports repo gone", () => {
+    vi.mocked(useRepoStatus).mockReturnValue({ data: undefined, error: "repo gone: E:\\repo-agent" } as any);
+    mockStoreFor("E:\\repo-agent");
+    render(<RepoView />);
+    expect(screen.getByText("This worktree was removed")).toBeInTheDocument();
+    expect(screen.getByText("E:\\repo-agent")).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Close tab" })).toBeInTheDocument();
+  });
+
+  it("Close tab in the removed-worktree state closes the tab", () => {
+    vi.mocked(useRepoStatus).mockReturnValue({ data: undefined, error: "repo gone: E:\\repo-agent" } as any);
+    mockStoreFor("E:\\repo-agent");
+    render(<RepoView />);
+    fireEvent.click(screen.getByRole("button", { name: "Close tab" }));
+    expect(mockCloseTab).toHaveBeenCalledWith("E:\\repo-agent");
+  });
+
+  it("does not render the normal layout when the worktree is removed", () => {
+    vi.mocked(useRepoStatus).mockReturnValue({ data: undefined, error: "repo gone: E:\\repo-agent" } as any);
+    mockStoreFor("E:\\repo-agent");
+    render(<RepoView />);
+    expect(screen.queryByTestId("timeline")).not.toBeInTheDocument();
+  });
+
+  it("does not flash the removed state when switching to a different, healthy repo (RepoView is one shared instance)", () => {
+    vi.mocked(useRepoStatus).mockReturnValue({ data: undefined, error: "repo gone: E:\\repo-agent" } as any);
+    mockStoreFor("E:\\repo-agent");
+    const { rerender } = render(<RepoView />);
+    expect(screen.getByText("This worktree was removed")).toBeInTheDocument();
+
+    // Switch the active tab to an unrelated, healthy repo.
+    mockStoreFor("E:\\repo-health");
+    vi.mocked(useRepoStatus).mockReturnValue({ data: { merge_in_progress: false }, error: undefined } as any);
+    rerender(<RepoView />);
+
+    // The very first render for the new repo must show the normal layout —
+    // not a stale "removed" flash carried over from the previous tab.
+    expect(screen.queryByText("This worktree was removed")).not.toBeInTheDocument();
+    expect(screen.getByTestId("timeline")).toBeInTheDocument();
+
+    // ...and its own status query must be enabled from its very FIRST call —
+    // not disabled on the first render and only corrected by a later effect
+    // (which would still show as a real, if brief, flash in production, even
+    // though a synchronous RTL rerender can mask it in the final DOM snapshot).
+    const callsForHealthyRepo = vi.mocked(useRepoStatus).mock.calls.filter((c) => c[0] === "E:\\repo-health");
+    expect(callsForHealthyRepo.length).toBeGreaterThan(0);
+    expect(callsForHealthyRepo[0][1]).toEqual({ enabled: true });
+  });
+
+  it("clears the removed state when the SAME path reopens successfully (repoId unchanged, openSeq bumped)", () => {
+    vi.mocked(useRepoStatus).mockReturnValue({ data: undefined, error: "repo gone: E:\\repo-agent" } as any);
+    mockStoreFor("E:\\repo-agent", 1);
+    const { rerender } = render(<RepoView />);
+    expect(screen.getByText("This worktree was removed")).toBeInTheDocument();
+
+    // The folder came back and the user (or the prune-toast/recent-repos flow)
+    // reopened the SAME path. Since that tab was already the active tab, the
+    // store's `openTab` returns the same `activeTabId` — only `openSeq` bumps.
+    mockStoreFor("E:\\repo-agent", 2);
+    vi.mocked(useRepoStatus).mockReturnValue({ data: { merge_in_progress: false }, error: undefined } as any);
+    rerender(<RepoView />);
+
+    expect(screen.queryByText("This worktree was removed")).not.toBeInTheDocument();
+    expect(screen.getByTestId("timeline")).toBeInTheDocument();
+  });
+
+  it("reopening the SAME active repo (openSeq bump, repoId unchanged) keeps an in-flight busy state and the WIP/focused-file selection", async () => {
+    // Give repo1 a remote so the Fetch toolbar button appears.
+    vi.mocked(useRemotes).mockReturnValue({ data: ONE_REMOTE } as any);
+    vi.mocked(useHeadInfo).mockReturnValue({ data: { oid: "abc", branch: "main" } } as any);
+    // Must include the file we're about to focus — otherwise the "close the
+    // staging diff once its entry disappears from status" effect (repo.tsx,
+    // keyed on [fileStatus, focusedStagingFile]) immediately clears it again.
+    vi.mocked(useFileStatus).mockReturnValue({ data: [{ path: "src/foo.ts", staged: null, unstaged: "modified" }] } as any);
+
+    // fetchRemote never resolves on its own — simulates a fetch still in flight.
+    let resolveFetch!: () => void;
+    vi.mocked(ipc.fetchRemote).mockReturnValue(
+      new Promise<void>((res) => { resolveFetch = res; }) as any
+    );
+
+    const { rerender } = render(<RepoView />);
+
+    // Start a fetch — the busy state flips on.
+    fireEvent.click(screen.getByRole("button", { name: /fetch/i }));
+    await waitFor(() => expect(ipc.fetchRemote).toHaveBeenCalledTimes(1));
+    expect(screen.getByRole("button", { name: /fetch/i })).toBeDisabled();
+
+    // Select the WIP row, then open a staging file's diff.
+    fireEvent.click(screen.getByText("trigger-wip-click"));
+    expect(screen.getByTestId("staging-panel")).toBeInTheDocument();
+    fireEvent.click(screen.getByText("trigger-file-click"));
+    expect(screen.getByTestId("staging-diff-panel")).toHaveAttribute("data-path", "src/foo.ts");
+
+    // Re-open the ALREADY-ACTIVE repo — e.g. picking it again in the palette
+    // or a tab's folder picker. `openTab` returns the same `activeTabId` in
+    // that case and only bumps `openSeq`; `repoId` ("repo1") is unchanged.
+    mockStoreFor("repo1", 1);
+    rerender(<RepoView />);
+
+    // The in-flight fetch must still be tracked as busy — the toolbar button
+    // must NOT be re-enabled while the operation is still running.
+    expect(screen.getByRole("button", { name: /fetch/i })).toBeDisabled();
+    // The WIP selection and the focused staging file must survive the reopen.
+    expect(screen.getByTestId("staging-panel")).toBeInTheDocument();
+    expect(screen.getByTestId("staging-diff-panel")).toHaveAttribute("data-path", "src/foo.ts");
+
+    // Clean up the dangling promise.
+    act(() => resolveFetch());
   });
 });

@@ -5,10 +5,42 @@ export interface Tab {
   id: string;   // = repoId (repo path used as key)
   path: string;
   label: string; // last path segment shown in the tab
+  /** Main worktree's path when this tab is a linked worktree; null for the main worktree itself. */
+  mainPath: string | null;
 }
 
 function labelFromPath(path: string): string {
   return path.split(/[/\\]/).filter(Boolean).pop() ?? path;
+}
+
+/** Basename of a path's parent folder (e.g. "E:\\repos\\foo\\proj" -> "foo"). */
+function parentFolderName(path: string): string {
+  const segments = path.split(/[/\\]/).filter(Boolean);
+  return segments.length >= 2 ? segments[segments.length - 2] : path;
+}
+
+/**
+ * Display label per tab, disambiguating tabs that share the same `label`.
+ * A colliding tab with a `mainPath` (linked worktree) is suffixed with its
+ * main repo's folder name; a colliding tab without one is suffixed with its
+ * own path's parent folder name.
+ */
+export function tabLabels(tabs: Tab[]): Map<string, string> {
+  const counts = new Map<string, number>();
+  for (const t of tabs) counts.set(t.label, (counts.get(t.label) ?? 0) + 1);
+
+  const labels = new Map<string, string>();
+  for (const t of tabs) {
+    const colliding = (counts.get(t.label) ?? 0) > 1;
+    if (!colliding) {
+      labels.set(t.id, t.label);
+    } else if (t.mainPath) {
+      labels.set(t.id, `${t.label} · ${labelFromPath(t.mainPath)}`);
+    } else {
+      labels.set(t.id, `${t.label} · ${parentFolderName(t.path)}`);
+    }
+  }
+  return labels;
 }
 
 export type FileListView = "path" | "tree";
@@ -59,8 +91,16 @@ interface AppState extends ViewPrefs {
   settingsOpen: boolean;
   /** Folder the user picked that turned out not to be a repo — prompts to run `git init`. */
   initPromptPath: string | null;
+  /**
+   * Bumped on every successful `openTab` call, including a no-op re-open of the
+   * already-active tab (e.g. reopening a worktree path whose folder came back
+   * after being reported removed). `activeTabId` alone doesn't change in that
+   * case, so RepoView watches this counter to know a (re)open just happened and
+   * clear its "this worktree was removed" latch.
+   */
+  openSeq: number;
 
-  openTab: (id: string, path: string) => void;
+  openTab: (id: string, path: string, mainPath?: string | null) => void;
   closeTab: (id: string) => void;
   switchTab: (id: string) => void;
   setCommits: (commits: PositionedCommit[]) => void;
@@ -78,18 +118,20 @@ export const useStore = create<AppState>((set) => ({
   activeTabId: null,
   settingsOpen: false,
   initPromptPath: null,
+  openSeq: 0,
   ...BLANK_VIEW,
   ...loadViewPrefs(),
 
-  openTab: (id, path) =>
+  openTab: (id, path, mainPath = null) =>
     set((state) => {
-      if (state.activeTabId === id) return state;
+      if (state.activeTabId === id) return { openSeq: state.openSeq + 1 };
       if (state.tabs.some((t) => t.id === id)) {
-        return { activeTabId: id, ...BLANK_VIEW };
+        return { activeTabId: id, openSeq: state.openSeq + 1, ...BLANK_VIEW };
       }
       return {
-        tabs: [...state.tabs, { id, path, label: labelFromPath(path) }],
+        tabs: [...state.tabs, { id, path, label: labelFromPath(path), mainPath }],
         activeTabId: id,
+        openSeq: state.openSeq + 1,
         ...BLANK_VIEW,
       };
     }),

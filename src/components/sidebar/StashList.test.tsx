@@ -2,7 +2,7 @@ import { describe, it, expect, vi, beforeEach } from "vitest";
 import { render, screen, fireEvent, waitFor, act } from "@testing-library/react";
 import { StashList } from "./StashList";
 import { ipc } from "@/lib/ipc";
-import { useStashes, useRefreshRepo } from "@/lib/queries";
+import { useStashes, useRefreshRepo, useHeadInfo } from "@/lib/queries";
 
 vi.mock("@/lib/ipc", () => ({
   ipc: {
@@ -15,6 +15,7 @@ vi.mock("@/lib/ipc", () => ({
 vi.mock("@/lib/queries", () => ({
   useStashes: vi.fn(),
   useRefreshRepo: vi.fn(),
+  useHeadInfo: vi.fn(),
 }));
 
 const STASHES_REPO1 = [
@@ -26,6 +27,11 @@ const STASHES_REPO2 = [
   { index: 0, message: "WIP on feat: def5678 feat work" },
 ];
 
+const STASHES = [
+  { index: 0, message: "On master: WIP on master: 436fca2 docs", oid: "a", branch: "master" },
+  { index: 1, message: "WIP on sinalizacao: abc1234 mine", oid: "b", branch: "sinalizacao" },
+];
+
 const mockRefresh = vi.fn();
 
 describe("StashList", () => {
@@ -33,6 +39,7 @@ describe("StashList", () => {
     vi.clearAllMocks();
     vi.mocked(useRefreshRepo).mockReturnValue(mockRefresh);
     vi.mocked(useStashes).mockReturnValue({ data: STASHES_REPO1 } as any);
+    vi.mocked(useHeadInfo).mockReturnValue({ data: { branch: "sinalizacao", oid: "x" } } as any);
   });
 
   it("renders stash entries", () => {
@@ -139,5 +146,91 @@ describe("StashList", () => {
         .filter((b) => b.hasAttribute("title"));
       stashItemBtns.forEach((b) => expect(b).not.toBeDisabled());
     });
+  });
+
+  // ── F6: stash origin labels + cross-branch confirm ──────────────────────
+
+  it("labels each stash with its origin branch", () => {
+    vi.mocked(useStashes).mockReturnValue({ data: STASHES } as any);
+    render(<StashList repoId="r" />);
+    expect(screen.getByText("master")).toHaveClass("font-mono");
+  });
+
+  it("asks before popping a stash made on another branch", async () => {
+    vi.mocked(useStashes).mockReturnValue({ data: STASHES } as any);
+    render(<StashList repoId="r" />);
+    fireEvent.contextMenu(screen.getByTitle(STASHES[0].message));
+    fireEvent.click(screen.getByText("Pop"));
+    expect(ipc.popStash).not.toHaveBeenCalled();
+    expect(screen.getByText("Apply stash from another branch?")).toBeInTheDocument();
+    fireEvent.click(screen.getByRole("button", { name: "Pop" }));
+    await waitFor(() => expect(ipc.popStash).toHaveBeenCalledWith("r", STASHES[0].oid));
+  });
+
+  it("pops a same-branch stash without asking, addressed by OID not index", async () => {
+    vi.mocked(useStashes).mockReturnValue({ data: STASHES } as any);
+    render(<StashList repoId="r" />);
+    fireEvent.contextMenu(screen.getByTitle(STASHES[1].message));
+    fireEvent.click(screen.getByText("Pop"));
+    await waitFor(() => expect(ipc.popStash).toHaveBeenCalledWith("r", STASHES[1].oid));
+  });
+
+  it("applies and drops by OID, not index", async () => {
+    vi.mocked(useStashes).mockReturnValue({ data: STASHES } as any);
+    render(<StashList repoId="r" />);
+
+    fireEvent.contextMenu(screen.getByTitle(STASHES[1].message));
+    fireEvent.click(screen.getByText("Apply"));
+    await waitFor(() => expect(ipc.applyStash).toHaveBeenCalledWith("r", STASHES[1].oid));
+
+    fireEvent.contextMenu(screen.getByTitle(STASHES[1].message));
+    fireEvent.click(screen.getByText("Drop"));
+    await waitFor(() => expect(ipc.dropStash).toHaveBeenCalledWith("r", STASHES[1].oid));
+  });
+
+  // ── F6 fix round 1: confirm dialog must target the repo it was opened for ──
+
+  it("hides the cross-branch confirm and makes no IPC call when the tab switches mid-confirm", async () => {
+    vi.mocked(useStashes).mockReturnValue({ data: STASHES } as any);
+    const { rerender } = render(<StashList repoId="repo1" />);
+
+    fireEvent.contextMenu(screen.getByTitle(STASHES[0].message));
+    fireEvent.click(screen.getByText("Pop"));
+    expect(screen.getByText("Apply stash from another branch?")).toBeInTheDocument();
+
+    // Switch tabs before confirming.
+    vi.mocked(useStashes).mockReturnValue({ data: STASHES_REPO2 } as any);
+    rerender(<StashList repoId="repo2" />);
+
+    expect(screen.queryByText("Apply stash from another branch?")).not.toBeInTheDocument();
+    expect(ipc.popStash).not.toHaveBeenCalled();
+
+    // Switching back must not resurrect the stale confirm either.
+    vi.mocked(useStashes).mockReturnValue({ data: STASHES } as any);
+    rerender(<StashList repoId="repo1" />);
+    expect(screen.queryByText("Apply stash from another branch?")).not.toBeInTheDocument();
+    expect(ipc.popStash).not.toHaveBeenCalled();
+  });
+
+  it("disables the confirm dialog's Pop button while the op is in flight", async () => {
+    let resolveOp!: () => void;
+    vi.mocked(ipc.popStash).mockReturnValue(
+      new Promise<void>((res) => { resolveOp = res; }) as any
+    );
+    vi.mocked(useStashes).mockReturnValue({ data: STASHES } as any);
+    render(<StashList repoId="r" />);
+
+    fireEvent.contextMenu(screen.getByTitle(STASHES[0].message));
+    fireEvent.click(screen.getByText("Pop"));
+    const confirmBtn = screen.getByRole("button", { name: "Pop" });
+    expect(confirmBtn).not.toBeDisabled();
+
+    fireEvent.click(confirmBtn);
+    await waitFor(() => expect(confirmBtn).toBeDisabled());
+
+    act(() => resolveOp());
+    await waitFor(() =>
+      expect(screen.queryByText("Apply stash from another branch?")).not.toBeInTheDocument()
+    );
   });
 });

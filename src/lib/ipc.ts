@@ -37,6 +37,12 @@ export interface RefInfo {
   target_oid: string | null;
   is_head: boolean;
   is_pushed: boolean;
+  /**
+   * Set only for local branches checked out in ANOTHER git worktree (not the
+   * repo open in this tab) — the value is that worktree's working-directory
+   * path. The backend rejects checkout/delete/reset of such a branch.
+   */
+  worktree_path: string | null;
 }
 
 export interface FileDiff {
@@ -82,6 +88,7 @@ export interface StashEntry {
   index: number;
   message: string;
   oid: string;
+  branch: string | null;
 }
 
 export interface MergeResult {
@@ -132,6 +139,35 @@ export interface PullResult {
   conflicted: string[];
 }
 
+export interface OpenedRepo {
+  id: string;
+  main_worktree_path: string | null;
+}
+
+export interface WorktreeInfo {
+  path: string;
+  name: string;
+  is_main: boolean;
+  is_current: boolean;
+  branch: string | null;
+  head_oid: string | null;
+  is_detached: boolean;
+  is_locked: boolean;
+  lock_reason: string | null;
+  is_missing: boolean;
+  branch_merged: boolean;
+}
+
+export interface WorktreeStatus {
+  changed: number;
+  conflicted: boolean;
+}
+
+export interface RemoveResult {
+  branch_deleted: boolean;
+  branch_kept_reason: string | null;
+}
+
 export const ipc = {
   getStartupPath: () =>
     invoke<string | null>("get_startup_path"),
@@ -143,7 +179,7 @@ export const ipc = {
     invoke<void>("register_explorer_context_menu", { register }),
 
   openRepo: (path: string) =>
-    invoke<string>("open_repo", { path }),
+    invoke<OpenedRepo>("open_repo", { path }),
 
   initRepo: (path: string, allowNested = false) =>
     invoke<void>("init_repo", { path, allowNested }),
@@ -307,14 +343,16 @@ export const ipc = {
   listStashes: (repoId: string) =>
     invoke<StashEntry[]>("list_stashes", { repoId }),
 
-  popStash: (repoId: string, index: number) =>
-    invoke<void>("pop_stash", { repoId, index }),
+  // Addressed by OID (stable identity) rather than index — all worktrees share
+  // one stash list, so an index can shift out from under a pending action.
+  popStash: (repoId: string, oid: string) =>
+    invoke<void>("pop_stash", { repoId, oid }),
 
-  applyStash: (repoId: string, index: number) =>
-    invoke<void>("apply_stash", { repoId, index }),
+  applyStash: (repoId: string, oid: string) =>
+    invoke<void>("apply_stash", { repoId, oid }),
 
-  dropStash: (repoId: string, index: number) =>
-    invoke<void>("drop_stash", { repoId, index }),
+  dropStash: (repoId: string, oid: string) =>
+    invoke<void>("drop_stash", { repoId, oid }),
 
   renameStash: (repoId: string, index: number, message: string) =>
     invoke<void>("rename_stash", { repoId, index, message }),
@@ -357,4 +395,16 @@ export const ipc = {
 
   checkCliShim: () =>
     invoke<boolean>("check_cli_shim"),
+
+  listWorktrees: (repoId: string) =>
+    invoke<WorktreeInfo[]>("list_worktrees", { repoId }),
+
+  worktreeStatus: (path: string) =>
+    invoke<WorktreeStatus>("worktree_status", { path }),
+
+  removeWorktree: (repoId: string, path: string, force: boolean, deleteBranch: boolean) =>
+    invoke<RemoveResult>("remove_worktree", { repoId, path, force, deleteBranch }),
+
+  pruneWorktrees: (repoId: string) =>
+    invoke<void>("prune_worktrees", { repoId }),
 };

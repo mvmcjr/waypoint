@@ -2,6 +2,7 @@ use std::path::Path;
 use serde::Serialize;
 use tauri::State;
 
+use crate::commands::stash::find_stash_index_by_oid;
 use crate::error::{Error, Result};
 use crate::repo::RepoState;
 
@@ -63,7 +64,10 @@ pub(crate) fn collect_conflict_paths(index: &git2::Index) -> Result<Vec<String>>
 }
 
 /// Stash any tracked uncommitted changes so a merge/cherry-pick starts on a clean tree.
-/// Writes `WAYPOINT_AUTOSTASH` to the git dir to mark that we need to pop on completion.
+/// Writes `WAYPOINT_AUTOSTASH` to the git dir to mark that we need to pop on completion:
+/// the marker holds the created stash's OID so `auto_pop` can find its way back to it
+/// even if another worktree pushes its own stash in the meantime (stashes are shared
+/// across all worktrees via `refs/stash` in the common git dir).
 /// Returns `true` if a stash was created.
 fn auto_stash(repo: &mut git2::Repository) -> Result<bool> {
     let is_dirty = {
@@ -91,22 +95,42 @@ fn auto_stash(repo: &mut git2::Repository) -> Result<bool> {
     }
 
     let sig = repo.signature()?;
-    repo.stash_save(&sig, "waypoint-autostash", None)?;
-    std::fs::write(repo.path().join("WAYPOINT_AUTOSTASH"), b"1").map_err(io_err)?;
+    let oid = repo.stash_save(&sig, "waypoint-autostash", None)?;
+    std::fs::write(repo.path().join("WAYPOINT_AUTOSTASH"), oid.to_string()).map_err(io_err)?;
     Ok(true)
 }
 
 /// Re-apply the autostash created by `auto_stash`, if any.
 /// Best-effort: if the apply fails (e.g. conflicts with the merge result) the
-/// stash is left in place so the user can pop it manually.
+/// stash is left in place so the user can pop it manually. Never pops a stash
+/// we didn't create: if the marked OID can't be found in the current stash list
+/// (or the marker predates this fix — see the legacy fallback below — and index 0
+/// isn't actually ours), the marker and every stash are left untouched.
 fn auto_pop(repo: &mut git2::Repository) {
     let autostash_path = repo.path().join("WAYPOINT_AUTOSTASH");
-    if !autostash_path.exists() {
+    let Ok(marker) = std::fs::read_to_string(&autostash_path) else { return };
+    let marker = marker.trim();
+    if marker.is_empty() {
         return;
     }
+
+    // Back-compat: a marker written before this fix is just "1" and has no OID
+    // to look up — fall back to the old index-0 behavior for it.
+    let index = if marker == "1" {
+        Some(0)
+    } else {
+        git2::Oid::from_str(marker).ok().and_then(|oid| find_stash_index_by_oid(repo, oid))
+    };
+
+    let Some(index) = index else {
+        // Our stash isn't there (or the marker is unparseable) — never guess and
+        // pop someone else's stash. Leave the marker and every stash alone.
+        return;
+    };
+
     let mut opts = git2::StashApplyOptions::new();
-    if repo.stash_apply(0, Some(&mut opts)).is_ok() {
-        let _ = repo.stash_drop(0);
+    if repo.stash_apply(index, Some(&mut opts)).is_ok() {
+        let _ = repo.stash_drop(index);
         let _ = std::fs::remove_file(&autostash_path);
     }
     // On failure: leave the stash in place; user will see it in the stash list.
@@ -580,6 +604,90 @@ mod tests {
     fn checkout(repo: &Repository, branch_ref: &str) {
         repo.set_head(branch_ref).unwrap();
         repo.checkout_head(Some(CheckoutBuilder::new().force())).unwrap();
+    }
+
+    /// Stashes are shared across all worktrees (`refs/stash` lives in the common
+    /// git dir), so if a second worktree pushes its own stash between our
+    /// `auto_stash` and `auto_pop`, popping index 0 would apply and drop the
+    /// WRONG stash. `auto_pop` must find and pop the specific stash `auto_stash`
+    /// created (by OID), leaving any other stash alone.
+    #[test]
+    fn auto_pop_finds_its_own_stash_by_oid_even_if_another_was_pushed_meanwhile() {
+        use crate::repo::test_support::add_worktree;
+
+        let (main_dir, mut main_repo) = make_repo();
+        write_commit(&main_repo, "shared.txt", "line0\n", "add shared.txt");
+
+        let (wt_dir, mut wt_repo) = add_worktree(&main_repo, "feat", "feat");
+
+        // Our own autostash, in the main worktree.
+        std::fs::write(main_dir.join("shared.txt"), "ours\n").unwrap();
+        let autostashed = auto_stash(&mut main_repo).unwrap();
+        assert!(autostashed);
+        assert_eq!(std::fs::read_to_string(main_dir.join("shared.txt")).unwrap().trim_end(), "line0");
+
+        // Meanwhile, "another worktree" pushes its own stash — lands at index 0,
+        // pushing ours to index 1.
+        std::fs::write(wt_dir.join("shared.txt"), "other\n").unwrap();
+        {
+            let mut wt_index = wt_repo.index().unwrap();
+            wt_index.add_path(Path::new("shared.txt")).unwrap();
+            wt_index.write().unwrap();
+        }
+        let wt_sig = wt_repo.signature().unwrap();
+        wt_repo.stash_save(&wt_sig, "other-worktree-stash", None).unwrap();
+        assert_eq!(std::fs::read_to_string(wt_dir.join("shared.txt")).unwrap().trim_end(), "line0");
+
+        // Finish: pop our autostash back in the main worktree.
+        auto_pop(&mut main_repo);
+
+        assert_eq!(
+            std::fs::read_to_string(main_dir.join("shared.txt")).unwrap().trim_end(),
+            "ours",
+            "our own autostash must have been applied"
+        );
+        assert!(
+            !main_repo.path().join("WAYPOINT_AUTOSTASH").exists(),
+            "marker must be cleared after a successful pop"
+        );
+
+        let mut remaining = Vec::new();
+        main_repo.stash_foreach(|index, message, _oid| {
+            remaining.push((index, message.to_string()));
+            true
+        }).unwrap();
+        assert_eq!(remaining.len(), 1, "the other worktree's stash must survive untouched: {:?}", remaining);
+        assert!(remaining[0].1.contains("other-worktree-stash"), "unexpected message: {}", remaining[0].1);
+
+        let _ = std::fs::remove_dir_all(&wt_dir);
+        let _ = std::fs::remove_dir_all(&main_dir);
+    }
+
+    /// A marker written before this fix is just "1" (no OID). `auto_pop` must
+    /// still honor it via the old index-0 behavior rather than treating it as
+    /// unparseable and leaving the stash stranded.
+    #[test]
+    fn auto_pop_honors_legacy_index_zero_marker() {
+        let (dir, mut repo) = make_repo();
+        write_commit(&repo, "shared.txt", "line0\n", "add shared.txt");
+
+        std::fs::write(dir.join("shared.txt"), "ours\n").unwrap();
+        {
+            let mut index = repo.index().unwrap();
+            index.add_path(Path::new("shared.txt")).unwrap();
+            index.write().unwrap();
+        }
+        let sig = repo.signature().unwrap();
+        repo.stash_save(&sig, "waypoint-autostash", None).unwrap();
+        // Simulate a pre-fix marker.
+        std::fs::write(repo.path().join("WAYPOINT_AUTOSTASH"), b"1").unwrap();
+
+        auto_pop(&mut repo);
+
+        assert_eq!(std::fs::read_to_string(dir.join("shared.txt")).unwrap().trim_end(), "ours");
+        assert!(!repo.path().join("WAYPOINT_AUTOSTASH").exists());
+
+        let _ = std::fs::remove_dir_all(dir);
     }
 
     #[test]

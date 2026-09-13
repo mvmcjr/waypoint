@@ -1,5 +1,5 @@
 import { useQuery, useQueryClient } from "@tanstack/react-query";
-import { useCallback } from "react";
+import { useCallback, useRef } from "react";
 import { ipc } from "./ipc";
 
 export function useCommits(repoId: string | null) {
@@ -83,20 +83,22 @@ export function useHeadInfo(repoId: string | null) {
   });
 }
 
-export function useFileStatus(repoId: string | null) {
+export function useFileStatus(repoId: string | null, opts: { enabled?: boolean } = {}) {
+  const { enabled = true } = opts;
   return useQuery({
     queryKey: ["staging", repoId],
     queryFn: () => ipc.listStatus(repoId!),
-    enabled: !!repoId,
+    enabled: !!repoId && enabled,
     refetchInterval: 2000,
   });
 }
 
-export function useRepoStatus(repoId: string | null) {
+export function useRepoStatus(repoId: string | null, opts: { enabled?: boolean } = {}) {
+  const { enabled = true } = opts;
   return useQuery({
     queryKey: ["status", repoId],
     queryFn: () => ipc.getRepoStatus(repoId!),
-    enabled: !!repoId,
+    enabled: !!repoId && enabled,
     refetchInterval: 3000,
   });
 }
@@ -135,6 +137,37 @@ export function useRemotes(repoId: string | null) {
   });
 }
 
+export function worktreeStatusInterval(lastScanMs: number): number {
+  return Math.max(3000, 5 * lastScanMs);
+}
+
+export function useWorktrees(repoId: string | null) {
+  return useQuery({
+    queryKey: ["worktrees", repoId],
+    queryFn: () => ipc.listWorktrees(repoId!),
+    enabled: !!repoId,
+    staleTime: Infinity,
+  });
+}
+
+/** Live change count for one worktree; polls only while `enabled` (section open). */
+export function useWorktreeStatus(path: string | null, opts: { enabled: boolean }) {
+  const lastMs = useRef(0);
+  return useQuery({
+    queryKey: ["worktree-status", path],
+    queryFn: async () => {
+      const t0 = performance.now();
+      try { return await ipc.worktreeStatus(path!); }
+      finally { lastMs.current = performance.now() - t0; }
+    },
+    enabled: !!path && opts.enabled,
+    refetchInterval: () => worktreeStatusInterval(lastMs.current),
+    refetchIntervalInBackground: false,
+    refetchOnWindowFocus: true,
+    retry: false,
+  });
+}
+
 /** Invalidates commits, refs, head, and status after a mutating action. */
 export function useRefreshRepo(repoId: string | null) {
   const qc = useQueryClient();
@@ -151,5 +184,7 @@ export function useRefreshRepo(repoId: string | null) {
     // group stays hidden until the app restarts.
     qc.invalidateQueries({ queryKey: ["remotes", repoId] });
     qc.invalidateQueries({ queryKey: ["workdir-diff", repoId] });
+    qc.invalidateQueries({ queryKey: ["worktrees", repoId] });
+    qc.invalidateQueries({ queryKey: ["worktree-status"] });
   }, [qc, repoId]);
 }

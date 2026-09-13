@@ -34,12 +34,15 @@ import {
   DeleteTagDialog,
   PushTagDialog,
 } from "@/components/actions/Dialogs";
+import { RemoveWorktreeDialog } from "@/components/actions/RemoveWorktreeDialog";
 import type { CommitAction } from "@/components/timeline/CommitContextMenu";
 import type { RefAction } from "@/components/sidebar/RefTree";
-import { ipc, type RefInfo, type RemoteInfo } from "@/lib/ipc";
+import { ipc, type RefInfo, type RemoteInfo, type WorktreeInfo } from "@/lib/ipc";
 import { RefreshCw, ArrowDown, ArrowUp, Puzzle } from "lucide-react";
 import { usePluginRegistry, commandsForSurface } from "@/lib/plugins/registry";
 import { usePluginRunner } from "@/components/plugins/PluginRunnerProvider";
+import { useOpenWorktree, isRepoGoneError } from "@/lib/useOpenRepo";
+import { worktreeName } from "@/lib/utils";
 import { toast } from "sonner";
 import { Button } from "@/components/ui/button";
 
@@ -73,23 +76,39 @@ type DialogState =
   | { kind: "remote-error"; message: string }
   | { kind: "create-tag"; oid: string }
   | { kind: "delete-tag"; tagName: string }
-  | { kind: "push-tag"; tagName: string };
+  | { kind: "push-tag"; tagName: string }
+  // Rendering of this dialog is Task F3's responsibility — WorktreeList (F2) only
+  // needs somewhere to route the "Remove worktree…" action to.
+  | { kind: "remove-worktree"; worktree: WorktreeInfo };
 
 // ─── Main view ─────────────────────────────────────────────────────────────
 
 export function RepoView() {
-  const { activeTabId: repoId, commits, selectedOid, multiSelectedOids, fileListView, setCommits, selectCommit, setMultiSelected } =
+  const { activeTabId: repoId, commits, selectedOid, multiSelectedOids, fileListView, setCommits, selectCommit, setMultiSelected, closeTab, openSeq } =
     useStore();
   // Anchor commit for shift-click range selection (oid of the last plain/ctrl click).
   const selectionAnchorRef = useRef<string | null>(null);
 
   const { data, isLoading, error } = useCommits(repoId);
   const { data: head } = useHeadInfo(repoId);
-  const { data: status } = useRepoStatus(repoId);
+  // The tab's worktree folder was deleted out from under us. `removedRepoId`
+  // latches to the *specific* repoId whose status query reported it gone, so
+  // `isRemoved` (derived by comparing it to the current repoId, not stored as
+  // its own boolean) is correct on the very first render of a different repo
+  // — no one-render flash of the removed panel/disabled queries for a healthy
+  // tab that happens to render right after a removed one. The repoId reset
+  // effect below clears the latch on every tab change (including reopening
+  // the same path), so a previously-removed repo always gets a fresh check
+  // before re-latching — the removal only "sticks" while its error persists
+  // across a continuous visit to that tab.
+  const [removedRepoId, setRemovedRepoId] = useState<string | null>(null);
+  const isRemoved = removedRepoId !== null && removedRepoId === repoId;
+  const { data: status, error: statusError } = useRepoStatus(repoId, { enabled: !isRemoved });
   const { data: remotes } = useRemotes(repoId);
   const { data: refs } = useRefs(repoId);
-  const { data: fileStatus } = useFileStatus(repoId);
+  const { data: fileStatus } = useFileStatus(repoId, { enabled: !isRemoved });
   const refresh = useRefreshRepo(repoId);
+  const openWorktree = useOpenWorktree(repoId);
 
   const timelineRef = useRef<TimelineHandle>(null);
   // "Go to commit" find state — which oids currently match (null = no active query)
@@ -256,6 +275,14 @@ export function RepoView() {
   // those panels survive the tab switch and show stale/wrong-repo content.
   // isFetching/isPulling/isPushing are also reset so the new repo's toolbar
   // buttons aren't frozen in a spinner from the previous repo's in-flight op.
+  //
+  // Keyed on `repoId` ONLY — not `openSeq` — because re-opening the ALREADY
+  // ACTIVE repo (picking it again in the palette or a tab's folder picker)
+  // bumps `openSeq` without changing `repoId` (`repoId` doesn't change since
+  // the tab was never closed). That reopen must NOT re-run this reset: an
+  // operation (fetch/pull/push) could still be in flight, and the user's
+  // current focused file / WIP selection shouldn't be yanked out from under
+  // them just because they reselected the tab they were already on.
   useEffect(() => {
     setFocusedFilePath(null);
     setFocusedStagingFile(null);
@@ -266,8 +293,25 @@ export function RepoView() {
     setIsPushing(false);
     setMatchOids(null);
     setMatchTokens([]);
+    setRemovedRepoId(null);
     wasWorkingDirDirtyRef.current = false;
   }, [repoId]);
+
+  // A reopen of the SAME active repo (`openSeq` bumps, `repoId` doesn't
+  // change) should still clear the "removed" latch — e.g. reopening a
+  // worktree whose folder came back after being reported gone — without
+  // resetting anything else the big effect above owns.
+  useEffect(() => {
+    setRemovedRepoId(null);
+  }, [openSeq]);
+
+  // Detect the worktree-removed condition from the status query's error and
+  // latch it to this repoId — `isRemoved` above then disables further polling
+  // on both queries. Guarded to the current repoId so a stale error from a
+  // query for a tab we've since left can't latch the wrong one.
+  useEffect(() => {
+    if (repoId && isRepoGoneError(statusError)) setRemovedRepoId(repoId);
+  }, [statusError, repoId]);
 
   // Close the staging file diff once its entry disappears from status — covers
   // commit, discard, stash, and switching branches (all of which can make the
@@ -517,7 +561,15 @@ export function RepoView() {
       setDialog({ kind: "delete-tag", tagName: action.tagName });
     } else if (action.kind === "create-tag") {
       setDialog({ kind: "create-tag", oid: action.oid });
+    } else if (action.kind === "open-worktree") {
+      openWorktree(action.path);
     }
+  }
+
+  // Task F3 renders the actual confirmation dialog for this DialogState — until
+  // then this just records which worktree "Remove worktree…" was invoked on.
+  function handleRemoveWorktree(worktree: WorktreeInfo) {
+    setDialog({ kind: "remove-worktree", worktree });
   }
 
   function handleCommitAction(action: CommitAction) {
@@ -555,16 +607,32 @@ export function RepoView() {
     refresh();
   }
 
+  // When merging a local branch that's checked out in another worktree, the
+  // merge only picks up its committed work — the merge dialog needs to know
+  // which worktree (if any) that is, to warn about uncommitted changes there.
+  function heldWorktreeFor(label: string): { name: string; path: string } | null {
+    const ref = (refs ?? []).find(
+      (r) => r.kind === "local_branch" && r.shorthand === label && r.worktree_path,
+    );
+    return ref?.worktree_path ? { name: worktreeName(ref.worktree_path), path: ref.worktree_path } : null;
+  }
+
   // After a diverged remote checkout left the user on a detached HEAD, offer a
   // one-click hard reset of the local branch onto the remote tip (destructive).
   function handleRemoteDiverged(remoteBranch: string) {
     const localName = remoteBranch.slice(remoteBranch.indexOf("/") + 1);
     const myRepoId = repoId;
+    // The backend rejects resetting a local branch that's checked out in
+    // another worktree — omit the one-click action for those instead of
+    // offering something that will just fail.
+    const heldElsewhere = (refs ?? []).some(
+      (r) => r.kind === "local_branch" && r.shorthand === localName && r.worktree_path,
+    );
     toast.warning(
       `${localName} has diverged from ${remoteBranch}. Checked out detached — your local ${localName} is kept.`,
       {
         duration: 12000,
-        action: {
+        action: heldElsewhere ? undefined : {
           label: `Reset ${localName} to remote`,
           onClick: () => {
             if (!myRepoId) return;
@@ -603,12 +671,28 @@ export function RepoView() {
   const pluginRunner = usePluginRunner();
   const toolbarCmds = commandsForSurface(pluginList, "toolbar");
 
+  if (isRemoved) {
+    return (
+      <div className="flex h-full items-center justify-center">
+        <div className="flex flex-col items-center gap-3 text-center">
+          <span className="text-sm text-foreground">This worktree was removed</span>
+          {repoId && <span className="font-mono text-xs text-muted-foreground">{repoId}</span>}
+          <Button variant="outline" size="sm" onClick={() => repoId && closeTab(repoId)}>
+            Close tab
+          </Button>
+        </div>
+      </div>
+    );
+  }
+
   return (
     <div className="flex h-full overflow-hidden">
       <Sidebar
         repoId={repoId}
         onSelectRef={handleRefSelect}
         onRefAction={handleRefAction}
+        onSelectOid={handleGoToCommit}
+        onRemoveWorktree={handleRemoveWorktree}
       />
 
       <div className="flex flex-col flex-1 overflow-hidden">
@@ -856,6 +940,7 @@ export function RepoView() {
           oid={dialog.oid}
           label={dialog.label}
           currentBranch={head?.branch ?? null}
+          worktree={heldWorktreeFor(dialog.label)}
           onClose={() => setDialog({ kind: "none" })}
           onSuccess={handleSuccess}
           onConflicts={handleMergeConflicts}
@@ -955,6 +1040,15 @@ export function RepoView() {
           repoId={repoId}
           tagName={dialog.tagName}
           remotes={remotes}
+          onClose={() => setDialog({ kind: "none" })}
+          onSuccess={handleSuccess}
+        />
+      )}
+      {repoId && dialog.kind === "remove-worktree" && (
+        <RemoveWorktreeDialog
+          repoId={repoId}
+          worktree={dialog.worktree}
+          currentBranch={head?.branch ?? null}
           onClose={() => setDialog({ kind: "none" })}
           onSuccess={handleSuccess}
         />
