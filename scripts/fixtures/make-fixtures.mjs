@@ -815,6 +815,195 @@ function makeStash() {
 }
 
 /**
+ * WORKTREES
+ * A parent folder holding the main repo (`main/`) plus a full set of linked
+ * git worktrees as siblings, covering every worktree state Waypoint's UI
+ * handles: clean + already-merged, dirty with a live change count and a
+ * cross-branch stash, a conflicted merge-in-progress, detached HEAD, locked,
+ * missing (deleted but unpruned), long near-identical names, and a worktree
+ * nested inside main's own working tree.
+ *
+ * Open `main/` in Waypoint — main itself stays clean except for the
+ * untracked `.worktrees/` folder. Worktree paths are absolute, so if this
+ * checkout is ever moved, re-run `pnpm fixtures worktrees` to regenerate
+ * them pointing at the new location.
+ */
+function makeWorktrees() {
+  // Clean the whole parent folder wholesale — all worktree admin data lives
+  // in main/.git, so removing it removes every linked worktree's
+  // registration too. Nothing stale can survive a rebuild.
+  const baseDir = join(REPOS_DIR, 'worktrees');
+  if (existsSync(baseDir)) rmSync(baseDir, { recursive: true, force: true });
+  mkdirSync(baseDir, { recursive: true });
+
+  const mainDir = join(baseDir, 'main');
+  mkdirSync(mainDir, { recursive: true });
+  initRepo(mainDir);
+
+  // ── Main repo: a few commits ──────────────────────────────────────────
+  write(mainDir, 'README.md', [
+    '# Worktrees Demo',
+    '',
+    'Open THIS folder (`main/`) in Waypoint. Every other folder next to it is',
+    "a linked git worktree sharing this repo's history — together they cover",
+    "every worktree state Waypoint's UI handles.",
+    '',
+    '## What to look at',
+    '',
+    '- **Worktrees sidebar section** — check off each state as you find it:',
+    '  - `agent-clean` (agent/clean): merged check — its branch is already an',
+    '    ancestor of main, no commits of its own.',
+    '  - `agent-dirty` (agent/dirty): live change count badge shows 3',
+    '    (staged + unstaged + untracked).',
+    '  - `agent-conflict` (agent/conflict): conflict tag — a merge of main is',
+    '    stopped mid-way with a real conflict in `src/utils.js`.',
+    '  - `agent-detached`: amber detached-HEAD hash instead of a branch name.',
+    '  - `agent-locked` (agent/locked): lock glyph — locked with reason',
+    '    "agent running".',
+    '  - `agent-missing` (agent/missing): missing row — its folder was',
+    '    deleted without pruning; use "Prune missing" to clear it.',
+    '  - `waypoint-agent-1-longer-suffix` / `waypoint-agent-2-longer-suffix`:',
+    '    long, nearly-identical names — check path/name truncation.',
+    '',
+    '- **Branches panel**: right-click `agent/dirty` — it should offer',
+    '  "Open worktree" instead of "Checkout" (it is already checked out',
+    '  elsewhere).',
+    '',
+    '- **Merge**: merging `agent/dirty` into `main` should show a caution',
+    '  banner about uncommitted changes in that worktree before proceeding.',
+    '',
+    '- **Stashes**: the stash list shows "agent WIP on agent/dirty" — it was',
+    '  created inside the `agent-dirty` worktree. Applying/popping it from',
+    '  `main` should prompt a cross-branch confirmation.',
+    '',
+    '- **Remove worktree**: removing `agent-clean` should offer an',
+    '  "Also delete branch" option (safe — it is fully merged).',
+    '',
+    '- **Discard all** (in `main`): must NOT touch `.worktrees/nested-agent`',
+    "  — that's a real linked worktree living inside main's own working",
+    '  tree, not throwaway working-directory clutter.',
+    '',
+    '## Notes',
+    '',
+    '- `main` itself is clean except for one untracked entry: `.worktrees/`',
+    '  (the nested worktree living inside it).',
+    '- Worktree paths are recorded as absolute paths inside `main/.git`. If',
+    '  you move this checkout, regenerate with `pnpm fixtures worktrees` so',
+    '  the paths point at the new location again.',
+    '',
+  ].join('\n'));
+  write(mainDir, 'src/app.js', 'export const APP = "worktrees-demo";\n');
+  run('git add .', mainDir);
+  run('git commit -m "Initial commit"', mainDir);
+
+  write(mainDir, 'src/utils.js', [
+    'export function noop() {}',
+    '',
+    'export function identity(x) {',
+    '  return x;',
+    '}',
+    '',
+  ].join('\n'));
+  run('git add .', mainDir);
+  run('git commit -m "Add utils module"', mainDir);
+
+  // Earlier commit (before the config module and the conflict setup below)
+  // to detach the agent-detached worktree at.
+  const earlyOid = execSync('git rev-parse HEAD', { cwd: mainDir, env: { ...process.env, ...GIT_ENV } })
+    .toString().trim();
+
+  write(mainDir, 'src/config.js', 'export const VERSION = "1.0.0";\n');
+  run('git add .', mainDir);
+  run('git commit -m "Add config module"', mainDir);
+
+  // ── Sibling worktree paths (absolute, as `git worktree add` requires) ───
+  const cleanPath    = join(baseDir, 'agent-clean');
+  const dirtyPath    = join(baseDir, 'agent-dirty');
+  const conflictPath = join(baseDir, 'agent-conflict');
+  const detachedPath = join(baseDir, 'agent-detached');
+  const lockedPath   = join(baseDir, 'agent-locked');
+  const missingPath  = join(baseDir, 'agent-missing');
+  const long1Path    = join(baseDir, 'waypoint-agent-1-longer-suffix');
+  const long2Path    = join(baseDir, 'waypoint-agent-2-longer-suffix');
+
+  // 1. agent-clean — branched at main's current tip with no new commits, so
+  //    it is already merged into main (clean + merged state).
+  run(`git worktree add -b agent/clean "${cleanPath}"`, mainDir);
+
+  // 2. agent-dirty — one commit of its own, a stash made from a separate
+  //    edit *before* the final uncommitted changes (so the stash doesn't
+  //    capture them), then exactly 3 uncommitted changes: staged, unstaged
+  //    modification, untracked.
+  run(`git worktree add -b agent/dirty "${dirtyPath}"`, mainDir);
+
+  write(dirtyPath, 'src/agent-dirty-work.js', 'export const AGENT_DIRTY = "step-1";\n');
+  run('git add .', dirtyPath);
+  run('git commit -m "agent: dirty branch work"', dirtyPath);
+
+  // A separate edit, made and stashed before the final 3 changes below.
+  write(dirtyPath, 'src/agent-dirty-work.js', 'export const AGENT_DIRTY = "step-2-wip";\n');
+  run('git stash push -m "agent WIP on agent/dirty"', dirtyPath);
+
+  // The 3 uncommitted changes that must remain live after stashing.
+  write(dirtyPath, 'src/agent-dirty-staged.js', 'export const STAGED = true;\n');
+  run('git add src/agent-dirty-staged.js', dirtyPath);                                             // staged
+  write(dirtyPath, 'src/agent-dirty-work.js', 'export const AGENT_DIRTY = "step-1-modified";\n');  // unstaged modification
+  write(dirtyPath, 'src/agent-dirty-untracked.txt', 'untracked scratch file\n');                    // untracked
+
+  // 3. agent-conflict — diverges from main on the same lines of utils.js,
+  //    then merges main into itself to produce a real, stopped conflict.
+  run(`git worktree add -b agent/conflict "${conflictPath}"`, mainDir);
+  write(conflictPath, 'src/utils.js', [
+    'export function noop() {}',
+    '',
+    'export function identity(x) {',
+    '  return x; // agent/conflict tweak',
+    '}',
+    '',
+  ].join('\n'));
+  run('git add .', conflictPath);
+  run('git commit -m "agent: tweak identity on conflict branch"', conflictPath);
+
+  // Main changes the same lines a different way, so the merge below conflicts.
+  write(mainDir, 'src/utils.js', [
+    'export function noop() {}',
+    '',
+    'export function identity(x) {',
+    '  return x; // main tweak',
+    '}',
+    '',
+  ].join('\n'));
+  run('git add .', mainDir);
+  run('git commit -m "Tweak identity on main"', mainDir);
+
+  tryRun('git merge main', conflictPath);   // stops mid-merge with a conflict (MERGE_HEAD + UU file)
+
+  // 4. agent-detached — detached HEAD at an earlier main commit.
+  run(`git worktree add --detach "${detachedPath}" ${earlyOid}`, mainDir);
+
+  // 5. agent-locked — branch, then locked with a reason.
+  run(`git worktree add -b agent/locked "${lockedPath}"`, mainDir);
+  run(`git worktree lock --reason "agent running" "${lockedPath}"`, mainDir);
+
+  // 6. agent-missing — registered worktree whose folder is gone, unpruned.
+  run(`git worktree add -b agent/missing "${missingPath}"`, mainDir);
+  rmSync(missingPath, { recursive: true, force: true });   // no `worktree prune` — stays registered, shows as prunable
+
+  // 7. Long, nearly-identical names — exercise sidebar/path truncation.
+  run(`git worktree add -b agent/long-1 "${long1Path}"`, mainDir);
+  run(`git worktree add -b agent/long-2 "${long2Path}"`, mainDir);
+
+  // ── Nested worktree, living INSIDE main's own working tree ─────────────
+  const worktreesParent = join(mainDir, '.worktrees');
+  mkdirSync(worktreesParent, { recursive: true });
+  const nestedPath = join(worktreesParent, 'nested-agent');
+  run(`git worktree add -b agent/nested "${nestedPath}"`, mainDir);
+  write(nestedPath, 'nested-wip.txt', 'Uncommitted file inside a worktree nested under main/.\nProves "Discard all" in main must not delete this.\n');
+
+  log('worktrees', join(baseDir, 'main'), '(open the main/ subfolder — see README.md for the full tour; paths are absolute, re-run `pnpm fixtures worktrees` after moving this checkout)');
+}
+
+/**
  * TAGS
  * Lightweight and annotated tags across multiple commits and branches.
  * Tests the tag display in the sidebar and timeline.
@@ -1143,6 +1332,7 @@ const SCENARIOS = [
   ['detached-head',        makeDetachedHead],
   ['ahead-of-remote',      makeAheadOfRemote],
   ['stash',                makeStash],
+  ['worktrees',            makeWorktrees],
   ['tags',                 makeTags],
   ['long-branch-names',    makeLongBranchNames],
   ['large-linear',         makeLargeLinear],
