@@ -15,6 +15,6 @@ export default defineConfig({
     setupFiles: ["./vitest.setup.ts"],
     // Fixture repos under scripts/fixtures/repos/ ship their own *.test.js files
     // that simulate real projects — they are not our tests.
-    exclude: [...configDefaults.exclude, "scripts/fixtures/**"],
+    exclude: [...configDefaults.exclude, "scripts/fixtures/**", "e2e/**"],
   },
 });

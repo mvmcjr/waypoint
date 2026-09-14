@@ -74,11 +74,13 @@ fn register_explorer_context_menu(register: bool) -> Result<(), String> {
 }
 
 
+fn parse_startup_path(args: impl Iterator<Item = String>) -> Option<String> {
+    args.skip(1).find(|a| !a.starts_with('-') && std::path::Path::new(a).is_dir())
+}
+
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
-    let startup_path = std::env::args()
-        .nth(1)
-        .filter(|a| !a.starts_with('-') && std::path::Path::new(a).is_dir());
+    let startup_path = parse_startup_path(std::env::args());
 
     tauri::Builder::default()
         .manage(StartupPath(Mutex::new(startup_path)))
@@ -170,4 +172,25 @@ pub fn run() {
         ])
         .run(tauri::generate_context!())
         .expect("error while running waypoint");
+}
+
+#[cfg(test)]
+mod startup_path_tests {
+    use super::parse_startup_path;
+
+    #[test]
+    fn picks_first_existing_directory_argument_skipping_flags() {
+        let dir = std::env::temp_dir();
+        let d = dir.display().to_string();
+        let args = vec!["waypoint.exe".into(), "--remote-debugging-port=0".into(), d.clone()];
+        assert_eq!(parse_startup_path(args.into_iter()), Some(d.clone()));
+        let args = vec!["waypoint.exe".into(), d.clone()];
+        assert_eq!(parse_startup_path(args.into_iter()), Some(d));
+    }
+
+    #[test]
+    fn ignores_non_directories_and_flags_only() {
+        let args = vec!["waypoint.exe".into(), "--flag".into(), "Z:\\definitely\\missing".into()];
+        assert_eq!(parse_startup_path(args.into_iter()), None);
+    }
 }

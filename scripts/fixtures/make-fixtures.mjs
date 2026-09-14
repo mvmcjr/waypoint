@@ -14,11 +14,12 @@
 
 import { execSync }                                    from 'node:child_process';
 import { existsSync, rmSync, mkdirSync, writeFileSync } from 'node:fs';
-import { join, dirname, resolve }                      from 'node:path';
+import { join, dirname, resolve, relative, sep }       from 'node:path';
 import { fileURLToPath }                               from 'node:url';
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const REPOS_DIR = resolve(__dirname, 'repos');
+const __filename = fileURLToPath(import.meta.url);
 
 // ── Helpers ───────────────────────────────────────────────────────────────────
 
@@ -46,9 +47,9 @@ function write(dir, relPath, content) {
   writeFileSync(full, content, 'utf8');
 }
 
-/** Delete and recreate a directory under REPOS_DIR, return its absolute path. */
-function fresh(relPath) {
-  const dir = join(REPOS_DIR, relPath);
+/** Delete and recreate a directory under reposDir, return its absolute path. */
+function fresh(reposDir, relPath) {
+  const dir = join(reposDir, relPath);
   if (existsSync(dir)) rmSync(dir, { recursive: true, force: true });
   mkdirSync(dir, { recursive: true });
   return dir;
@@ -68,8 +69,8 @@ function initRepo(dir) {
  * A healthy repo: three commits on main, a feature branch, nothing pending.
  * Good for checking the timeline, graph lanes, and branch labels.
  */
-function makeClean() {
-  const dir = fresh('clean');
+function makeClean(reposDir) {
+  const dir = fresh(reposDir, 'clean');
   initRepo(dir);
 
   write(dir, 'README.md',      '# Clean Repo\n\nA simple repo with a few commits.\n');
@@ -93,7 +94,8 @@ function makeClean() {
   run('git add .', dir);
   run('git commit -m "Add version config"', dir);
 
-  log('clean', dir);
+  log('clean', dir, '', reposDir);
+  return dir;
 }
 
 /**
@@ -101,8 +103,8 @@ function makeClean() {
  * Mix of staged and unstaged changes — no conflicts.
  * Tests the staging panel: stage/unstage, file diff viewer.
  */
-function makeStaged() {
-  const dir = fresh('staged');
+function makeStaged(reposDir) {
+  const dir = fresh(reposDir, 'staged');
   initRepo(dir);
 
   write(dir, 'README.md',    '# Staged Repo\n');
@@ -126,7 +128,8 @@ function makeStaged() {
   // Unstaged: untracked file
   write(dir, 'scratch.txt', 'TODO: remove before committing\n');
 
-  log('staged', dir);
+  log('staged', dir, '', reposDir);
+  return dir;
 }
 
 /**
@@ -136,8 +139,8 @@ function makeStaged() {
  * is staged. Tests that untracked files show the green "A" badge and that
  * clicking one renders its full content in the diff view.
  */
-function makeUntracked() {
-  const dir = fresh('untracked');
+function makeUntracked(reposDir) {
+  const dir = fresh(reposDir, 'untracked');
   initRepo(dir);
 
   write(dir, 'README.md', '# Untracked\n\nAll the files below are untracked — none staged. Click any to see its diff.\n');
@@ -161,7 +164,8 @@ function makeUntracked() {
   write(dir, 'assets/logo.svg', '<svg xmlns="http://www.w3.org/2000/svg" width="16" height="16"></svg>\n');
   write(dir, 'assets/data/config.yml', 'enabled: true\nlevel: 3\n');
 
-  log('untracked', dir, '(all files untracked → green "A" badge, diffs show full content)');
+  log('untracked', dir, '(all files untracked → green "A" badge, diffs show full content)', reposDir);
+  return dir;
 }
 
 /**
@@ -172,8 +176,8 @@ function makeUntracked() {
  * staged and committed whole, so its multi-hunk diff is also viewable
  * read-only from the commit history (no hunk-action buttons there).
  */
-function makeHunks() {
-  const dir = fresh('hunks');
+function makeHunks(reposDir) {
+  const dir = fresh(reposDir, 'hunks');
   initRepo(dir);
 
   const calcLines = (a, b, c, d, e, f) => [
@@ -254,7 +258,8 @@ function makeHunks() {
   run('git add strings.py', dir);
   run('git commit -m "Tweak shout punctuation and reverse implementation"', dir);
 
-  log('hunks', dir, '(calc.py: 3 unstaged hunks to try "Stage hunk" on; strings.py: committed multi-hunk diff)');
+  log('hunks', dir, '(calc.py: 3 unstaged hunks to try "Stage hunk" on; strings.py: committed multi-hunk diff)', reposDir);
+  return dir;
 }
 
 /**
@@ -268,14 +273,15 @@ function makeHunks() {
  * To see the plain, warning-free version, copy the folder somewhere outside any
  * repo (e.g. your Desktop) and open that instead.
  */
-function makeNotARepo() {
-  const dir = fresh('not-a-repo');
+function makeNotARepo(reposDir) {
+  const dir = fresh(reposDir, 'not-a-repo');
 
   write(dir, 'README.md', '# Not A Repo\n\nThere is no .git here. Opening this folder in Waypoint should offer to create one.\n');
   write(dir, 'index.js', 'console.log("no version control yet");\n');
   write(dir, 'src/main.js', 'export function main() {\n  return "hello";\n}\n');
 
-  log('not-a-repo', dir, '(no .git → init prompt; nested-repo warning expected in-tree)');
+  log('not-a-repo', dir, '(no .git → init prompt; nested-repo warning expected in-tree)', reposDir);
+  return dir;
 }
 
 /**
@@ -284,15 +290,16 @@ function makeNotARepo() {
  * the whole window; should now show the branch name, the WIP row, and the staging
  * panel so the first commit can be made.
  */
-function makeEmptyRepo() {
-  const dir = fresh('empty-repo');
+function makeEmptyRepo(reposDir) {
+  const dir = fresh(reposDir, 'empty-repo');
   initRepo(dir);
 
   write(dir, 'README.md', '# Empty Repo\n\nNo commits yet. The staging panel should open automatically so you can make the first one.\n');
   write(dir, 'src/app.js', 'export function app() {\n  return "first commit pending";\n}\n');
   write(dir, 'notes/todo.txt', 'write the first commit\n');
 
-  log('empty-repo', dir, '(unborn HEAD, all untracked → WIP row + staging panel)');
+  log('empty-repo', dir, '(unborn HEAD, all untracked → WIP row + staging panel)', reposDir);
+  return dir;
 }
 
 /**
@@ -301,8 +308,8 @@ function makeEmptyRepo() {
  * path (no parent commit) and that Push/Pull stay disabled until a commit exists.
  * "Discard all" here should unstage without deleting the staged files.
  */
-function makeEmptyRepoStaged() {
-  const dir = fresh('empty-repo-staged');
+function makeEmptyRepoStaged(reposDir) {
+  const dir = fresh(reposDir, 'empty-repo-staged');
   initRepo(dir);
 
   write(dir, 'README.md', '# Empty Repo (staged)\n\nEverything below is staged, but there is still no commit.\n');
@@ -313,7 +320,8 @@ function makeEmptyRepoStaged() {
   // only this file and leave the staged ones on disk.
   write(dir, 'scratch.txt', 'untracked — safe to delete\n');
 
-  log('empty-repo-staged', dir, '(unborn HEAD, staged files + 1 untracked → commit / discard-all)');
+  log('empty-repo-staged', dir, '(unborn HEAD, staged files + 1 untracked → commit / discard-all)', reposDir);
+  return dir;
 }
 
 /**
@@ -323,8 +331,8 @@ function makeEmptyRepoStaged() {
  * tree. "Discard all" must delete only the untracked file and keep every indexed
  * file — clearing the index without that distinction wiped the working tree.
  */
-function makeOrphanBranch() {
-  const dir = fresh('orphan-branch');
+function makeOrphanBranch(reposDir) {
+  const dir = fresh(reposDir, 'orphan-branch');
   initRepo(dir);
 
   write(dir, 'keep-me.js', 'export const IMPORTANT = "do not delete";\n');
@@ -336,7 +344,8 @@ function makeOrphanBranch() {
   run('git checkout --orphan fresh-start', dir);
   write(dir, 'delete-me.txt', 'untracked — this is the only file discard-all should remove\n');
 
-  log('orphan-branch', dir, '(unborn HEAD + populated index → discard-all must keep tracked files)');
+  log('orphan-branch', dir, '(unborn HEAD + populated index → discard-all must keep tracked files)', reposDir);
+  return dir;
 }
 
 /**
@@ -344,8 +353,8 @@ function makeOrphanBranch() {
  * A `git merge` that stopped mid-way due to conflicts in shared.js.
  * MERGE_HEAD is set; the conflict panel should open automatically.
  */
-function makeMergeConflict() {
-  const dir = fresh('merge-conflict');
+function makeMergeConflict(reposDir) {
+  const dir = fresh(reposDir, 'merge-conflict');
   initRepo(dir);
 
   write(dir, 'README.md', '# Merge Conflict Repo\n');
@@ -386,7 +395,8 @@ function makeMergeConflict() {
   // Merge → leaves repo in conflicted state (tryRun swallows the non-zero exit)
   tryRun('git merge --no-ff feature --no-edit', dir);
 
-  log('merge-conflict', dir);
+  log('merge-conflict', dir, '', reposDir);
+  return dir;
 }
 
 /**
@@ -394,8 +404,8 @@ function makeMergeConflict() {
  * A cherry-pick that stopped mid-way due to a conflict.
  * Tests the cherry-pick variant of the conflict panel.
  */
-function makeCherryPickConflict() {
-  const dir = fresh('cherry-pick-conflict');
+function makeCherryPickConflict(reposDir) {
+  const dir = fresh(reposDir, 'cherry-pick-conflict');
   initRepo(dir);
 
   write(dir, 'app.js', [
@@ -434,7 +444,8 @@ function makeCherryPickConflict() {
   // Cherry-pick the donor commit → conflict
   tryRun(`git cherry-pick ${donorOid}`, dir);
 
-  log('cherry-pick-conflict', dir);
+  log('cherry-pick-conflict', dir, '', reposDir);
+  return dir;
 }
 
 /**
@@ -446,8 +457,8 @@ function makeCherryPickConflict() {
  * The conflict is spread across multiple lines so the full-file context view
  * in the hunk picker has enough surrounding code to be meaningful.
  */
-function makeCherryPickReady() {
-  const dir = fresh('cherry-pick-ready');
+function makeCherryPickReady(reposDir) {
+  const dir = fresh(reposDir, 'cherry-pick-ready');
   initRepo(dir);
 
   // ── Shared baseline ──────────────────────────────────────────────────────
@@ -554,7 +565,8 @@ function makeCherryPickReady() {
   run('git commit -m "feat: add formatDuration util"', dir);
 
   log('cherry-pick-ready', dir,
-    '(right-click "feat: use staging config" on donor → cherry-pick → conflict)');
+    '(right-click "feat: use staging config" on donor → cherry-pick → conflict)', reposDir);
+  return dir;
 }
 
 /**
@@ -567,8 +579,8 @@ function makeCherryPickReady() {
  * branch, and cherry-pick it.  The dialog should offer "Commit Cherry-pick"
  * or "Leave staged" — no conflict panel should appear.
  */
-function makeCherryPickClean() {
-  const dir = fresh('cherry-pick-clean');
+function makeCherryPickClean(reposDir) {
+  const dir = fresh(reposDir, 'cherry-pick-clean');
   initRepo(dir);
 
   write(dir, 'README.md',
@@ -629,7 +641,8 @@ function makeCherryPickClean() {
   run('git checkout main', dir);
 
   log('cherry-pick-clean', dir,
-    '(right-click "feat: add analytics module" on donor → cherry-pick → no conflicts)');
+    '(right-click "feat: add analytics module" on donor → cherry-pick → no conflicts)', reposDir);
+  return dir;
 }
 
 /**
@@ -641,8 +654,8 @@ function makeCherryPickClean() {
  * Stays purely linear (no merges) so the squash range is unambiguous, and the
  * base commit has a single parent so it can become the squashed commit's parent.
  */
-function makeSquashable() {
-  const dir = fresh('squashable');
+function makeSquashable(reposDir) {
+  const dir = fresh(reposDir, 'squashable');
   initRepo(dir);
 
   // ── Shared baseline on main ───────────────────────────────────────────────
@@ -675,7 +688,8 @@ function makeSquashable() {
   run('git commit -m "test: add parser smoke test"', dir);
 
   log('squashable', dir,
-    '(right-click "wip: scaffold parser" on feature → Squash up to HEAD → 4 commits become 1)');
+    '(right-click "wip: scaffold parser" on feature → Squash up to HEAD → 4 commits become 1)', reposDir);
+  return dir;
 }
 
 /**
@@ -684,8 +698,8 @@ function makeSquashable() {
  * shows inline (MAX_REFS = 3). Tests the "+N" overflow badge: hovering it
  * should reveal every ref in a wrapped, scrollable hover card.
  */
-function makeManyRefs() {
-  const dir = fresh('many-refs');
+function makeManyRefs(reposDir) {
+  const dir = fresh(reposDir, 'many-refs');
   initRepo(dir);
 
   write(dir, 'README.md', '# Many Refs\n\nOne commit, lots of branches and tags. Hover the "+N" badge in the timeline.\n');
@@ -712,7 +726,8 @@ function makeManyRefs() {
   run('git tag latest', dir);
 
   // Stay on main so HEAD shares the commit with all the above.
-  log('many-refs', dir, `(${branches.length} branches + 3 tags on one commit → hover "+N")`);
+  log('many-refs', dir, `(${branches.length} branches + 3 tags on one commit → hover "+N")`, reposDir);
+  return dir;
 }
 
 /**
@@ -720,8 +735,8 @@ function makeManyRefs() {
  * HEAD is checked out at a specific commit (not a branch).
  * Tests the amber "detached" indicator in the toolbar.
  */
-function makeDetachedHead() {
-  const dir = fresh('detached-head');
+function makeDetachedHead(reposDir) {
+  const dir = fresh(reposDir, 'detached-head');
   initRepo(dir);
 
   write(dir, 'README.md', '# Detached HEAD Repo\n');
@@ -743,7 +758,8 @@ function makeDetachedHead() {
   // Detach HEAD at v1.1
   run(`git checkout ${targetOid}`, dir);
 
-  log('detached-head', dir);
+  log('detached-head', dir, '', reposDir);
+  return dir;
 }
 
 /**
@@ -752,9 +768,9 @@ function makeDetachedHead() {
  * Tests push indicators and the Push button.
  * ⚠ Open the `local/` subdirectory in Waypoint, not the parent folder.
  */
-function makeAheadOfRemote() {
+function makeAheadOfRemote(reposDir) {
   // Clean the whole parent folder so both remote and local are rebuilt together
-  const baseDir = join(REPOS_DIR, 'ahead-of-remote');
+  const baseDir = join(reposDir, 'ahead-of-remote');
   if (existsSync(baseDir)) rmSync(baseDir, { recursive: true, force: true });
 
   const remoteDir = join(baseDir, 'remote.git');
@@ -784,7 +800,8 @@ function makeAheadOfRemote() {
   run('git add .', localDir);
   run('git commit -m "Add feature B"', localDir);
 
-  log('ahead-of-remote', join(baseDir, 'local'), '(open the local/ subfolder in Waypoint)');
+  log('ahead-of-remote', join(baseDir, 'local'), '(open the local/ subfolder in Waypoint)', reposDir);
+  return join(baseDir, 'local');
 }
 
 /**
@@ -792,8 +809,8 @@ function makeAheadOfRemote() {
  * One stash entry; partially staged working tree.
  * Tests the stash list panel.
  */
-function makeStash() {
-  const dir = fresh('stash');
+function makeStash(reposDir) {
+  const dir = fresh(reposDir, 'stash');
   initRepo(dir);
 
   write(dir, 'main.py', 'def hello():\n    print("hello")\n\nhello()\n');
@@ -811,7 +828,8 @@ function makeStash() {
   run('git add .', dir);
   run('git commit -m "Add identity helper"', dir);
 
-  log('stash', dir);
+  log('stash', dir, '', reposDir);
+  return dir;
 }
 
 /**
@@ -828,11 +846,11 @@ function makeStash() {
  * checkout is ever moved, re-run `pnpm fixtures worktrees` to regenerate
  * them pointing at the new location.
  */
-function makeWorktrees() {
+function makeWorktrees(reposDir) {
   // Clean the whole parent folder wholesale — all worktree admin data lives
   // in main/.git, so removing it removes every linked worktree's
   // registration too. Nothing stale can survive a rebuild.
-  const baseDir = join(REPOS_DIR, 'worktrees');
+  const baseDir = join(reposDir, 'worktrees');
   if (existsSync(baseDir)) rmSync(baseDir, { recursive: true, force: true });
   mkdirSync(baseDir, { recursive: true });
 
@@ -1000,7 +1018,8 @@ function makeWorktrees() {
   run(`git worktree add -b agent/nested "${nestedPath}"`, mainDir);
   write(nestedPath, 'nested-wip.txt', 'Uncommitted file inside a worktree nested under main/.\nProves "Discard all" in main must not delete this.\n');
 
-  log('worktrees', join(baseDir, 'main'), '(open the main/ subfolder — see README.md for the full tour; paths are absolute, re-run `pnpm fixtures worktrees` after moving this checkout)');
+  log('worktrees', join(baseDir, 'main'), '(open the main/ subfolder — see README.md for the full tour; paths are absolute, re-run `pnpm fixtures worktrees` after moving this checkout)', reposDir);
+  return join(baseDir, 'main');
 }
 
 /**
@@ -1008,8 +1027,8 @@ function makeWorktrees() {
  * Lightweight and annotated tags across multiple commits and branches.
  * Tests the tag display in the sidebar and timeline.
  */
-function makeTags() {
-  const dir = fresh('tags');
+function makeTags(reposDir) {
+  const dir = fresh(reposDir, 'tags');
   initRepo(dir);
 
   write(dir, 'CHANGELOG.md', '# Changelog\n\n## v1.0.0\n- Initial release\n');
@@ -1036,7 +1055,8 @@ function makeTags() {
   run('git commit -m "Release v2.0.0"', dir);
   run('git tag -a v2.0.0 -m "v2.0.0 — major release with breaking changes"', dir);
 
-  log('tags', dir);
+  log('tags', dir, '', reposDir);
+  return dir;
 }
 
 /**
@@ -1045,8 +1065,8 @@ function makeTags() {
  * commits. Exercises the timeline ref-badge truncation (middle ellipsis +
  * full-name hover tooltip) and the sidebar ref tree on names that don't fit.
  */
-function makeLongBranchNames() {
-  const dir = fresh('long-branch-names');
+function makeLongBranchNames(reposDir) {
+  const dir = fresh(reposDir, 'long-branch-names');
   initRepo(dir);
 
   write(dir, 'README.md', '# Long Branch Names\n\nBranches with names that overflow the badge.\n');
@@ -1086,7 +1106,8 @@ function makeLongBranchNames() {
     run('git checkout main', dir);
   }
 
-  log('long-branch-names', dir, `(${earlyBranches.length + tipBranches.length} long branches)`);
+  log('long-branch-names', dir, `(${earlyBranches.length + tipBranches.length} long branches)`, reposDir);
+  return dir;
 }
 
 /**
@@ -1096,8 +1117,8 @@ function makeLongBranchNames() {
  * Stress-tests load-all (no commit cap), timeline virtualization, and the
  * windowed GraphLayer scan — scroll to the bottom should stay smooth.
  */
-function makeLargeLinear() {
-  const dir = fresh('large-linear');
+function makeLargeLinear(reposDir) {
+  const dir = fresh(reposDir, 'large-linear');
   initRepo(dir);
 
   const N = 50000;
@@ -1134,7 +1155,8 @@ function makeLargeLinear() {
   });
   run('git checkout -f main', dir);
 
-  log('large-linear', dir, `(${N} commits, 1 lane)`);
+  log('large-linear', dir, `(${N} commits, 1 lane)`, reposDir);
+  return dir;
 }
 
 /**
@@ -1144,8 +1166,8 @@ function makeLargeLinear() {
  * graph lanes — stress-tests lane-assignment and GraphLayer rendering.
  * Takes ~15-25 s to generate on first run.
  */
-function makeLargeBranchy() {
-  const dir = fresh('large-branchy');
+function makeLargeBranchy(reposDir) {
+  const dir = fresh(reposDir, 'large-branchy');
   initRepo(dir);
 
   const BRANCH_COUNT   = 10;
@@ -1193,7 +1215,8 @@ function makeLargeBranchy() {
     run(`git commit -m "feat: release 2.${i}.0"`, dir);
   }
 
-  log('large-branchy', dir, `(${BRANCH_COUNT} simultaneous lanes)`);
+  log('large-branchy', dir, `(${BRANCH_COUNT} simultaneous lanes)`, reposDir);
+  return dir;
 }
 
 /**
@@ -1214,8 +1237,8 @@ function makeLargeBranchy() {
  * This is the fixture to open when profiling walk_commits / assign_lanes and the
  * sidebar ref tree on a worst-case repo.
  */
-function makeStress() {
-  const dir = fresh('stress');
+function makeStress(reposDir) {
+  const dir = fresh(reposDir, 'stress');
   initRepo(dir);
 
   const TRUNK        = Number(process.env.WAYPOINT_STRESS_TRUNK)    || 1200;
@@ -1304,17 +1327,23 @@ function makeStress() {
   });
   run('git checkout -f main', dir);
 
-  log('stress', dir, `(${TRUNK} trunk + ${BRANCHES} branches, ${mark} commits)`);
+  log('stress', dir, `(${TRUNK} trunk + ${BRANCHES} branches, ${mark} commits)`, reposDir);
+  return dir;
 }
 
 // ── Runner ────────────────────────────────────────────────────────────────────
 
-function log(name, dir, note = '') {
-  const rel = dir.replace(REPOS_DIR + '\\', '').replace(REPOS_DIR + '/', '');
-  console.log(`  ✓  ${name.padEnd(24)} → scripts/fixtures/repos/${rel}  ${note}`);
+function log(name, dir, note = '', reposDir) {
+  // Prints the path relative to whatever `reposDir` this scenario actually
+  // built into — the CLI's default (scripts/fixtures/repos) and an e2e
+  // test's temp folder both display correctly, instead of hardcoding the
+  // CLI's own default prefix regardless of where the caller pointed it.
+  const rel = relative(reposDir, dir).split(sep).join('/');
+  const reposDirDisplay = relative(process.cwd(), reposDir).split(sep).join('/') || '.';
+  console.log(`  ✓  ${name.padEnd(24)} → ${reposDirDisplay}/${rel}  ${note}`);
 }
 
-const SCENARIOS = [
+const SCENARIOS = new Map([
   ['clean',                makeClean],
   ['staged',               makeStaged],
   ['untracked',            makeUntracked],
@@ -1338,25 +1367,44 @@ const SCENARIOS = [
   ['large-linear',         makeLargeLinear],
   ['large-branchy',        makeLargeBranchy],
   ['stress',               makeStress],
-];
+]);
 
-mkdirSync(REPOS_DIR, { recursive: true });
+/** Names of every known scenario, in definition order. */
+export const SCENARIO_NAMES = [...SCENARIOS.keys()];
 
-const filter = process.argv[2];  // optional: rebuild a single scenario by name
-
-console.log('Building fixture repos…\n');
-
-let built = 0, failed = 0;
-for (const [name, fn] of SCENARIOS) {
-  if (filter && name !== filter) continue;
-  try {
-    fn();
-    built++;
-  } catch (e) {
-    console.error(`  ✗  ${name}: ${e.message}`);
-    failed++;
-  }
+/**
+ * Build one scenario under reposDir and return the folder to open.
+ * Throws `Unknown scenario: <name>` for unrecognised names.
+ */
+export function buildScenario(name, reposDir) {
+  const fn = SCENARIOS.get(name);
+  if (!fn) throw new Error(`Unknown scenario: ${name}`);
+  mkdirSync(reposDir, { recursive: true });
+  return fn(reposDir);
 }
 
-console.log(`\n${built} repo(s) written to: ${REPOS_DIR}`);
-if (failed) console.error(`${failed} scenario(s) failed — see errors above.`);
+// ── CLI ───────────────────────────────────────────────────────────────────────
+// Only runs when this file is executed directly (`node make-fixtures.mjs` /
+// `pnpm fixtures`), not when it's imported (e.g. by build-scenario.test.mjs).
+if (process.argv[1] && resolve(process.argv[1]) === __filename) {
+  mkdirSync(REPOS_DIR, { recursive: true });
+
+  const filter = process.argv[2];  // optional: rebuild a single scenario by name
+
+  console.log('Building fixture repos…\n');
+
+  let built = 0, failed = 0;
+  for (const name of SCENARIO_NAMES) {
+    if (filter && name !== filter) continue;
+    try {
+      buildScenario(name, REPOS_DIR);
+      built++;
+    } catch (e) {
+      console.error(`  ✗  ${name}: ${e.message}`);
+      failed++;
+    }
+  }
+
+  console.log(`\n${built} repo(s) written to: ${REPOS_DIR}`);
+  if (failed) console.error(`${failed} scenario(s) failed — see errors above.`);
+}

@@ -44,9 +44,18 @@ cd src-tauri && cargo test   # Run all Rust unit tests
 
 # Fixture repos used by some tests (generates throwaway git repos under scripts/fixtures/repos/)
 pnpm fixtures
+pnpm test:fixtures          # Runs fixtures' own node --test suite (scripts/fixtures/build-scenario.test.mjs)
+
+# End-to-end tests (Mocha + WebdriverIO standalone remote() + tauri-driver, Windows only — see e2e/README.md)
+pnpm e2e:setup               # Install/update tauri-driver + matching msedgedriver (re-run after Edge updates)
+pnpm e2e                     # Full suite: preflight, build-if-stale, run all specs
+pnpm e2e -- <spec>           # e.g. pnpm e2e -- e2e/specs/worktrees.e2e.ts
+pnpm e2e -- -g "title"       # Filter by test title across all specs
+pnpm e2e:build               # Build the e2e binary (identifier com.waypoint.e2e) without running tests
+pnpm e2e:typecheck           # tsc -p e2e/tsconfig.json --noEmit
 ```
 
-**Note**: The `package.json` scripts are minimal—use the `tauri` CLI directly for development and building. Tauri orchestrates both Rust and frontend builds via `beforeDevCommand` and `beforeBuildCommand` hooks in `tauri.conf.json`. Test config lives in `vitest.config.ts` (separate from `vite.config.ts`), which sets `environment: "jsdom"`, `globals: true`, and excludes `scripts/fixtures/**` (those fixture repos ship their own unrelated `*.test.js` files).
+**Note**: The `package.json` scripts are minimal—use the `tauri` CLI directly for development and building. Tauri orchestrates both Rust and frontend builds via `beforeDevCommand` and `beforeBuildCommand` hooks in `tauri.conf.json`. Test config lives in `vitest.config.ts` (separate from `vite.config.ts`), which sets `environment: "jsdom"`, `globals: true`, and excludes `scripts/fixtures/**` (those fixture repos ship their own unrelated `*.test.js` files) and `e2e/**` (see `e2e/README.md` for the end-to-end suite).
 
 ## Architecture Overview
 
@@ -218,7 +227,8 @@ waypoint/
 │   └── routes/
 │       ├── welcome.tsx        # Repo picker
 │       └── repo.tsx           # Main repo view
-├── vitest.config.ts            # Vitest config (jsdom, globals, setup file)
+├── vitest.config.ts            # Vitest config (jsdom, globals, setup file); excludes scripts/fixtures/** and e2e/**
+├── e2e/                        # End-to-end tests (Mocha + WebdriverIO + tauri-driver) — see e2e/README.md
 ├── src-tauri/                 # Backend (Rust)
 │   ├── tauri.conf.json       # Tauri config (window size, beforeDevCommand, etc.)
 │   ├── Cargo.toml            # Rust dependencies (git2, tauri, serde, etc.)
