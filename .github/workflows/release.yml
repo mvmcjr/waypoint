@@ -81,9 +81,10 @@ jobs:
         with:
           workspaces: src-tauri -> target
 
-      # Tauri 2 on Linux requires WebKit2GTK 4.1 (not 4.0). OpenSSL and
-      # libgit2 are built from source, so libssl-dev/cmake aren't strictly
-      # required, but they're kept as a safety net for the vendored builds.
+      # Tauri 2 on Linux requires WebKit2GTK 4.1 (not 4.0). libgit2 is built
+      # from source (cmake is a safety net for that vendored build). Nothing
+      # links OpenSSL since git2 0.21 dropped its default https/ssh features;
+      # libssl-dev stays until a release build confirms it can go.
       - name: Install Linux system dependencies
         if: matrix.platform == 'ubuntu-22.04'
         run: |
