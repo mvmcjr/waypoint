@@ -1,5 +1,5 @@
 use serde::Serialize;
-use crate::git_text::{commit_text, lossy};
+use crate::git_text::{lossy, CommitDecoder};
 use tauri::State;
 
 use crate::error::{Error, Result};
@@ -34,7 +34,7 @@ fn default_stash_message(repo: &git2::Repository) -> Result<String> {
     };
     let commit = head.peel_to_commit()?;
     let short = &commit.id().to_string()[..7];
-    let summary = commit_text(&commit, commit.summary_bytes()).chars().take(50).collect::<String>();
+    let summary = CommitDecoder::new(&commit).text(commit.summary_bytes()).chars().take(50).collect::<String>();
     Ok(format!("WIP on {}: {} {}", branch, short, summary))
 }
 

@@ -171,6 +171,21 @@ pub(crate) mod test_support {
         (dir, repo)
     }
 
+    /// Write a legacy commit on top of HEAD (same tree) with an
+    /// `encoding ISO-8859-1` header and a Latin-1 author, committer and message
+    /// ("André" / "Corrigé le bug"), and move HEAD's branch to it.
+    pub(crate) fn push_latin1_commit(repo: &Repository) -> git2::Oid {
+        let head = repo.head().unwrap().peel_to_commit().unwrap();
+        let mut raw = format!("tree {}\nparent {}\n", head.tree_id(), head.id()).into_bytes();
+        raw.extend_from_slice(b"author Andr\xe9 <a@example.com> 1000000000 +0000\n");
+        raw.extend_from_slice(b"committer Andr\xe9 <a@example.com> 1000000000 +0000\n");
+        raw.extend_from_slice(b"encoding ISO-8859-1\n\nCorrig\xe9 le bug\n");
+        let oid = repo.odb().unwrap().write(git2::ObjectType::Commit, &raw).unwrap();
+        let name = repo.head().unwrap().name().unwrap().to_owned();
+        repo.reference(&name, oid, true, "test").unwrap();
+        oid
+    }
+
     /// Add a REAL linked worktree (via `git2::Repository::worktree`), checked out on
     /// `branch` (created at `main`'s HEAD if it doesn't already exist). Returns the
     /// worktree's working-directory path and an open `Repository` handle for it.

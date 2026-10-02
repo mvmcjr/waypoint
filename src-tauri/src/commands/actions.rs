@@ -1,5 +1,5 @@
 use serde::Serialize;
-use crate::git_text::commit_text;
+use crate::git_text::CommitDecoder;
 use tauri::State;
 
 use crate::error::{Error, Result};
@@ -413,16 +413,17 @@ pub fn get_squash_preview(repo_id: String, oids: Vec<String>, state: State<RepoS
     // every later commit's full message become the body.
     let mut oldest_first = range.chain.iter().rev();
     let oldest = oldest_first.next().expect("range is non-empty");
-    let default_subject = commit_text(oldest, oldest.summary_bytes()).trim().to_owned();
+    let oldest_dec = CommitDecoder::new(oldest);
+    let default_subject = oldest_dec.text(oldest.summary_bytes()).trim().to_owned();
 
     let mut body_parts: Vec<String> = Vec::new();
-    let oldest_body = commit_text(oldest, oldest.body_bytes());
+    let oldest_body = oldest_dec.text(oldest.body_bytes());
     let oldest_body = oldest_body.trim();
     if !oldest_body.is_empty() {
         body_parts.push(oldest_body.to_owned());
     }
     for c in oldest_first {
-        let msg = commit_text(c, c.message_bytes());
+        let msg = CommitDecoder::new(c).text(c.message_bytes());
         let msg = msg.trim();
         if !msg.is_empty() {
             body_parts.push(msg.to_owned());
@@ -554,6 +555,11 @@ fn assert_first_parent_chain_is_linear(
 pub fn reword_commit(repo_id: String, oid: String, message: String, state: State<RepoState>) -> Result<()> {
     let repos = state.0.lock().unwrap();
     let repo = repos.get(&repo_id).ok_or_else(|| Error::RepoNotFound(repo_id.clone()))?;
+    reword_in(repo, &oid, &message)
+}
+
+fn reword_in(repo: &git2::Repository, oid: &str, message: &str) -> Result<()> {
+    let oid = oid.to_owned();
 
     let head = repo.head()?;
     if !head.is_branch() {
@@ -600,7 +606,10 @@ pub fn reword_commit(repo_id: String, oid: String, message: String, state: State
         .map(|i| target.parent(i))
         .collect::<std::result::Result<_, _>>()?;
     let parent_refs: Vec<&git2::Commit> = parents.iter().collect();
-    let new_oid = repo.commit(None, &target.author(), &sig, msg, &tree, &parent_refs)?;
+    // The rebuilt commit has no `encoding` header (UTF-8), so the kept author
+    // must be re-encoded from the original's declared encoding.
+    let author = CommitDecoder::new(&target).signature(&target.author())?;
+    let new_oid = repo.commit(None, &author, &sig, msg, &tree, &parent_refs)?;
 
     // Target was HEAD — no descendants to replay, just move the branch tip.
     if target_oid == head_oid {
@@ -828,6 +837,49 @@ mod tests {
     use super::*;
     use git2::Repository;
     use std::path::{Path, PathBuf};
+
+    fn assert_utf8_commit(repo: &Repository, oid: git2::Oid, msg: &str) {
+        let c = repo.find_commit(oid).unwrap();
+        // The strict &str accessors only succeed on valid UTF-8 bytes.
+        assert_eq!(c.author().name(), Ok("André"));
+        assert_eq!(c.message().unwrap().trim(), msg);
+        let dec = CommitDecoder::new(&c);
+        assert_eq!(dec.text(c.author().name_bytes()), "André");
+        assert_eq!(dec.text(c.summary_bytes()), msg);
+        assert!(!dec.text(c.message_bytes()).contains('\u{FFFD}'));
+    }
+
+    #[test]
+    fn reword_head_commit_keeps_author_as_utf8() {
+        let (dir, repo) = crate::repo::test_support::make_repo_with_commit();
+        let target = crate::repo::test_support::push_latin1_commit(&repo);
+        reword_in(&repo, &target.to_string(), "Fixé le bug").unwrap();
+        let new = repo.head().unwrap().peel_to_commit().unwrap();
+        assert_ne!(new.id(), target);
+        assert_utf8_commit(&repo, new.id(), "Fixé le bug");
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn reword_interior_commit_keeps_author_as_utf8_through_replay() {
+        let (dir, repo) = crate::repo::test_support::make_repo_with_commit();
+        let target = crate::repo::test_support::push_latin1_commit(&repo);
+        // A child commit on top so the reworded one is replayed under.
+        let parent = repo.find_commit(target).unwrap();
+        let mut tb = repo.treebuilder(Some(&parent.tree().unwrap())).unwrap();
+        tb.insert("b.txt", repo.blob(b"b").unwrap(), 0o100644).unwrap();
+        let tree = repo.find_tree(tb.write().unwrap()).unwrap();
+        let sig = repo.signature().unwrap();
+        let tip = repo.commit(None, &sig, &sig, "child", &tree, &[&parent]).unwrap();
+        let head_name = repo.head().unwrap().name().unwrap().to_owned();
+        repo.reference(&head_name, tip, true, "test").unwrap();
+        repo.checkout_head(Some(git2::build::CheckoutBuilder::new().force())).unwrap();
+        reword_in(&repo, &target.to_string(), "Fixé le bug").unwrap();
+        let child = repo.head().unwrap().peel_to_commit().unwrap();
+        assert_eq!(child.summary(), Ok(Some("child")));
+        assert_utf8_commit(&repo, child.parent_id(0).unwrap(), "Fixé le bug");
+        let _ = std::fs::remove_dir_all(dir);
+    }
 
     fn make_temp_dir() -> PathBuf {
         let id = uuid::Uuid::new_v4();

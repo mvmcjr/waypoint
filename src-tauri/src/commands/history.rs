@@ -1,5 +1,5 @@
 use tauri::State;
-use crate::git_text::commit_text;
+use crate::git_text::CommitDecoder;
 
 use crate::error::{Error, Result};
 use crate::graph::lanes::{assign_lanes, CommitNode};
@@ -106,7 +106,8 @@ pub fn walk_commits(
 
         let author = commit.author();
         let timestamp = commit.time().seconds();
-        let summary = commit_text(&commit, commit.summary_bytes());
+        let dec = CommitDecoder::new(&commit);
+        let summary = dec.text(commit.summary_bytes());
         // Body is intentionally omitted from the list payload (fetched lazily via
         // get_commit when a commit is selected) — keeps the walk light for big repos.
         let refs = ref_map.get(&oid_s).cloned().unwrap_or_default();
@@ -118,8 +119,8 @@ pub fn walk_commits(
             parent_oids,
             summary,
             body: String::new(),
-            author_name: commit_text(&commit, author.name_bytes()),
-            author_email: commit_text(&commit, author.email_bytes()),
+            author_name: dec.text(author.name_bytes()),
+            author_email: dec.text(author.email_bytes()),
             timestamp,
             refs,
             local_branches,
@@ -208,13 +209,14 @@ pub fn get_commit(repo_id: String, oid: String, state: State<RepoState>) -> Resu
         .collect::<std::result::Result<_, _>>()?;
 
     let author = commit.author();
+    let dec = CommitDecoder::new(&commit);
     Ok(CommitNode {
         oid: git_oid.to_string(),
         parent_oids,
-        summary: commit_text(&commit, commit.summary_bytes()),
-        body: commit_text(&commit, commit.body_bytes()).trim().to_owned(),
-        author_name: commit_text(&commit, author.name_bytes()),
-        author_email: commit_text(&commit, author.email_bytes()),
+        summary: dec.text(commit.summary_bytes()),
+        body: dec.text(commit.body_bytes()).trim().to_owned(),
+        author_name: dec.text(author.name_bytes()),
+        author_email: dec.text(author.email_bytes()),
         timestamp: commit.time().seconds(),
         refs: Vec::new(),
         local_branches: Vec::new(),

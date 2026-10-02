@@ -3,6 +3,7 @@ use serde::Serialize;
 use tauri::State;
 
 use crate::error::{Error, Result};
+use crate::git_text::CommitDecoder;
 use crate::repo::RepoState;
 
 #[derive(Debug, Serialize)]
@@ -470,8 +471,18 @@ pub fn do_commit(repo_id: String, message: String, state: State<RepoState>) -> R
 pub fn amend_commit(repo_id: String, message: String, state: State<RepoState>) -> Result<()> {
     let repos = state.0.lock().unwrap();
     let repo = repos.get(&repo_id).ok_or_else(|| Error::RepoNotFound(repo_id.clone()))?;
+    amend_in(repo, &message)
+}
 
+/// Core of `amend_commit`. The amended commit is always UTF-8: the kept
+/// author/committer are re-encoded from the original's declared encoding and
+/// the message is written with an explicit UTF-8 `encoding`, so an original
+/// with an `encoding ISO-8859-1` header can't leave Latin-1 header bytes next
+/// to a UTF-8 message.
+fn amend_in(repo: &git2::Repository, message: &str) -> Result<()> {
     let head_commit = repo.head()?.peel_to_commit()?;
+    let dec = CommitDecoder::new(&head_commit);
+    let author = dec.signature(&head_commit.author())?;
 
     let mut index = repo.index()?;
     let tree_oid = index.write_tree()?;
@@ -481,10 +492,10 @@ pub fn amend_commit(repo_id: String, message: String, state: State<RepoState>) -
 
     head_commit.amend(
         Some("HEAD"),
-        None,           // keep original author (name, email, timestamp)
+        Some(&author),  // keep original author (name, email, timestamp)
         Some(&sig),     // update committer to current user
-        None,           // encoding (keep utf-8)
-        Some(&message),
+        Some("UTF-8"),  // never inherit the original's encoding header
+        Some(message),
         Some(&tree),
     )?;
 
@@ -496,6 +507,22 @@ mod tests {
     use super::*;
     use git2::Repository;
     use std::path::{Path, PathBuf};
+
+    #[test]
+    fn amend_over_latin1_commit_writes_consistent_utf8() {
+        let (dir, repo) = crate::repo::test_support::make_repo_with_commit();
+        let old = crate::repo::test_support::push_latin1_commit(&repo);
+        amend_in(&repo, "Fixé le bug").unwrap();
+        let c = repo.head().unwrap().peel_to_commit().unwrap();
+        assert_ne!(c.id(), old);
+        assert_eq!(c.author().name(), Ok("André"));
+        assert_eq!(c.author().when().seconds(), 1_000_000_000);
+        assert_eq!(c.message(), Ok("Fixé le bug"));
+        let dec = CommitDecoder::new(&c);
+        assert_eq!(dec.text(c.author().name_bytes()), "André");
+        assert_eq!(dec.text(c.message_bytes()), "Fixé le bug");
+        let _ = std::fs::remove_dir_all(dir);
+    }
 
     fn make_repo() -> (PathBuf, Repository) {
         let dir = std::env::temp_dir().join(format!("wpt_discard_{}", uuid::Uuid::new_v4()));
