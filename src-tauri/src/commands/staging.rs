@@ -3,6 +3,7 @@ use serde::Serialize;
 use tauri::State;
 
 use crate::error::{Error, Result};
+use crate::repo::lock_retry::retry_on_locked;
 use crate::repo::RepoState;
 
 #[derive(Debug, Serialize)]
@@ -82,7 +83,7 @@ pub fn stage_file(repo_id: String, path: String, state: State<RepoState>) -> Res
         // File was deleted in the working tree — stage the deletion.
         index.remove_path(Path::new(&path))?;
     }
-    index.write()?;
+    retry_on_locked(|| Ok(index.write()?))?;
     Ok(())
 }
 
@@ -130,7 +131,7 @@ pub fn unstage_file(repo_id: String, path: String, state: State<RepoState>) -> R
         }
     }
 
-    index.write()?;
+    retry_on_locked(|| Ok(index.write()?))?;
     Ok(())
 }
 
@@ -144,7 +145,7 @@ pub fn stage_all(repo_id: String, state: State<RepoState>) -> Result<()> {
     // add_all handles new + modified files; update_all handles modifications + deletions.
     index.add_all(["*"].iter(), git2::IndexAddOption::DEFAULT, None)?;
     index.update_all(["*"].iter(), None)?;
-    index.write()?;
+    retry_on_locked(|| Ok(index.write()?))?;
     Ok(())
 }
 
@@ -163,7 +164,7 @@ pub fn stage_paths(repo_id: String, paths: Vec<String>, state: State<RepoState>)
             index.remove_path(Path::new(path))?;
         }
     }
-    index.write()?;
+    retry_on_locked(|| Ok(index.write()?))?;
     Ok(())
 }
 
@@ -210,7 +211,7 @@ pub fn unstage_paths(repo_id: String, paths: Vec<String>, state: State<RepoState
         }
     }
 
-    index.write()?;
+    retry_on_locked(|| Ok(index.write()?))?;
     Ok(())
 }
 
@@ -246,7 +247,7 @@ pub fn discard_file(repo_id: String, path: String, state: State<RepoState>) -> R
             path: path.clone().into_bytes(),
         };
         index.add(&entry)?;
-        index.write()?;
+        retry_on_locked(|| Ok(index.write()?))?;
 
         // Restore working-tree file from the now-updated index.
         let mut co = git2::build::CheckoutBuilder::new();
@@ -255,7 +256,7 @@ pub fn discard_file(repo_id: String, path: String, state: State<RepoState>) -> R
     } else {
         // New file with no HEAD version: delete from disk and remove from index.
         let _ = index.remove_path(Path::new(&path));
-        index.write()?;
+        retry_on_locked(|| Ok(index.write()?))?;
         let full = workdir.join(&path);
         if full.exists() {
             std::fs::remove_file(&full)
@@ -310,7 +311,7 @@ pub fn discard_paths(repo_id: String, paths: Vec<String>, state: State<RepoState
         }
     }
 
-    index.write()?;
+    retry_on_locked(|| Ok(index.write()?))?;
 
     if !tracked.is_empty() {
         let mut co = git2::build::CheckoutBuilder::new();
@@ -351,7 +352,8 @@ fn discard_all_in(repo: &git2::Repository) -> Result<()> {
         let deletable: Option<std::collections::HashSet<String>> = match repo.head() {
             Ok(head) => {
                 let commit = head.peel_to_commit()?;
-                repo.reset(commit.as_object(), git2::ResetType::Hard, None)?;
+                // Hard reset is idempotent, so it is safe to retry if index.lock is held.
+                retry_on_locked(|| Ok(repo.reset(commit.as_object(), git2::ResetType::Hard, None)?))?;
                 None
             }
             Err(e) if e.code() == git2::ErrorCode::UnbornBranch => {
@@ -370,7 +372,9 @@ fn discard_all_in(repo: &git2::Repository) -> Result<()> {
                 // unstaged but kept on disk.
                 let mut index = repo.index()?;
                 index.clear()?;
-                index.write()?;
+                // Only the write is retried: the untracked snapshot above must not
+                // be retaken once the in-memory index has been cleared.
+                retry_on_locked(|| Ok(index.write()?))?;
                 Some(untracked)
             }
             Err(e) => return Err(e.into()),
@@ -461,7 +465,7 @@ pub fn do_commit(repo_id: String, message: String, state: State<RepoState>) -> R
     };
     let parents: Vec<&git2::Commit> = parent_commits.iter().collect();
 
-    repo.commit(Some("HEAD"), &sig, &sig, &message, &tree, &parents)?;
+    retry_on_locked(|| Ok(repo.commit(Some("HEAD"), &sig, &sig, &message, &tree, &parents)?))?;
     Ok(())
 }
 
@@ -757,5 +761,43 @@ mod tests {
         assert!(nested.join("agent-wip.txt").exists(), "nested worktree must survive");
         assert!(!main_dir.join("junk").exists(), "ordinary untracked dirs are still removed");
         let _ = std::fs::remove_dir_all(main_dir);
+    }
+
+    /// libgit2 does not wait for `.git/index.lock`; it fails at once with ELOCKED.
+    /// The retry helper is bypassed here by holding the lock for longer than its budget.
+    #[test]
+    fn discard_all_reports_a_lock_held_past_the_retry_budget() {
+        let (dir, repo) = crate::repo::test_support::make_repo_with_commit();
+        let lock = dir.join(".git").join("index.lock");
+        std::fs::write(&lock, "").unwrap();
+        let err = discard_all_in(&repo).expect_err("must fail while locked");
+        match err {
+            Error::Git(e) => {
+                assert_eq!(e.code(), git2::ErrorCode::Locked);
+                assert_eq!(e.class(), git2::ErrorClass::Index);
+            }
+            other => panic!("expected a git lock error, got {other:?}"),
+        }
+        let _ = std::fs::remove_file(&lock);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn discard_all_succeeds_when_lock_released_shortly() {
+        let (dir, repo) = crate::repo::test_support::make_repo_with_commit();
+        std::fs::write(dir.join("a.txt"), "dirty").unwrap();
+        std::fs::write(dir.join("junk.txt"), "x").unwrap();
+        let lock = dir.join(".git").join("index.lock");
+        std::fs::write(&lock, "").unwrap();
+        let l2 = lock.clone();
+        let h = std::thread::spawn(move || {
+            std::thread::sleep(std::time::Duration::from_millis(300));
+            std::fs::remove_file(l2).unwrap();
+        });
+        discard_all_in(&repo).expect("should retry until the lock is released");
+        h.join().unwrap();
+        assert_eq!(std::fs::read_to_string(dir.join("a.txt")).unwrap(), "hello");
+        assert!(!dir.join("junk.txt").exists());
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }

@@ -1,3 +1,4 @@
+pub mod lock_retry;
 pub mod state;
 pub mod watcher_state;
 
