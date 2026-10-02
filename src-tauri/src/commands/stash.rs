@@ -21,6 +21,22 @@ pub(crate) fn parse_stash_branch(message: &str) -> Option<String> {
     (!branch.is_empty() && branch != "(no branch)").then(|| branch.to_owned())
 }
 
+/// Mirror the git CLI's automatic stash message: "WIP on <branch>: <short-oid> <summary>".
+fn default_stash_message(repo: &git2::Repository) -> Result<String> {
+    let head = repo.head()?;
+    // Detached HEAD's shorthand is literally "HEAD"; git says "(no branch)",
+    // which is also what parse_stash_branch recognises as branchless.
+    let branch = if head.is_branch() {
+        lossy(Some(head.shorthand_bytes()))
+    } else {
+        "(no branch)".to_owned()
+    };
+    let commit = head.peel_to_commit()?;
+    let short = &commit.id().to_string()[..7];
+    let summary = lossy(commit.summary_bytes()).chars().take(50).collect::<String>();
+    Ok(format!("WIP on {}: {} {}", branch, short, summary))
+}
+
 /// Save staged + unstaged changes as a new stash entry.
 /// If `message` is blank an automatic message is generated from the branch and HEAD commit.
 #[tauri::command]
@@ -31,13 +47,7 @@ pub fn stash_push(repo_id: String, message: String, state: State<RepoState>) -> 
     let sig = repo.signature()?;
 
     let msg = if message.trim().is_empty() {
-        // Mirror the git CLI format: "WIP on <branch>: <short-oid> <summary>"
-        let head = repo.head()?;
-        let branch = head.shorthand().unwrap_or("HEAD").to_string();
-        let commit = head.peel_to_commit()?;
-        let short = &commit.id().to_string()[..7];
-        let summary = lossy(commit.summary_bytes()).chars().take(50).collect::<String>();
-        format!("WIP on {}: {} {}", branch, short, summary)
+        default_stash_message(repo)?
     } else {
         message
     };
@@ -215,6 +225,31 @@ mod tests {
             repo.commit(Some("HEAD"), &sig, &sig, "initial", &tree, &[]).unwrap();
         }
         (dir, repo)
+    }
+
+    #[test]
+    fn default_stash_message_names_the_branch() {
+        let (dir, repo) = make_repo();
+        let branch = repo.head().unwrap().shorthand().unwrap().to_owned();
+        let msg = default_stash_message(&repo).unwrap();
+        assert!(msg.starts_with(&format!("WIP on {branch}: ")), "{msg}");
+        assert!(msg.ends_with(" initial"), "{msg}");
+        assert_eq!(parse_stash_branch(&msg).as_deref(), Some(branch.as_str()));
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    /// Detached HEAD: git writes "WIP on (no branch): …". Using the ref
+    /// shorthand instead produced "WIP on HEAD: …", which parse_stash_branch
+    /// then reported as a branch literally named "HEAD".
+    #[test]
+    fn default_stash_message_on_detached_head_has_no_branch() {
+        let (dir, repo) = make_repo();
+        let head_oid = repo.head().unwrap().target().unwrap();
+        repo.set_head_detached(head_oid).unwrap();
+        let msg = default_stash_message(&repo).unwrap();
+        assert!(msg.starts_with("WIP on (no branch): "), "{msg}");
+        assert_eq!(parse_stash_branch(&msg), None);
+        let _ = std::fs::remove_dir_all(dir);
     }
 
     /// Popping by OID must hit the right stash even after the stash list has
