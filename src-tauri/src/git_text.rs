@@ -18,31 +18,145 @@ pub(crate) fn lossy<'a>(bytes: impl Into<Option<&'a [u8]>>) -> String {
 /// non-UTF-8 declaration (no header, UTF-8, unknown label, the REPLACEMENT
 /// encodings, UTF-16 — which git text never is) falls back to [`lossy`].
 #[derive(Clone, Copy)]
-pub(crate) struct CommitDecoder(Option<&'static encoding_rs::Encoding>);
+pub(crate) struct CommitDecoder(Declared);
 
 impl CommitDecoder {
     pub(crate) fn new(commit: &git2::Commit) -> Self {
-        let declared = commit
-            .message_encoding()
-            .ok()
-            .flatten()
-            .and_then(|label| encoding_rs::Encoding::for_label_no_replacement(label.trim().as_bytes()))
-            .filter(|enc| {
-                *enc != encoding_rs::UTF_8
-                    && *enc != encoding_rs::UTF_16LE
-                    && *enc != encoding_rs::UTF_16BE
-            });
-        Self(declared)
+        Self(Declared::of(commit))
     }
 
     /// Decode `bytes` (`None` is "").
     pub(crate) fn text<'a>(&self, bytes: impl Into<Option<&'a [u8]>>) -> String {
         let Some(bytes) = bytes.into() else { return String::new() };
         match self.0 {
-            Some(enc) => enc.decode_without_bom_handling(bytes).0.into_owned(),
-            None => lossy(bytes),
+            Declared::Latin1 => latin1_to_string(bytes),
+            Declared::Other(enc) => enc.decode_without_bom_handling(bytes).0.into_owned(),
+            Declared::None => lossy(bytes),
         }
     }
+}
+
+/// The text encoding a commit declares in its `encoding` header.
+#[derive(Clone, Copy)]
+enum Declared {
+    /// No header, UTF-8, or anything unusable: bytes are taken as-is.
+    None,
+    /// True ISO-8859-1: every byte is the code point of the same value.
+    /// encoding_rs maps these labels to windows-1252 (WHATWG), which turns
+    /// 0x80–0x9F into cp1252 glyphs — unlike iconv, which git uses.
+    Latin1,
+    Other(&'static encoding_rs::Encoding),
+}
+
+/// Labels iconv resolves to ISO-8859-1.
+const LATIN1_LABELS: &[&str] = &[
+    "iso-8859-1", "iso8859-1", "iso_8859-1", "iso_8859-1:1987", "iso-ir-100", "latin1", "latin-1",
+    "l1", "cp819", "ibm819", "csisolatin1",
+];
+
+impl Declared {
+    fn of(commit: &git2::Commit) -> Self {
+        let Some(label) = commit.message_encoding().ok().flatten() else { return Self::None };
+        let label = label.trim();
+        if LATIN1_LABELS.iter().any(|l| l.eq_ignore_ascii_case(label)) {
+            return Self::Latin1;
+        }
+        match encoding_rs::Encoding::for_label_no_replacement(label.as_bytes()) {
+            Some(enc)
+                if enc != encoding_rs::UTF_8
+                    && enc != encoding_rs::UTF_16LE
+                    && enc != encoding_rs::UTF_16BE =>
+            {
+                Self::Other(enc)
+            }
+            _ => Self::None,
+        }
+    }
+
+    /// Strict conversion to UTF-8 the way git's iconv does: `None` when there
+    /// is nothing to convert or the bytes aren't valid in the declared
+    /// encoding (git then keeps them raw).
+    fn to_utf8(self, bytes: &[u8]) -> Option<Vec<u8>> {
+        match self {
+            Self::None => None,
+            Self::Latin1 => Some(latin1_to_string(bytes).into_bytes()),
+            Self::Other(enc) => enc
+                .decode_without_bom_handling_and_without_replacement(bytes)
+                .map(|s| s.into_owned().into_bytes()),
+        }
+    }
+}
+
+fn latin1_to_string(bytes: &[u8]) -> String {
+    bytes.iter().map(|&b| b as char).collect()
+}
+
+/// The author line value and message of a commit, as UTF-8 bytes ready to go
+/// into a rewritten commit.
+pub(crate) struct Transcoded {
+    /// `name <email> seconds ±hhmm`, without the leading `author `.
+    pub author: Vec<u8>,
+    pub message: Vec<u8>,
+}
+
+/// What git does when it rewrites a commit (`commit --amend`, rebase, reword,
+/// cherry-pick): it reads the original through `logmsg_reencode`, which
+/// converts the WHOLE raw buffer (author line + message) from the commit's
+/// declared `encoding` to UTF-8 with iconv — no validation of names, so empty
+/// names and emails survive — and writes the result with no `encoding`
+/// header. Commits without a usable declaration are copied byte for byte.
+pub(crate) fn transcode_for_rewrite(commit: &git2::Commit) -> Transcoded {
+    let author = raw_author_line(commit);
+    let message = commit.message_bytes().to_vec();
+    let declared = Declared::of(commit);
+    // iconv converts one buffer: if any of it is invalid, all of it stays raw.
+    match (declared.to_utf8(&author), declared.to_utf8(&message)) {
+        (Some(author), Some(message)) => Transcoded { author, message },
+        _ => Transcoded { author, message },
+    }
+}
+
+/// The value of the commit's `author` header, byte for byte.
+fn raw_author_line(commit: &git2::Commit) -> Vec<u8> {
+    commit
+        .raw_header_bytes()
+        .split(|&b| b == b'\n')
+        .find_map(|line| line.strip_prefix(b"author "))
+        .map(<[u8]>::to_vec)
+        .unwrap_or_default()
+}
+
+/// Write a commit object by hand: `tree`, `parent`s, the given raw `author`
+/// line value, `committer` from `committer`, a blank line and `message`
+/// verbatim. No `encoding` header and no other headers (gpgsig, mergetag …),
+/// as git writes on rewrite. Building the buffer ourselves sidesteps
+/// `git2::Signature`, which rejects empty names/emails and re-encodes bytes.
+pub(crate) fn write_commit(
+    repo: &git2::Repository,
+    tree: git2::Oid,
+    parents: &[git2::Oid],
+    author_line: &[u8],
+    committer: &git2::Signature,
+    message: &[u8],
+) -> std::result::Result<git2::Oid, git2::Error> {
+    let mut buf = format!("tree {tree}\n").into_bytes();
+    for p in parents {
+        buf.extend_from_slice(format!("parent {p}\n").as_bytes());
+    }
+    buf.extend_from_slice(b"author ");
+    buf.extend_from_slice(author_line);
+    buf.extend_from_slice(b"\ncommitter ");
+    buf.extend_from_slice(committer.name_bytes());
+    buf.extend_from_slice(b" <");
+    buf.extend_from_slice(committer.email_bytes());
+    buf.extend_from_slice(b"> ");
+    let when = committer.when();
+    let offset = when.offset_minutes();
+    let sign = if offset < 0 { '-' } else { '+' };
+    let abs = offset.abs();
+    buf.extend_from_slice(format!("{} {sign}{:02}{:02}\n\n", when.seconds(), abs / 60, abs % 60).as_bytes());
+    buf.extend_from_slice(message);
+    repo.odb()?.write(git2::ObjectType::Commit, &buf)
 }
 
 #[cfg(test)]
@@ -188,6 +302,80 @@ Details
             let c = repo.find_commit(oid).unwrap();
             assert_eq!(dec(&c).text(c.summary_bytes()), "Fix the bug", "{label}");
             assert_eq!(dec(&c).text(c.author().name_bytes()), "Andre", "{label}");
+        }
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn latin1_labels_decode_byte_for_byte_like_iconv() {
+        let (dir, repo) = make_repo();
+        for label in ["ISO-8859-1", "iso8859-1", "latin1", "L1", "ISO_8859-1"] {
+            let header = format!("encoding {label}\n");
+            let oid = raw_commit(&repo, header.as_bytes(), b"A\x80\x9f", b"x\x80\n");
+            let c = repo.find_commit(oid).unwrap();
+            // 0x80..0x9F are C1 controls in Latin-1, not cp1252 glyphs.
+            assert_eq!(dec(&c).text(c.author().name_bytes()), "A\u{80}\u{9f}", "{label}");
+            assert_eq!(dec(&c).text(c.summary_bytes()), "x\u{80}", "{label}");
+        }
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn transcode_for_rewrite_converts_declared_encodings_to_utf8() {
+        let (dir, repo) = make_repo();
+        let c = repo.find_commit(latin1_commit(&repo)).unwrap();
+        let t = transcode_for_rewrite(&c);
+        assert_eq!(t.author, "André <a@example.com> 0 +0000".as_bytes());
+        assert_eq!(t.message, "Corrigé le bug\n\nDétails ici\n".as_bytes());
+
+        let (name, _, _) = encoding_rs::SHIFT_JIS.encode("山田");
+        let (msg, _, _) = encoding_rs::SHIFT_JIS.encode("日本語\n");
+        let c = repo.find_commit(raw_commit(&repo, b"encoding Shift_JIS\n", &name, &msg)).unwrap();
+        let t = transcode_for_rewrite(&c);
+        assert_eq!(t.author, "山田 <a@example.com> 0 +0000".as_bytes());
+        assert_eq!(t.message, "日本語\n".as_bytes());
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn transcode_for_rewrite_copies_undeclared_bytes_raw() {
+        let (dir, repo) = make_repo();
+        let c = repo.find_commit(raw_commit(&repo, b"", b"Andr\xe9", b"Corrig\xe9\n")).unwrap();
+        let t = transcode_for_rewrite(&c);
+        assert_eq!(t.author, b"Andr\xe9 <a@example.com> 0 +0000");
+        assert_eq!(t.message, b"Corrig\xe9\n");
+        // Unknown label and UTF-8 label: taken as-is too.
+        for label in ["x-made-up", "UTF-8", "utf-16"] {
+            let header = format!("encoding {label}\n");
+            let c = repo.find_commit(raw_commit(&repo, header.as_bytes(), b"Andr\xe9", b"m\xe9\n")).unwrap();
+            assert_eq!(transcode_for_rewrite(&c).message, b"m\xe9\n", "{label}");
+        }
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn transcode_for_rewrite_keeps_empty_identity() {
+        let (dir, repo) = make_repo();
+        let tree = repo.treebuilder(None).unwrap().write().unwrap();
+        let raw = format!("tree {tree}\nauthor  <> 1600000000 +0000\ncommitter  <> 1600000000 +0000\nencoding ISO-8859-1\n\nm\n");
+        let oid = repo.odb().unwrap().write(ObjectType::Commit, raw.as_bytes()).unwrap();
+        let t = transcode_for_rewrite(&repo.find_commit(oid).unwrap());
+        assert_eq!(t.author, b" <> 1600000000 +0000");
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn write_commit_formats_committer_offsets_like_git() {
+        let (dir, repo) = make_repo();
+        let tree = repo.treebuilder(None).unwrap().write().unwrap();
+        for (minutes, want) in [(-210, "-0330"), (330, "+0530"), (0, "+0000"), (-60, "-0100"), (840, "+1400")] {
+            let sig = git2::Signature::new("C", "c@x", &git2::Time::new(1_600_000_000, minutes)).unwrap();
+            let oid = write_commit(&repo, tree, &[], b"A <a@x> 1 +0000", &sig, b"msg\n").unwrap();
+            let raw = String::from_utf8(crate::repo::test_support::raw_object(&repo, oid)).unwrap();
+            assert!(raw.contains(&format!("\ncommitter C <c@x> 1600000000 {want}\n")), "{raw}");
+            let c = repo.find_commit(oid).unwrap();
+            assert_eq!(c.committer().when().offset_minutes(), minutes);
+            assert!(!raw.contains("encoding"));
         }
         let _ = std::fs::remove_dir_all(dir);
     }

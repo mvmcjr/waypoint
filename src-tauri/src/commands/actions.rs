@@ -5,67 +5,98 @@ use tauri::State;
 use crate::error::{Error, Result};
 use crate::repo::RepoState;
 
-/// Drive a prepared rebase to completion, replaying each operation as its own
-/// commit and aborting with `conflict_msg` if any operation lands with
-/// conflicts. Shared by every command that rewrites history via `repo.rebase`
-/// (plain rebase, squash, reword) so they abort/report identically.
-fn run_rebase_to_completion(
+/// Replay the commits in `upstream..old_tip` (oldest first) on top of `onto`
+/// and move `branch_ref` to the result. Shared by every command that rewrites
+/// history (plain rebase, squash, reword) so they abort/report identically.
+///
+/// This is deliberately NOT libgit2's `git_rebase`: it builds each replayed
+/// commit itself, carrying the original's `encoding` header and round-tripping
+/// the author through `git_signature` (the parent is whatever HEAD is
+/// mid-rebase; the only hook is a C-only `commit_create_cb`), and it returns
+/// `Applied` for originally-empty commits, which silently dropped them.
+/// Instead each commit is cherry-picked in memory and written by
+/// [`crate::git_text::write_commit`] the way git writes a rewrite: author and
+/// message transcoded to UTF-8 from the declared `encoding`, no `encoding`
+/// header, committer = `sig`.
+///
+/// Like `git rebase`: commits that start out empty are kept, commits that
+/// BECOME empty (their change is already in `onto`) are dropped, and merge
+/// commits in the range are skipped (no `--rebase-merges`).
+///
+/// Nothing is touched until the whole replay succeeded: a conflict (or any
+/// error) returns before the working tree or any ref changes, and no
+/// `.git/rebase-merge` state is ever created. A dirty index or working tree is
+/// refused up front, as `git rebase` does.
+fn replay_onto(
     repo: &git2::Repository,
-    rebase: git2::Rebase,
+    branch_ref: &str,
+    old_tip: git2::Oid,
+    upstream: git2::Oid,
+    onto: git2::Oid,
     sig: &git2::Signature,
     conflict_msg: &str,
 ) -> Result<()> {
-    run_rebase_with(repo, rebase, conflict_msg, |rebase| {
-        // Like `git rebase`: the original commit's author, message and
-        // `encoding` header are carried over; only the committer changes.
-        rebase.commit(None, sig, None).map(|_| ())
-    })
-}
+    ensure_clean_for_rewrite(repo)?;
 
-/// The replay loop. `step` commits one applied operation; ANY error from it,
-/// from libgit2, or a conflict aborts the rebase before returning, so a
-/// failure never leaves `.git/rebase-merge`, a detached HEAD and an unmoved
-/// branch behind. The exception is `ErrorCode::Applied` (the operation's patch
-/// is already in the target, e.g. an empty commit): git skips those, so no
-/// commit is made for that operation and the replay continues.
-fn run_rebase_with(
-    repo: &git2::Repository,
-    mut rebase: git2::Rebase,
-    conflict_msg: &str,
-    mut step: impl FnMut(&mut git2::Rebase) -> std::result::Result<(), git2::Error>,
-) -> Result<()> {
-    loop {
-        match rebase.next() {
-            None => break,
-            Some(Err(e)) => {
-                let _ = rebase.abort();
-                return Err(Error::Git(e));
-            }
-            Some(Ok(_)) => {}
+    let mut walk = repo.revwalk()?;
+    walk.push(old_tip)?;
+    walk.hide(upstream)?;
+    walk.set_sorting(git2::Sort::TOPOLOGICAL | git2::Sort::REVERSE)?;
+    let oids: Vec<git2::Oid> = walk.collect::<std::result::Result<_, _>>()?;
+
+    let mut last = repo.find_commit(onto)?;
+    for oid in oids {
+        let commit = repo.find_commit(oid)?;
+        if commit.parent_count() > 1 {
+            continue;
         }
-        let has_conflicts = match repo.index() {
-            Ok(index) => index.has_conflicts(),
-            Err(e) => {
-                let _ = rebase.abort();
-                return Err(Error::Git(e));
-            }
-        };
-        if has_conflicts {
-            let _ = rebase.abort();
+        let mut index = repo.cherrypick_commit(&commit, &last, 0, None)?;
+        if index.has_conflicts() {
             return Err(Error::RebaseConflict(conflict_msg.into()));
         }
-        match step(&mut rebase) {
-            Ok(()) => {}
-            Err(e) if e.code() == git2::ErrorCode::Applied => {}
-            Err(e) => {
-                let _ = rebase.abort();
-                return Err(Error::Git(e));
-            }
+        let tree = index.write_tree_to(repo)?;
+        let originally_empty = match commit.parent(0) {
+            Ok(parent) => parent.tree_id() == commit.tree_id(),
+            Err(_) => commit.tree()?.is_empty(),
+        };
+        if tree == last.tree_id() && !originally_empty {
+            continue; // already in `onto` — git's default `--empty=drop`
         }
+        let text = crate::git_text::transcode_for_rewrite(&commit);
+        let new_oid =
+            crate::git_text::write_commit(repo, tree, &[last.id()], &text.author, sig, &text.message)?;
+        last = repo.find_commit(new_oid)?;
     }
-    if let Err(e) = rebase.finish(None) {
-        let _ = rebase.abort();
+
+    let new_tip = last.id();
+    if new_tip == old_tip {
+        return Ok(());
+    }
+    // Working tree and index first (relative to the still-current HEAD), then
+    // the ref: if the checkout refuses, nothing has moved.
+    repo.checkout_tree(last.as_object(), Some(git2::build::CheckoutBuilder::new().safe()))?;
+    let reflog = format!("rebase (finish): {branch_ref} onto {onto}");
+    if let Err(e) = repo.reference_matching(branch_ref, new_tip, true, old_tip, &reflog) {
+        // Put the working tree back where the untouched branch expects it.
+        if let Ok(old) = repo.find_commit(old_tip) {
+            let _ = repo.checkout_tree(old.as_object(), Some(git2::build::CheckoutBuilder::new().force()));
+        }
         return Err(Error::Git(e));
+    }
+    repo.set_head(branch_ref)?;
+    Ok(())
+}
+
+/// Refuse to rewrite history under uncommitted tracked changes (what
+/// `git rebase` and libgit2's rebase both do): the replay ends by checking out
+/// the new tip.
+fn ensure_clean_for_rewrite(repo: &git2::Repository) -> Result<()> {
+    let head_tree = repo.head()?.peel_to_tree()?;
+    if repo.diff_tree_to_index(Some(&head_tree), None, None)?.deltas().len() > 0 {
+        return Err(Error::Git(git2::Error::from_str("uncommitted changes exist in index")));
+    }
+    if repo.diff_index_to_workdir(None, None)?.deltas().len() > 0 {
+        return Err(Error::Git(git2::Error::from_str("unstaged changes exist in workdir")));
     }
     Ok(())
 }
@@ -291,6 +322,11 @@ pub fn reset_head(repo_id: String, oid: String, kind: String, state: State<RepoS
 pub fn rebase_onto(repo_id: String, onto_oid: String, state: State<RepoState>) -> Result<()> {
     let repos = state.0.lock().unwrap();
     let repo = repos.get(&repo_id).ok_or_else(|| Error::RepoNotFound(repo_id.clone()))?;
+    rebase_onto_impl(repo, &onto_oid)
+}
+
+fn rebase_onto_impl(repo: &git2::Repository, onto_oid: &str) -> Result<()> {
+    let onto_oid = onto_oid.to_owned();
 
     // Must be on a branch (not detached HEAD) to rebase.
     let head = repo.head()?;
@@ -301,14 +337,19 @@ pub fn rebase_onto(repo_id: String, onto_oid: String, state: State<RepoState>) -
     }
 
     let oid = git2::Oid::from_str(&onto_oid).map_err(|_| Error::CommitNotFound(onto_oid.clone()))?;
-    let onto = repo.find_annotated_commit(oid)?;
+    repo.find_commit(oid).map_err(|_| Error::CommitNotFound(onto_oid.clone()))?;
+    let head_oid = head
+        .target()
+        .ok_or_else(|| Error::InvalidArg("HEAD has no target".into()))?;
+    let branch_ref = head.name()?.to_owned();
 
     let sig = repo.signature()?;
-    let rebase = repo.rebase(None, Some(&onto), None, None)?;
-
-    run_rebase_to_completion(
+    replay_onto(
         repo,
-        rebase,
+        &branch_ref,
+        head_oid,
+        oid,
+        oid,
         &sig,
         "Rebase has conflicts and was aborted. Please resolve them manually in a terminal.",
     )
@@ -507,20 +548,18 @@ pub fn squash_commits(repo_id: String, oids: Vec<String>, message: String, state
     // No descendants beyond the range — just point the branch at the squash.
     // Working dir/index already match (squash tree == old HEAD tree == tip tree).
     if tip_oid == head_oid {
-        repo.reference(&branch_ref, squashed_oid, true, "squash commits")?;
+        repo.reference_matching(&branch_ref, squashed_oid, true, head_oid, "squash commits")?;
         repo.set_head(&branch_ref)?;
         return Ok(());
     }
 
     // Interior squash: replay tip..HEAD onto the squashed commit.
-    let branch_ann = repo.reference_to_annotated_commit(&head)?;
-    let upstream_ann = repo.find_annotated_commit(tip_oid)?;
-    let onto_ann = repo.find_annotated_commit(squashed_oid)?;
-
-    let rebase = repo.rebase(Some(&branch_ann), Some(&upstream_ann), Some(&onto_ann), None)?;
-    run_rebase_to_completion(
+    replay_onto(
         repo,
-        rebase,
+        &branch_ref,
+        head_oid,
+        tip_oid,
+        squashed_oid,
         &sig,
         "Squash hit a conflict while replaying later commits and was aborted.",
     )
@@ -634,33 +673,28 @@ fn reword_in(repo: &git2::Repository, oid: &str, message: &str) -> Result<()> {
     )?;
 
     // Rebuild the commit with the same tree and parents — only the message
-    // (and committer identity/time, to reflect the edit) changes.
+    // (and committer identity/time, to reflect the edit) changes. Like git,
+    // the message is UTF-8 with no `encoding` header and the author line is
+    // the original's, transcoded from its declared encoding.
     let sig = repo.signature()?;
-    let tree = target.tree()?;
-    let parents: Vec<git2::Commit> = (0..target.parent_count())
-        .map(|i| target.parent(i))
-        .collect::<std::result::Result<_, _>>()?;
-    let parent_refs: Vec<&git2::Commit> = parents.iter().collect();
-    // Like `git commit --amend`: the message is UTF-8 with no `encoding`
-    // header and the author is copied raw (byte-identical).
-    let new_oid = repo.commit(None, &target.author(), &sig, msg, &tree, &parent_refs)?;
+    let parents: Vec<git2::Oid> = target.parent_ids().collect();
+    let author = crate::git_text::transcode_for_rewrite(&target).author;
+    let new_oid = crate::git_text::write_commit(repo, target.tree_id(), &parents, &author, &sig, msg.as_bytes())?;
 
     // Target was HEAD — no descendants to replay, just move the branch tip.
     if target_oid == head_oid {
-        repo.reference(&branch_ref, new_oid, true, "reword commit")?;
+        repo.reference_matching(&branch_ref, new_oid, true, head_oid, "reword commit")?;
         repo.set_head(&branch_ref)?;
         return Ok(());
     }
 
     // Interior reword: replay target..HEAD onto the reworded commit.
-    let branch_ann = repo.reference_to_annotated_commit(&head)?;
-    let upstream_ann = repo.find_annotated_commit(target_oid)?;
-    let onto_ann = repo.find_annotated_commit(new_oid)?;
-
-    let rebase = repo.rebase(Some(&branch_ann), Some(&upstream_ann), Some(&onto_ann), None)?;
-    run_rebase_to_completion(
+    replay_onto(
         repo,
-        rebase,
+        &branch_ref,
+        head_oid,
+        target_oid,
+        new_oid,
         &sig,
         "Editing this commit's message hit a conflict while replaying later commits and was aborted.",
     )
@@ -873,14 +907,34 @@ mod tests {
     use std::path::{Path, PathBuf};
 
     /// The reworded commit is plain UTF-8 (no `encoding` header) and its
-    /// author bytes are exactly the original's.
+    /// author line is the original's, transcoded from Latin-1 to UTF-8.
     fn assert_reworded_like_git(repo: &Repository, oid: git2::Oid, msg: &str) {
         let c = repo.find_commit(oid).unwrap();
-        assert_eq!(c.author().name_bytes(), b"Andr\xe9");
-        assert_eq!(c.author().when().seconds(), 1_000_000_000);
         assert_eq!(c.message().unwrap().trim(), msg);
-        let raw = crate::repo::test_support::raw_object(repo, oid);
-        assert!(!String::from_utf8_lossy(&raw).contains("\nencoding "));
+        let raw = String::from_utf8(crate::repo::test_support::raw_object(repo, oid)).unwrap();
+        assert!(!raw.contains("\nencoding "), "{raw}");
+        assert!(raw.contains("\nauthor André <a@example.com> 1000000000 +0000\n"), "{raw}");
+    }
+
+    /// Commit `file` = `content` on top of HEAD (no encoding games), move the
+    /// branch there and sync the working tree.
+    fn commit_file(repo: &Repository, file: &str, content: &str, msg: &str) -> git2::Oid {
+        let head = repo.head().unwrap().peel_to_commit().unwrap();
+        let mut tb = repo.treebuilder(Some(&head.tree().unwrap())).unwrap();
+        tb.insert(file, repo.blob(content.as_bytes()).unwrap(), 0o100644).unwrap();
+        let tree = repo.find_tree(tb.write().unwrap()).unwrap();
+        let sig = repo.signature().unwrap();
+        let oid = repo.commit(None, &sig, &sig, msg, &tree, &[&head]).unwrap();
+        let name = repo.head().unwrap().name().unwrap().to_owned();
+        repo.reference(&name, oid, true, "test").unwrap();
+        repo.checkout_head(Some(git2::build::CheckoutBuilder::new().force())).unwrap();
+        oid
+    }
+
+    fn move_branch(repo: &Repository, oid: git2::Oid) {
+        let name = repo.head().unwrap().name().unwrap().to_owned();
+        repo.reference(&name, oid, true, "test").unwrap();
+        repo.checkout_head(Some(git2::build::CheckoutBuilder::new().force())).unwrap();
     }
 
     #[test]
@@ -951,10 +1005,10 @@ mod tests {
         let _ = std::fs::remove_dir_all(dir);
     }
 
-    /// An empty commit (tree equals its parent's) in the replayed range makes
-    /// libgit2 return `Applied`; git skips it, so must we.
+    /// git keeps commits that start out empty (tree equals parent's) when it
+    /// replays history, so an interior reword must too.
     #[test]
-    fn interior_reword_skips_an_empty_descendant() {
+    fn interior_reword_keeps_an_originally_empty_descendant() {
         use crate::repo::test_support::*;
         let (dir, repo) = make_repo_with_commit();
         let t = b"T <t@example.com> 1600000000 +0000";
@@ -970,26 +1024,78 @@ mod tests {
         let tip = repo.head().unwrap().peel_to_commit().unwrap();
         assert_ne!(tip.id(), top);
         assert_eq!(tip.summary(), Ok(Some("top")));
-        let mid = tip.parent(0).unwrap();
+        let kept_empty = tip.parent(0).unwrap();
+        assert_eq!(kept_empty.summary(), Ok(Some("empty")));
+        assert_eq!(kept_empty.tree_id(), kept_empty.parent(0).unwrap().tree_id());
+        let mid = kept_empty.parent(0).unwrap();
         assert_eq!(mid.summary(), Ok(Some("reworded")));
         let _ = std::fs::remove_dir_all(dir);
     }
 
     #[test]
-    fn failed_replay_step_aborts_the_rebase() {
+    fn rebase_onto_drops_a_commit_that_becomes_empty() {
+        let (dir, repo) = crate::repo::test_support::make_repo_with_commit();
+        let base = repo.head().unwrap().peel_to_commit().unwrap().id();
+        let mine = commit_file(&repo, "b.txt", "same", "mine");
+        move_branch(&repo, base);
+        let theirs = commit_file(&repo, "b.txt", "same", "theirs");
+        move_branch(&repo, mine);
+        let branch_ref = repo.head().unwrap().name().unwrap().to_owned();
+        rebase_onto_impl(&repo, &theirs.to_string()).unwrap();
+        assert_clean_on_branch(&repo, &branch_ref);
+        assert_eq!(repo.head().unwrap().peel_to_commit().unwrap().id(), theirs);
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn rebase_onto_replays_commits_and_updates_the_working_tree() {
+        let (dir, repo) = crate::repo::test_support::make_repo_with_commit();
+        let base = repo.head().unwrap().peel_to_commit().unwrap().id();
+        let mine = commit_file(&repo, "m.txt", "m", "mine");
+        move_branch(&repo, base);
+        let theirs = commit_file(&repo, "t.txt", "t", "theirs");
+        move_branch(&repo, mine);
+        let branch_ref = repo.head().unwrap().name().unwrap().to_owned();
+        rebase_onto_impl(&repo, &theirs.to_string()).unwrap();
+        assert_clean_on_branch(&repo, &branch_ref);
+        let tip = repo.head().unwrap().peel_to_commit().unwrap();
+        assert_eq!(tip.summary(), Ok(Some("mine")));
+        assert_eq!(tip.parent_id(0).unwrap(), theirs);
+        assert_eq!(std::fs::read_to_string(dir.join("m.txt")).unwrap(), "m");
+        assert_eq!(std::fs::read_to_string(dir.join("t.txt")).unwrap(), "t");
+        assert!(repo.statuses(None).unwrap().is_empty());
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn rebase_onto_conflict_leaves_the_repo_untouched() {
+        let (dir, repo) = crate::repo::test_support::make_repo_with_commit();
+        let base = repo.head().unwrap().peel_to_commit().unwrap().id();
+        let mine = commit_file(&repo, "a.txt", "mine", "mine");
+        move_branch(&repo, base);
+        let theirs = commit_file(&repo, "a.txt", "theirs", "theirs");
+        move_branch(&repo, mine);
+        let branch_ref = repo.head().unwrap().name().unwrap().to_owned();
+        let err = rebase_onto_impl(&repo, &theirs.to_string());
+        assert!(matches!(err, Err(Error::RebaseConflict(_))), "{err:?}");
+        assert_clean_on_branch(&repo, &branch_ref);
+        assert_eq!(repo.head().unwrap().peel_to_commit().unwrap().id(), mine);
+        assert_eq!(std::fs::read_to_string(dir.join("a.txt")).unwrap(), "mine");
+        assert!(repo.statuses(None).unwrap().is_empty());
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn interior_reword_refuses_a_dirty_working_tree() {
         use crate::repo::test_support::*;
         let (dir, repo) = make_repo_with_commit();
         let t = b"T <t@example.com> 1600000000 +0000";
         let target = push_raw_commit(&repo, "b.txt", t, t, b"", b"target\n");
         let tip = push_raw_commit(&repo, "c.txt", t, t, b"", b"tip\n");
-        let branch_ref = repo.head().unwrap().name().unwrap().to_owned();
-        let head = repo.reference_to_annotated_commit(&repo.head().unwrap()).unwrap();
-        let upstream = repo.find_annotated_commit(target).unwrap();
-        let rebase = repo.rebase(Some(&head), Some(&upstream), None, None).unwrap();
-        let err = run_rebase_with(&repo, rebase, "conflict", |_| Err(git2::Error::from_str("boom")));
-        assert!(matches!(err, Err(Error::Git(_))));
-        assert_clean_on_branch(&repo, &branch_ref);
+        std::fs::write(dir.join("a.txt"), "dirty").unwrap();
+        assert!(reword_in(&repo, &target.to_string(), "reworded").is_err());
         assert_eq!(repo.head().unwrap().peel_to_commit().unwrap().id(), tip);
+        assert_eq!(std::fs::read_to_string(dir.join("a.txt")).unwrap(), "dirty");
         let _ = std::fs::remove_dir_all(dir);
     }
 
@@ -1003,12 +1109,11 @@ mod tests {
         push_raw_commit(&repo, "c.txt", l, l, b"encoding ISO-8859-1\n", b"Corrig\xe9 le bug\n");
         reword_in(&repo, &target.to_string(), "reworded").unwrap();
         let c = repo.head().unwrap().peel_to_commit().unwrap();
-        let raw = raw_object(&repo, c.id());
-        assert!(String::from_utf8_lossy(&raw).contains("\nencoding ISO-8859-1\n"));
-        assert_eq!(c.author().name_bytes(), b"Andr\xe9");
-        assert_eq!(c.author().when().seconds(), 1_000_000_000);
+        let raw = String::from_utf8(raw_object(&repo, c.id())).unwrap();
+        assert!(!raw.contains("\nencoding "), "{raw}");
+        assert!(raw.contains("\nauthor André <a@example.com> 1000000000 +0000\n"), "{raw}");
         assert_eq!(c.committer().name(), Ok("Test User"));
-        assert_eq!(c.message_bytes(), b"Corrig\xe9 le bug\n");
+        assert_eq!(c.message_bytes(), "Corrigé le bug\n".as_bytes());
         let _ = std::fs::remove_dir_all(dir);
     }
 

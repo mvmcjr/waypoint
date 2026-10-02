@@ -474,32 +474,46 @@ pub fn amend_commit(repo_id: String, message: String, state: State<RepoState>) -
 }
 
 /// Core of `amend_commit`, matching `git commit --amend`: the new message is
-/// written as UTF-8 with no `encoding` header, and the original author is
-/// copied raw (byte-identical, even when empty or non-UTF-8). libgit2's
-/// `Commit::amend` would inherit or write an `encoding` header, so the commit
-/// is built with `repo.commit` over the original's parents and the branch (or
-/// detached HEAD) is moved to it.
+/// written as UTF-8 with no `encoding` header, and the original author line is
+/// transcoded from the original's declared encoding (empty names survive).
+/// libgit2's `Commit::amend` would inherit or write an `encoding` header, so
+/// the commit is written by hand over the original's parents.
 fn amend_in(repo: &git2::Repository, message: &str) -> Result<()> {
     let head = repo.head()?;
     let head_commit = head.peel_to_commit()?;
     let branch_ref = head.is_branch().then(|| head.name().map(str::to_owned)).transpose()?;
+    amend_from(repo, &head_commit, branch_ref.as_deref(), message)
+}
 
+/// Replace `old` (HEAD as it was read) with an amended commit. Like git, the
+/// author line is transcoded to UTF-8 from the original's declared encoding
+/// (see `git_text::transcode_for_rewrite`) and the committer is the current
+/// user. The branch (or detached HEAD) only moves if it still points at `old`,
+/// so a concurrent change is refused instead of overwritten.
+fn amend_from(repo: &git2::Repository, old: &git2::Commit, branch_ref: Option<&str>, message: &str) -> Result<()> {
     let mut index = repo.index()?;
     let tree_oid = index.write_tree()?;
-    let tree = repo.find_tree(tree_oid)?;
 
     let sig = repo.signature()?;
-    let parents: Vec<git2::Commit> = (0..head_commit.parent_count())
-        .map(|i| head_commit.parent(i))
-        .collect::<std::result::Result<_, _>>()?;
-    let parent_refs: Vec<&git2::Commit> = parents.iter().collect();
-    let new_oid = repo.commit(None, &head_commit.author(), &sig, message, &tree, &parent_refs)?;
+    let parents: Vec<git2::Oid> = old.parent_ids().collect();
+    let author = crate::git_text::transcode_for_rewrite(old).author;
+    let new_oid = crate::git_text::write_commit(repo, tree_oid, &parents, &author, &sig, message.as_bytes())?;
 
+    let subject = message.lines().next().unwrap_or("");
+    let reflog = format!("commit (amend): {subject}");
+    let moved = || Error::InvalidArg("The branch changed while amending. Nothing was amended; try again.".into());
     match branch_ref {
         Some(name) => {
-            repo.reference(&name, new_oid, true, "commit (amend)")?;
+            repo.reference_matching(name, new_oid, true, old.id(), &reflog).map_err(|e| {
+                if e.code() == git2::ErrorCode::Modified { moved() } else { Error::Git(e) }
+            })?;
         }
-        None => repo.set_head_detached(new_oid)?,
+        None => {
+            if repo.head()?.target() != Some(old.id()) {
+                return Err(moved());
+            }
+            repo.set_head_detached(new_oid)?;
+        }
     }
     Ok(())
 }
@@ -511,19 +525,77 @@ mod tests {
     use std::path::{Path, PathBuf};
 
     #[test]
-    fn amend_over_latin1_commit_writes_utf8_message_and_raw_author() {
+    fn amend_over_latin1_commit_transcodes_author_like_git() {
         let (dir, repo) = crate::repo::test_support::make_repo_with_commit();
         let old = crate::repo::test_support::push_latin1_commit(&repo);
-        let old_author = repo.find_commit(old).unwrap().author().name_bytes().to_vec();
         amend_in(&repo, "Fixé le bug").unwrap();
         let c = repo.head().unwrap().peel_to_commit().unwrap();
         assert_ne!(c.id(), old);
         let raw = crate::repo::test_support::raw_object(&repo, c.id());
-        assert!(!String::from_utf8_lossy(&raw).contains("\nencoding "));
-        assert_eq!(c.message(), Ok("Fixé le bug"));
-        assert_eq!(c.author().name_bytes(), old_author.as_slice());
-        assert_eq!(c.author().name_bytes(), b"Andr\xe9");
-        assert_eq!(c.author().when().seconds(), 1_000_000_000);
+        let text = String::from_utf8(raw).unwrap();
+        assert!(!text.contains("\nencoding "), "{text}");
+        assert!(text.contains("\nauthor André <a@example.com> 1000000000 +0000\n"), "{text}");
+        assert!(text.ends_with("\n\nFixé le bug"), "{text}");
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn amend_transcodes_empty_identity_with_encoding_header() {
+        use crate::repo::test_support::*;
+        let (dir, repo) = make_repo_with_commit();
+        push_raw_commit(&repo, "b.txt", b" <> 1600000000 +0000", b" <> 1600000000 +0000", b"encoding ISO-8859-1\n", b"msg\n");
+        amend_in(&repo, "new msg").unwrap();
+        let c = repo.head().unwrap().peel_to_commit().unwrap();
+        let raw = String::from_utf8(raw_object(&repo, c.id())).unwrap();
+        assert!(raw.contains("\nauthor  <> 1600000000 +0000\n"), "{raw}");
+        assert!(!raw.contains("\nencoding "), "{raw}");
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn amend_byte_0x80_in_latin1_author_becomes_u0080() {
+        use crate::repo::test_support::*;
+        let (dir, repo) = make_repo_with_commit();
+        push_raw_commit(&repo, "b.txt", b"A\x80 <a@x> 1600000000 +0000", b"A <a@x> 1600000000 +0000", b"encoding ISO-8859-1\n", b"msg\n");
+        amend_in(&repo, "m").unwrap();
+        let c = repo.head().unwrap().peel_to_commit().unwrap();
+        assert_eq!(c.author().name_bytes(), "A\u{80}".as_bytes());
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn amend_refuses_when_branch_moved_since_head_was_read() {
+        use crate::repo::test_support::*;
+        let (dir, repo) = make_repo_with_commit();
+        let old = repo.head().unwrap().peel_to_commit().unwrap();
+        let branch_ref = repo.head().unwrap().name().unwrap().to_owned();
+        // Someone else moves the branch after HEAD was read.
+        let other = push_raw_commit(&repo, "b.txt", b"T <t@x> 1 +0000", b"T <t@x> 1 +0000", b"", b"other\n");
+        let err = amend_from(&repo, &old, Some(&branch_ref), "amended");
+        assert!(err.is_err());
+        assert_eq!(repo.find_reference(&branch_ref).unwrap().target(), Some(other));
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn amend_refuses_when_detached_head_moved() {
+        use crate::repo::test_support::*;
+        let (dir, repo) = make_repo_with_commit();
+        let old = repo.head().unwrap().peel_to_commit().unwrap();
+        let other = push_raw_commit(&repo, "b.txt", b"T <t@x> 1 +0000", b"T <t@x> 1 +0000", b"", b"other\n");
+        repo.set_head_detached(other).unwrap();
+        assert!(amend_from(&repo, &old, None, "amended").is_err());
+        assert_eq!(repo.head().unwrap().target(), Some(other));
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn amend_reflog_message_follows_git() {
+        let (dir, repo) = crate::repo::test_support::make_repo_with_commit();
+        amend_in(&repo, "subject line\n\nbody").unwrap();
+        let name = repo.head().unwrap().name().unwrap().to_owned();
+        let log = repo.reflog(&name).unwrap();
+        assert_eq!(log.get(0).unwrap().message(), Ok(Some("commit (amend): subject line")));
         let _ = std::fs::remove_dir_all(dir);
     }
 
