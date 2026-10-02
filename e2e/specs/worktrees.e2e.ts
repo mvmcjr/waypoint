@@ -129,7 +129,10 @@ describe('worktrees', function () {
     await (await d.$('[role="checkbox"]')).click();
     await (await button(d, 'Remove')).click();
     await waitForGit(() => existsSync(wt('agent-clean')), (v) => v === false, 'agent-clean folder removed');
-    expect(git(fx!.openPath, 'branch', '--list', 'agent/clean')).toBe('');
+    // The branch is deleted after the folder (remove_worktree_blocking removes
+    // the worktree first, then the branch), so wait for it separately rather
+    // than asserting the instant the folder disappears.
+    await waitForGit(() => git(fx!.openPath, 'branch', '--list', 'agent/clean'), (v) => v === '', 'agent/clean branch deleted');
     expect(worktreeList(fx!.openPath)).not.toContain('agent-clean');
     // UI: the agent-clean row itself is gone from the Worktrees section —
     // scoped to its own aria-label prefix, so this can only pass because
