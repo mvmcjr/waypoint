@@ -46,3 +46,6 @@ graphify-out/
 .github/hooks/impeccable.json
 .impeccable/*
 !.impeccable/design.json
+
+# TypeScript incremental build info (tsconfig.node.json is composite)
+*.tsbuildinfo
