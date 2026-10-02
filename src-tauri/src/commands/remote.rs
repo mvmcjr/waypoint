@@ -146,6 +146,28 @@ pub async fn rename_remote_branch(
     Ok(())
 }
 
+/// Which remote branch to fetch for a pull of local `branch_name` from
+/// `remote_name`, and the remote-tracking ref to merge afterwards. Honours the
+/// branch's configured upstream (e.g. local `main` tracking `origin/master`);
+/// without one — or when pulling from a different remote — falls back to the
+/// same-named branch on `remote_name`.
+fn resolve_pull_source(repo: &git2::Repository, remote_name: &str, branch_name: &str) -> (String, String) {
+    configured_upstream(repo, remote_name, branch_name).unwrap_or_else(|| {
+        (branch_name.to_owned(), format!("refs/remotes/{}/{}", remote_name, branch_name))
+    })
+}
+
+fn configured_upstream(repo: &git2::Repository, remote_name: &str, branch_name: &str) -> Option<(String, String)> {
+    let local_ref = format!("refs/heads/{}", branch_name);
+    if repo.branch_upstream_remote(&local_ref).ok()?.as_str().ok()? != remote_name {
+        return None;
+    }
+    let merge = repo.branch_upstream_merge(&local_ref).ok()?;
+    let remote_branch = merge.as_str().ok()?.strip_prefix("refs/heads/")?.to_owned();
+    let tracking_ref = repo.branch_upstream_name(&local_ref).ok()?.as_str().ok()?.to_owned();
+    Some((remote_branch, tracking_ref))
+}
+
 #[tauri::command]
 pub async fn pull_branch(
     repo_id: String,
@@ -154,7 +176,7 @@ pub async fn pull_branch(
 ) -> Result<PullResult> {
     // Get branch name and workdir, then release the lock before the async network call.
     // git2::Repository is not Sync, so we must not hold the MutexGuard across .await.
-    let (branch_name, workdir) = {
+    let (branch_name, remote_branch, tracking_ref_name, workdir) = {
         let repos = state.0.lock().unwrap();
         let repo = repos.get(&repo_id).ok_or_else(|| Error::RepoNotFound(repo_id.clone()))?;
         let head = repo.head()?;
@@ -164,10 +186,11 @@ pub async fn pull_branch(
             ));
         }
         let branch_name = head.shorthand()?.to_string();
-        (branch_name, crate::repo::workdir(repo)?)
+        let (remote_branch, tracking_ref_name) = resolve_pull_source(repo, &remote_name, &branch_name);
+        (branch_name, remote_branch, tracking_ref_name, crate::repo::workdir(repo)?)
     }; // MutexGuard dropped here — safe to .await below
 
-    run_git(&workdir, &["fetch", &remote_name, &branch_name]).await?;
+    run_git(&workdir, &["fetch", &remote_name, &remote_branch]).await?;
 
     // Re-acquire the lock for the merge logic (no more .await points after this).
     let repos = state.0.lock().unwrap();
@@ -181,7 +204,6 @@ pub async fn pull_branch(
         ));
     }
 
-    let tracking_ref_name = format!("refs/remotes/{}/{}", remote_name, branch_name);
     let tracking_oid = repo
         .find_reference(&tracking_ref_name)
         .map_err(|_| {
@@ -232,7 +254,7 @@ pub async fn pull_branch(
     let mut index = repo.index()?;
     index.write()?;
 
-    let merge_msg = format!("Merge remote-tracking branch '{}/{}'", remote_name, branch_name);
+    let merge_msg = format!("Merge remote-tracking branch '{}/{}'", remote_name, remote_branch);
 
     if index.has_conflicts() {
         let conflicted = crate::commands::merge::collect_conflict_paths(&index)?;
@@ -253,4 +275,66 @@ pub async fn pull_branch(
     crate::commands::merge::cleanup_merge_state(repo);
 
     Ok(PullResult { kind: "merged".into(), conflicted: vec![] })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use git2::Repository;
+    use std::path::PathBuf;
+
+    fn make_repo() -> (PathBuf, Repository) {
+        let dir = std::env::temp_dir().join(format!("wpt_remote_{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let repo = Repository::init(&dir).unwrap();
+        // Default fetch refspec: +refs/heads/*:refs/remotes/origin/*
+        repo.remote("origin", "https://example.invalid/repo.git").unwrap();
+        (dir, repo)
+    }
+
+    fn set_upstream(repo: &Repository, branch: &str, remote: &str, merge: &str) {
+        let mut cfg = repo.config().unwrap();
+        cfg.set_str(&format!("branch.{branch}.remote"), remote).unwrap();
+        cfg.set_str(&format!("branch.{branch}.merge"), merge).unwrap();
+    }
+
+    /// Local `main` tracking `origin/master`: pull must fetch `master` and
+    /// merge `refs/remotes/origin/master`, not look for an `origin/main`.
+    #[test]
+    fn pull_uses_the_configured_upstream_when_names_differ() {
+        let (dir, repo) = make_repo();
+        set_upstream(&repo, "main", "origin", "refs/heads/master");
+        let src = resolve_pull_source(&repo, "origin", "main");
+        assert_eq!(src, ("master".to_owned(), "refs/remotes/origin/master".to_owned()));
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn pull_keeps_nested_upstream_branch_names() {
+        let (dir, repo) = make_repo();
+        set_upstream(&repo, "feat", "origin", "refs/heads/feature/x");
+        let src = resolve_pull_source(&repo, "origin", "feat");
+        assert_eq!(src, ("feature/x".to_owned(), "refs/remotes/origin/feature/x".to_owned()));
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn pull_falls_back_to_same_name_without_upstream() {
+        let (dir, repo) = make_repo();
+        let src = resolve_pull_source(&repo, "origin", "main");
+        assert_eq!(src, ("main".to_owned(), "refs/remotes/origin/main".to_owned()));
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    /// Pulling from a remote other than the branch's upstream remote: the
+    /// upstream config doesn't apply, so use the same-named branch there.
+    #[test]
+    fn pull_from_another_remote_ignores_the_upstream() {
+        let (dir, repo) = make_repo();
+        repo.remote("fork", "https://example.invalid/fork.git").unwrap();
+        set_upstream(&repo, "main", "origin", "refs/heads/master");
+        let src = resolve_pull_source(&repo, "fork", "main");
+        assert_eq!(src, ("main".to_owned(), "refs/remotes/fork/main".to_owned()));
+        let _ = std::fs::remove_dir_all(dir);
+    }
 }
