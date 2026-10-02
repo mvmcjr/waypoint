@@ -51,6 +51,9 @@ interface GroupProps {
   /** Local branch shorthand -> the worktree path it's held in. Used by the
    * Remotes group to detect when a remote's local counterpart is held. */
   heldLocalMap: Map<string, string>;
+  /** Local branch shorthand -> its remote-tracking counterpart (origin
+   * preferred). Used for the current branch's "Open in browser". */
+  remoteByLocal: Map<string, string>;
 }
 
 /** Local counterpart name of a remote shorthand, e.g. "origin/feature" -> "feature". */
@@ -59,7 +62,7 @@ function localNameOf(remoteShorthand: string): string {
   return slash !== -1 ? remoteShorthand.slice(slash + 1) : remoteShorthand;
 }
 
-function RefGroup({ label, refs, filter, onSelect, onRefAction, heldLocalMap }: GroupProps) {
+function RefGroup({ label, refs, filter, onSelect, onRefAction, heldLocalMap, remoteByLocal }: GroupProps) {
   const [open, setOpen] = useState(true);
   const { icon: Icon } = GROUP_META[label];
 
@@ -165,7 +168,7 @@ function RefGroup({ label, refs, filter, onSelect, onRefAction, heldLocalMap }: 
               </button>
             );
 
-            const menuContent = buildMenu(label, ref, onRefAction, heldPath);
+            const menuContent = buildMenu(label, ref, onRefAction, heldPath, remoteByLocal.get(ref.shorthand));
 
             if (!menuContent) {
               return <li key={ref.name}>{btn}</li>;
@@ -194,6 +197,8 @@ function buildMenu(
   ref: RefInfo,
   onRefAction?: (action: RefAction) => void,
   heldPath?: string,
+  /** Remote counterpart of a local branch — offered as "Open in browser" on the current branch. */
+  remoteRef?: string,
 ): React.ReactNode | null {
   if (!onRefAction) return null;
 
@@ -220,6 +225,11 @@ function buildMenu(
           <ContextMenuItem onClick={() => onRefAction({ kind: "push", branchName: ref.shorthand })}>
             Push…
           </ContextMenuItem>
+          {remoteRef && (
+            <ContextMenuItem onClick={() => onRefAction({ kind: "open-in-browser", remoteBranch: remoteRef })}>
+              Open in browser
+            </ContextMenuItem>
+          )}
           <ContextMenuSeparator />
           <ContextMenuItem onClick={() => onRefAction({ kind: "rename-branch", branchName: ref.shorthand })}>
             Rename…
@@ -302,6 +312,9 @@ function buildMenu(
         <ContextMenuItem onClick={() => navigator.clipboard.writeText(ref.shorthand)}>
           Copy branch name
         </ContextMenuItem>
+        <ContextMenuItem onClick={() => onRefAction({ kind: "open-in-browser", remoteBranch: ref.shorthand })}>
+          Open in browser
+        </ContextMenuItem>
       </>
     );
   }
@@ -356,12 +369,22 @@ export function RefTree({ refs, filter, onSelectRef, onRefAction, afterBranches 
     return map;
   }, [local]);
 
+  const remoteByLocal = useMemo(() => {
+    const map = new Map<string, string>();
+    for (const r of remote) {
+      if (r.shorthand.endsWith("/HEAD")) continue;
+      const name = localNameOf(r.shorthand);
+      if (!map.has(name) || r.shorthand.startsWith("origin/")) map.set(name, r.shorthand);
+    }
+    return map;
+  }, [remote]);
+
   return (
     <div className="overflow-auto flex-1 py-1">
-      <RefGroup label="Branches" refs={local}  filter={filter} onSelect={onSelectRef} onRefAction={onRefAction} heldLocalMap={heldLocalMap} />
+      <RefGroup label="Branches" refs={local}  filter={filter} onSelect={onSelectRef} onRefAction={onRefAction} heldLocalMap={heldLocalMap} remoteByLocal={remoteByLocal} />
       {afterBranches}
-      <RefGroup label="Remotes"  refs={remote} filter={filter} onSelect={onSelectRef} onRefAction={onRefAction} heldLocalMap={heldLocalMap} />
-      <RefGroup label="Tags"     refs={tags}   filter={filter} onSelect={onSelectRef} onRefAction={onRefAction} heldLocalMap={heldLocalMap} />
+      <RefGroup label="Remotes"  refs={remote} filter={filter} onSelect={onSelectRef} onRefAction={onRefAction} heldLocalMap={heldLocalMap} remoteByLocal={remoteByLocal} />
+      <RefGroup label="Tags"     refs={tags}   filter={filter} onSelect={onSelectRef} onRefAction={onRefAction} heldLocalMap={heldLocalMap} remoteByLocal={remoteByLocal} />
     </div>
   );
 }

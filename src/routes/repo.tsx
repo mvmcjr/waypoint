@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { getCurrentWindow } from "@tauri-apps/api/window";
 import { listen } from "@tauri-apps/api/event";
+import { openUrl } from "@tauri-apps/plugin-opener";
 import { useStore } from "@/lib/store";
 import { useCommitDiff, useCommits, useFileStatus, useHeadInfo, useRefreshRepo, useRefs, useRemotes, useRepoStatus } from "@/lib/queries";
 import { orderFiles } from "@/lib/fileTree";
@@ -43,6 +44,7 @@ import { usePluginRegistry, commandsForSurface } from "@/lib/plugins/registry";
 import { usePluginRunner } from "@/components/plugins/PluginRunnerProvider";
 import { useOpenWorktree, isRepoGoneError } from "@/lib/useOpenRepo";
 import { worktreeName } from "@/lib/utils";
+import { trackingBranchWebUrl } from "@/lib/remoteUrl";
 import { toast } from "sonner";
 import { Button } from "@/components/ui/button";
 
@@ -104,7 +106,7 @@ export function RepoView() {
   const [removedRepoId, setRemovedRepoId] = useState<string | null>(null);
   const isRemoved = removedRepoId !== null && removedRepoId === repoId;
   const { data: status, error: statusError } = useRepoStatus(repoId, { enabled: !isRemoved });
-  const { data: remotes } = useRemotes(repoId);
+  const { data: remotes, error: remotesError } = useRemotes(repoId);
   const { data: refs } = useRefs(repoId);
   const { data: fileStatus } = useFileStatus(repoId, { enabled: !isRemoved });
   const refresh = useRefreshRepo(repoId);
@@ -563,6 +565,18 @@ export function RepoView() {
       setDialog({ kind: "create-tag", oid: action.oid });
     } else if (action.kind === "open-worktree") {
       openWorktree(action.path);
+    } else if (action.kind === "open-in-browser") {
+      if (!remotes) {
+        if (remotesError) toast.error(`Couldn't read remotes: ${String(remotesError)}`);
+        else toast.info("Remotes are still loading — try again in a moment");
+        return;
+      }
+      const url = trackingBranchWebUrl(action.remoteBranch, remotes);
+      if (!url) {
+        toast.error(`No web page known for ${action.remoteBranch}'s remote`);
+        return;
+      }
+      openUrl(url).catch((e) => toast.error(`Couldn't open browser: ${String(e)}`));
     }
   }
 

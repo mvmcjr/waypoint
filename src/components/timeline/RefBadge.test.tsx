@@ -1,6 +1,6 @@
 import { describe, it, expect, vi } from "vitest";
 import { render, screen, fireEvent } from "@testing-library/react";
-import { RefBadge } from "./RefBadge";
+import { RefBadge, groupRefs } from "./RefBadge";
 
 vi.mock("@/lib/plugins/registry", () => ({
   usePluginRegistry: (selector?: (s: { plugins: unknown[] }) => unknown) =>
@@ -276,5 +276,52 @@ describe("RefBadge — worktree awareness", () => {
     expect(item).not.toHaveAttribute("aria-disabled", "true");
     fireEvent.click(item);
     expect(onAction).toHaveBeenCalledWith({ kind: "rename-branch", branchName: "main" });
+  });
+});
+
+describe("RefBadge — open in browser", () => {
+  it("remote-only badge menu dispatches open-in-browser", () => {
+    const { onAction } = renderBadge({ name: "feat", trackingName: "origin/feat", hasLocal: false, hasRemote: true });
+    fireEvent.contextMenu(screen.getByTitle("feat"));
+    fireEvent.click(screen.getByRole("menuitem", { name: "Open in browser" }));
+    expect(onAction).toHaveBeenCalledWith({ kind: "open-in-browser", remoteBranch: "origin/feat" });
+  });
+
+  it("merged local+remote badge menu dispatches open-in-browser for its remote", () => {
+    const { onAction } = renderBadge({ name: "main", remoteRef: "origin/main", hasLocal: true, hasRemote: true });
+    fireEvent.contextMenu(screen.getByTitle("main"));
+    fireEvent.click(screen.getByRole("menuitem", { name: "Open in browser" }));
+    expect(onAction).toHaveBeenCalledWith({ kind: "open-in-browser", remoteBranch: "origin/main" });
+  });
+
+  it("local-only and tag badges have no Open in browser item", () => {
+    const { rerender } = renderBadge({ name: "main", hasLocal: true, hasRemote: false });
+    fireEvent.contextMenu(screen.getByTitle("main"));
+    expect(screen.queryByRole("menuitem", { name: "Open in browser" })).toBeNull();
+
+    rerenderBadge(rerender, { name: "v1", isTag: true, hasLocal: true, hasRemote: true });
+    fireEvent.contextMenu(screen.getByTitle("v1"));
+    expect(screen.queryByRole("menuitem", { name: "Open in browser" })).toBeNull();
+  });
+});
+
+describe("groupRefs — remoteRef", () => {
+  it("sets remoteRef only on merged local+remote groups, preferring origin", () => {
+    const groups = groupRefs(
+      ["main", "upstream/main", "origin/main", "origin/feat", "v1"],
+      ["main"],
+      ["upstream/main", "origin/main", "origin/feat"],
+      null,
+    );
+    expect(groups.find((g) => g.name === "main")?.remoteRef).toBe("origin/main");
+    // Remote-only badges already carry their ref as trackingName.
+    expect(groups.find((g) => g.name === "feat")?.trackingName).toBe("origin/feat");
+    expect(groups.find((g) => g.name === "feat")?.remoteRef).toBeUndefined();
+    expect(groups.find((g) => g.name === "v1")?.remoteRef).toBeUndefined();
+  });
+
+  it("leaves remoteRef unset for a local branch with no remote at this commit", () => {
+    const [g] = groupRefs(["main"], ["main"], [], null);
+    expect(g.remoteRef).toBeUndefined();
   });
 });

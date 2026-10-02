@@ -206,3 +206,36 @@ describe("RefTree — worktree awareness", () => {
     expect(onRefAction).not.toHaveBeenCalled();
   });
 });
+
+describe("RefTree — open in browser", () => {
+  it("remote branch menu dispatches open-in-browser with the tracking name", () => {
+    const { onRefAction } = renderTree([REMOTE]);
+    fireEvent.contextMenu(screen.getByText("origin/main"));
+    fireEvent.click(screen.getByRole("menuitem", { name: "Open in browser" }));
+    expect(onRefAction).toHaveBeenCalledWith({ kind: "open-in-browser", remoteBranch: "origin/main" });
+  });
+
+  it("current branch menu dispatches open-in-browser for its remote counterpart, preferring origin", () => {
+    const CURRENT = { ...NORMAL, is_head: true };
+    const { onRefAction } = renderTree([
+      CURRENT,
+      { ...REMOTE, name: "refs/remotes/fork/feature", shorthand: "fork/feature" },
+      { ...REMOTE, name: "refs/remotes/origin/feature", shorthand: "origin/feature" },
+    ]);
+    fireEvent.contextMenu(screen.getByText(CURRENT.shorthand));
+    fireEvent.click(screen.getByRole("menuitem", { name: "Open in browser" }));
+    expect(onRefAction).toHaveBeenCalledWith({ kind: "open-in-browser", remoteBranch: "origin/feature" });
+  });
+
+  it("current branch menu has no Open in browser item when the branch isn't pushed", () => {
+    renderTree([{ ...NORMAL, is_head: true }, REMOTE]);
+    fireEvent.contextMenu(screen.getByText(NORMAL.shorthand));
+    expect(screen.queryByRole("menuitem", { name: "Open in browser" })).toBeNull();
+  });
+
+  it("local branch menu has no Open in browser item", () => {
+    renderTree([NORMAL]);
+    fireEvent.contextMenu(screen.getByText(NORMAL.shorthand));
+    expect(screen.queryByRole("menuitem", { name: "Open in browser" })).toBeNull();
+  });
+});

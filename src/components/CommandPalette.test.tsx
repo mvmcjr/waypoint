@@ -5,12 +5,21 @@ import { ipc } from "@/lib/ipc";
 import { useStore } from "@/lib/store";
 import { useOpenRepo, useOpenWorktree } from "@/lib/useOpenRepo";
 import { getRecentRepos, addManyToRecentRepos } from "@/lib/recentRepos";
+import { openUrl } from "@tauri-apps/plugin-opener";
+import { useRemotes, useHeadInfo, useRefs } from "@/lib/queries";
+import { commandsForSurface } from "@/lib/plugins/registry";
 
 vi.mock("@/lib/ipc", () => ({
   ipc: {
     scanForGitRepos: vi.fn(),
     listWorktrees: vi.fn(),
   },
+}));
+
+vi.mock("@/lib/queries", () => ({
+  useRemotes: vi.fn(() => ({ data: undefined })),
+  useHeadInfo: vi.fn(() => ({ data: undefined })),
+  useRefs: vi.fn(() => ({ data: undefined })),
 }));
 
 vi.mock("@/lib/useOpenRepo", () => ({
@@ -29,12 +38,13 @@ vi.mock("@tauri-apps/plugin-dialog", () => ({
 
 vi.mock("@tauri-apps/plugin-opener", () => ({
   revealItemInDir: vi.fn(),
+  openUrl: vi.fn(),
 }));
 
 vi.mock("@/lib/plugins/registry", () => ({
   usePluginRegistry: (selector?: (s: { plugins: unknown[] }) => unknown) =>
     selector ? selector({ plugins: [] }) : { plugins: [] },
-  commandsForSurface: () => [],
+  commandsForSurface: vi.fn(() => []),
 }));
 
 vi.mock("@/components/plugins/PluginRunnerProvider", () => ({
@@ -184,5 +194,147 @@ describe("CommandPalette", () => {
       expect(screen.getByText("repoB-agent")).toBeInTheDocument();
       expect(screen.queryByText("repoA-agent")).toBeNull();
     });
+  });
+});
+
+describe("CommandPalette — open in browser", () => {
+  const REPO = "E:\\repo";
+  const remoteRef = (shorthand: string) => ({
+    name: `refs/remotes/${shorthand}`, shorthand, kind: "remote_branch", target_oid: "a",
+    is_head: false, is_pushed: false, worktree_path: null,
+  });
+
+  function setRepoData({
+    remotes = [{ name: "origin", url: "git@github.com:me/repo.git" }],
+    branch = "feat/x" as string | null,
+    refs = [remoteRef("origin/feat/x")],
+  } = {}) {
+    vi.mocked(useRemotes).mockReturnValue({ data: remotes } as any);
+    vi.mocked(useHeadInfo).mockReturnValue({ data: { oid: "a", branch } } as any);
+    vi.mocked(useRefs).mockReturnValue({ data: refs } as any);
+  }
+
+  function commandLabels() {
+    return screen.getAllByRole("button").map((b) => b.textContent);
+  }
+
+  beforeEach(() => {
+    vi.clearAllMocks();
+    vi.mocked(getRecentRepos).mockResolvedValue([]);
+    vi.mocked(useOpenRepo).mockReturnValue(vi.fn());
+    vi.mocked(useOpenWorktree).mockReturnValue(vi.fn());
+    vi.mocked(openUrl).mockResolvedValue(undefined);
+    vi.mocked(useRemotes).mockReturnValue({ data: undefined } as any);
+    vi.mocked(useHeadInfo).mockReturnValue({ data: undefined } as any);
+    vi.mocked(useRefs).mockReturnValue({ data: undefined } as any);
+    vi.mocked(commandsForSurface).mockReturnValue([]);
+    useStore.setState({ tabs: [{ id: REPO, path: REPO, label: "repo", mainPath: null }], activeTabId: REPO } as any);
+  });
+
+  it("lists browser commands after plugin commands, so their async arrival can't shift the selection", () => {
+    vi.mocked(commandsForSurface).mockReturnValue([
+      { pluginId: "p", command: { id: "c", title: "Plugin Thing" } },
+    ] as any);
+    setRepoData();
+    render(<CommandPalette open onClose={vi.fn()} />);
+    const labels = commandLabels();
+    expect(labels.indexOf("Open Current Branch in Browser")).toBeGreaterThan(labels.indexOf("Plugin Thing"));
+    expect(labels.indexOf("Open Remote in Browser: origin")).toBeGreaterThan(labels.indexOf("Plugin Thing"));
+  });
+
+  it("prefers a remote with a web page over a local origin for the current branch", async () => {
+    setRepoData({
+      remotes: [
+        { name: "origin", url: "/srv/mirror/repo.git" },
+        { name: "github", url: "git@github.com:me/repo.git" },
+      ],
+      refs: [remoteRef("origin/feat/x"), remoteRef("github/feat/x")],
+    });
+    render(<CommandPalette open onClose={vi.fn()} />);
+    fireEvent.click(screen.getByRole("button", { name: "Open Current Branch in Browser" }));
+    expect(openUrl).toHaveBeenCalledWith("https://github.com/me/repo/tree/feat/x");
+  });
+
+  it("says when the current branch is only on a remote without a web page", () => {
+    setRepoData({
+      remotes: [
+        { name: "origin", url: "/srv/mirror/repo.git" },
+        { name: "github", url: "git@github.com:me/repo.git" },
+      ],
+      refs: [remoteRef("origin/feat/x")],
+    });
+    render(<CommandPalette open onClose={vi.fn()} />);
+    fireEvent.click(screen.getByRole("button", { name: "Open Current Branch in Browser" }));
+    expect(screen.getByText("No web page known for origin/feat/x's remote")).toBeInTheDocument();
+    expect(openUrl).not.toHaveBeenCalled();
+  });
+
+  it("typing after a message brings the command list back", () => {
+    setRepoData({ refs: [] });
+    render(<CommandPalette open onClose={vi.fn()} />);
+    fireEvent.click(screen.getByRole("button", { name: "Open Current Branch in Browser" }));
+    expect(screen.getByText("feat/x isn't on any remote yet")).toBeInTheDocument();
+
+    fireEvent.change(screen.getByPlaceholderText("Type a command…"), { target: { value: "remote" } });
+    expect(screen.queryByText("feat/x isn't on any remote yet")).toBeNull();
+    expect(screen.getByRole("button", { name: "Open Remote in Browser: origin" })).toBeInTheDocument();
+  });
+
+  it("appends one command per remote with a web page, after the built-ins, and opens it", async () => {
+    setRepoData({
+      remotes: [
+        { name: "origin", url: "git@github.com:me/repo.git" },
+        { name: "backup", url: "/srv/git/repo.git" },
+      ],
+    });
+    const onClose = vi.fn();
+    render(<CommandPalette open onClose={onClose} />);
+    expect(useRemotes).toHaveBeenCalledWith(REPO);
+
+    const labels = commandLabels();
+    const settingsIdx = labels.indexOf("Preferences: Open Settings");
+    expect(labels.indexOf("Open Remote in Browser: origin")).toBeGreaterThan(settingsIdx);
+    expect(labels.some((l) => l?.includes("backup"))).toBe(false);
+
+    fireEvent.click(screen.getByRole("button", { name: "Open Remote in Browser: origin" }));
+    expect(openUrl).toHaveBeenCalledWith("https://github.com/me/repo");
+    await waitFor(() => expect(onClose).toHaveBeenCalled());
+  });
+
+  it("opens the current branch's page on its remote", async () => {
+    setRepoData();
+    const onClose = vi.fn();
+    render(<CommandPalette open onClose={onClose} />);
+    fireEvent.click(screen.getByRole("button", { name: "Open Current Branch in Browser" }));
+    expect(openUrl).toHaveBeenCalledWith("https://github.com/me/repo/tree/feat/x");
+    await waitFor(() => expect(onClose).toHaveBeenCalled());
+  });
+
+  it("explains instead of opening when the current branch isn't pushed", () => {
+    setRepoData({ refs: [remoteRef("origin/main")] });
+    const onClose = vi.fn();
+    render(<CommandPalette open onClose={onClose} />);
+    fireEvent.click(screen.getByRole("button", { name: "Open Current Branch in Browser" }));
+    expect(screen.getByText("feat/x isn't on any remote yet")).toBeInTheDocument();
+    expect(openUrl).not.toHaveBeenCalled();
+    expect(onClose).not.toHaveBeenCalled();
+  });
+
+  it("hides the current-branch command on a detached HEAD", () => {
+    setRepoData({ branch: null });
+    render(<CommandPalette open onClose={vi.fn()} />);
+    expect(screen.queryByRole("button", { name: "Open Current Branch in Browser" })).toBeNull();
+  });
+
+  it("shows no browser commands while remotes load or without an active repo", () => {
+    vi.mocked(useHeadInfo).mockReturnValue({ data: { oid: "a", branch: "main" } } as any);
+    const { unmount } = render(<CommandPalette open onClose={vi.fn()} />);
+    expect(screen.queryByRole("button", { name: /in Browser/ })).toBeNull();
+    unmount();
+
+    setRepoData();
+    useStore.setState({ tabs: [], activeTabId: null } as any);
+    render(<CommandPalette open onClose={vi.fn()} />);
+    expect(useRemotes).toHaveBeenLastCalledWith(null);
   });
 });

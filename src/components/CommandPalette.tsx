@@ -1,10 +1,12 @@
 import { useState, useEffect, useRef, useCallback } from "react";
 import { Dialog as DialogPrimitive } from "@base-ui/react/dialog";
-import { FolderOpen, FolderGit2, Search, ArrowLeft, ExternalLink, Download, Settings, Puzzle } from "lucide-react";
+import { FolderOpen, FolderGit2, Search, ArrowLeft, ExternalLink, Download, Settings, Puzzle, Globe } from "lucide-react";
 import { open as openDialog } from "@tauri-apps/plugin-dialog";
-import { revealItemInDir } from "@tauri-apps/plugin-opener";
+import { revealItemInDir, openUrl } from "@tauri-apps/plugin-opener";
 import { cn, repoLabel, truncatePath, explorerName } from "@/lib/utils";
 import { ipc, type WorktreeInfo } from "@/lib/ipc";
+import { useHeadInfo, useRefs, useRemotes } from "@/lib/queries";
+import { remoteWebUrl, trackingBranchWebUrl, trackingRefForBranch } from "@/lib/remoteUrl";
 import { useStore } from "@/lib/store";
 import { useOpenRepo, useOpenWorktree } from "@/lib/useOpenRepo";
 import { getRecentRepos, addManyToRecentRepos } from "@/lib/recentRepos";
@@ -45,6 +47,11 @@ export function CommandPalette({ open, onClose }: Props) {
   const openWorktreeInTab = useOpenWorktree(activeTab?.id ?? null);
   const pluginList = usePluginRegistry((s) => s.plugins);
   const runner = usePluginRunner();
+  // Cached repo data (shared with the repo view) backs the "in Browser" commands.
+  const repoId = activeTab?.id ?? null;
+  const { data: remotes } = useRemotes(repoId);
+  const { data: head } = useHeadInfo(repoId);
+  const { data: refs } = useRefs(repoId);
 
   useEffect(() => {
     if (open) {
@@ -129,6 +136,51 @@ export function CommandPalette({ open, onClose }: Props) {
     onClose();
   }
 
+  async function openRemoteInBrowser(url: string) {
+    try {
+      await openUrl(url);
+      onClose();
+    } catch (e) {
+      setFeedback(`Couldn't open browser: ${String(e)}`);
+    }
+  }
+
+  function openCurrentBranchInBrowser(branch: string) {
+    const remoteBranches = (refs ?? []).filter((r) => r.kind === "remote_branch").map((r) => r.shorthand);
+    // Only remotes with a web page are candidates, so a local-path origin
+    // doesn't shadow e.g. a GitHub remote holding the same branch.
+    const webRef = trackingRefForBranch(branch, remoteBranches, webRemotes.map((r) => r.name));
+    const url = webRef && trackingBranchWebUrl(webRef, remotes ?? []);
+    if (!url) {
+      const anyRef = trackingRefForBranch(branch, remoteBranches, (remotes ?? []).map((r) => r.name));
+      setFeedback(anyRef ? `No web page known for ${anyRef}'s remote` : `${branch} isn't on any remote yet`);
+      return;
+    }
+    return openRemoteInBrowser(url);
+  }
+
+  const webRemotes = (remotes ?? []).flatMap((r) => {
+    const url = remoteWebUrl(r.url);
+    return url ? [{ name: r.name, url }] : [];
+  });
+  const currentBranch = head?.branch;
+  const browserCommands: CommandDef[] = [
+    ...(currentBranch && webRemotes.length
+      ? [{
+          id: "open-current-branch",
+          label: "Open Current Branch in Browser",
+          icon: Globe,
+          execute: () => openCurrentBranchInBrowser(currentBranch),
+        }]
+      : []),
+    ...webRemotes.map((r) => ({
+      id: `open-remote:${r.name}`,
+      label: `Open Remote in Browser: ${r.name}`,
+      icon: Globe,
+      execute: () => openRemoteInBrowser(r.url),
+    })),
+  ];
+
   async function scanAndLoad() {
     const picked = await openDialog({
       directory: true,
@@ -206,7 +258,9 @@ export function CommandPalette({ open, onClose }: Props) {
     })
   );
 
-  const filteredCommands = [...commands, ...pluginCommands].filter(
+  // Browser commands go last: they depend on async repo data, and items
+  // arriving above others would shift the keyboard selection.
+  const filteredCommands = [...commands, ...pluginCommands, ...browserCommands].filter(
     (c) => !query || c.label.toLowerCase().includes(query.toLowerCase())
   );
 
@@ -291,7 +345,11 @@ export function CommandPalette({ open, onClose }: Props) {
             <input
               ref={inputRef}
               value={query}
-              onChange={(e) => setQuery(e.target.value)}
+              onChange={(e) => {
+                setQuery(e.target.value);
+                // A message replaces the list; typing brings the list back.
+                setFeedback(null);
+              }}
               placeholder={
                 mode === "commands"
                   ? "Type a command…"

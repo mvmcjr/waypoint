@@ -24,12 +24,20 @@ export type RefAction =
   | { kind: "delete-tag"; tagName: string }
   | { kind: "create-tag"; oid: string }
   /** Open the branch's other worktree as a tab (activates it if already open). */
-  | { kind: "open-worktree"; path: string };
+  | { kind: "open-worktree"; path: string }
+  /** Open a remote-tracking branch (e.g. "origin/feature") on its hosting service's website. */
+  | { kind: "open-in-browser"; remoteBranch: string };
 
 export interface RefGroup {
   name: string;
   /** Full remote tracking name (e.g. "origin/feature") — only set for remote-only branches. */
   trackingName?: string;
+  /**
+   * Remote side of a local branch badge (e.g. "origin/feature") when a
+   * matching remote-tracking branch sits on the same commit, origin preferred.
+   * Remote-only badges use `trackingName` instead.
+   */
+  remoteRef?: string;
   hasLocal: boolean;
   hasRemote: boolean;
   isHead: boolean;
@@ -54,7 +62,8 @@ export function groupRefs(
       return slash !== -1 && r.slice(slash + 1) === local;
     });
     matched.forEach((r) => covered.add(r));
-    groups.push({ name: local, hasLocal: true, hasRemote: matched.length > 0, isHead: local === headBranch, isTag: false });
+    const remoteRef = matched.find((r) => r.startsWith("origin/")) ?? matched[0];
+    groups.push({ name: local, remoteRef, hasLocal: true, hasRemote: matched.length > 0, isHead: local === headBranch, isTag: false });
   }
 
   // Remote-only branches (no corresponding local branch)
@@ -106,7 +115,7 @@ interface Props extends RefGroup {
 }
 
 function BadgeMenu({
-  name, trackingName, hasLocal, isHead, isTag,
+  name, trackingName, remoteRef, hasLocal, isHead, isTag,
   oid, onAction, onCommitAction, commitSummary, children, worktreePath,
 }: Props & { children: React.ReactNode }) {
   const act = onAction;
@@ -115,6 +124,8 @@ function BadgeMenu({
   // another worktree — CommitRow resolves worktreePath by local branch name
   // for both, so a remote-only badge can be "held" too.
   const isElsewhere = !isTag && !!worktreePath;
+  // Remote-tracking branch this badge shows, if any — for "Open in browser".
+  const remoteBranch = isTag ? undefined : trackingName ?? remoteRef;
 
   // Build the checkout item scoped to this specific badge's branch/tag.
   // Held branches render their own "Open worktree" item first instead (below),
@@ -206,6 +217,17 @@ function BadgeMenu({
             )
           : null}
 
+        {/* ── Badge-specific: open on the remote's website (sits under
+            Push… for local badges, which already opened a section) ──── */}
+        {remoteBranch && act && (
+          <>
+            {!hasLocal && <ContextMenuSeparator />}
+            <ContextMenuItem onClick={() => act({ kind: "open-in-browser", remoteBranch })}>
+              Open in browser
+            </ContextMenuItem>
+          </>
+        )}
+
         {/* ── Badge-specific: delete ────────────────────────────── */}
         {isTag && act && (
           <>
@@ -240,7 +262,7 @@ function BadgeMenu({
   );
 }
 
-export function RefBadge({ name, trackingName, hasLocal, hasRemote, isHead, isTag, oid, onAction, onCommitAction, commitSummary, maxWidth, worktreePath }: Props) {
+export function RefBadge({ name, trackingName, remoteRef, hasLocal, hasRemote, isHead, isTag, oid, onAction, onCommitAction, commitSummary, maxWidth, worktreePath }: Props) {
   const base = "inline-flex items-center gap-0.5 px-1.5 py-px rounded text-[10px] font-mono min-w-0";
   const width = maxWidth ?? 124;
 
@@ -318,7 +340,7 @@ export function RefBadge({ name, trackingName, hasLocal, hasRemote, isHead, isTa
 
   return (
     <BadgeMenu
-      name={name} trackingName={trackingName}
+      name={name} trackingName={trackingName} remoteRef={remoteRef}
       hasLocal={hasLocal} hasRemote={hasRemote}
       isHead={effectiveHead} isTag={isTag}
       oid={oid} onAction={onAction}
