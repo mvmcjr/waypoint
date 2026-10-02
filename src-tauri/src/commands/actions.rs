@@ -15,51 +15,34 @@ fn run_rebase_to_completion(
     sig: &git2::Signature,
     conflict_msg: &str,
 ) -> Result<()> {
-    run_rebase_with(repo, rebase, conflict_msg, |rebase, op_id| replay_operation(repo, rebase, op_id, sig))
-}
-
-/// Commit the operation `op_id` that `rebase` just applied. A commit that
-/// declares an encoding would otherwise be replayed by libgit2 with its
-/// original `encoding` header and message bytes next to our UTF-8 committer —
-/// a mixed object — so those are replayed as UTF-8 (the author is re-encoded
-/// when possible, see `CommitDecoder::utf8_signature`).
-fn replay_operation(
-    repo: &git2::Repository,
-    rebase: &mut git2::Rebase,
-    op_id: git2::Oid,
-    sig: &git2::Signature,
-) -> Result<()> {
-    let original = repo.find_commit(op_id)?;
-    let dec = CommitDecoder::new(&original);
-    if dec.is_declared() {
-        let author = dec.utf8_signature(&original.author());
-        let message = dec.text(original.message_bytes());
-        rebase.commit(author.as_ref(), sig, Some(&message))?;
-    } else {
-        rebase.commit(None, sig, None)?;
-    }
-    Ok(())
+    run_rebase_with(repo, rebase, conflict_msg, |rebase| {
+        // Like `git rebase`: the original commit's author, message and
+        // `encoding` header are carried over; only the committer changes.
+        rebase.commit(None, sig, None).map(|_| ())
+    })
 }
 
 /// The replay loop. `step` commits one applied operation; ANY error from it,
 /// from libgit2, or a conflict aborts the rebase before returning, so a
 /// failure never leaves `.git/rebase-merge`, a detached HEAD and an unmoved
-/// branch behind.
+/// branch behind. The exception is `ErrorCode::Applied` (the operation's patch
+/// is already in the target, e.g. an empty commit): git skips those, so no
+/// commit is made for that operation and the replay continues.
 fn run_rebase_with(
     repo: &git2::Repository,
     mut rebase: git2::Rebase,
     conflict_msg: &str,
-    mut step: impl FnMut(&mut git2::Rebase, git2::Oid) -> Result<()>,
+    mut step: impl FnMut(&mut git2::Rebase) -> std::result::Result<(), git2::Error>,
 ) -> Result<()> {
     loop {
-        let op_id = match rebase.next() {
+        match rebase.next() {
             None => break,
             Some(Err(e)) => {
                 let _ = rebase.abort();
                 return Err(Error::Git(e));
             }
-            Some(Ok(op)) => op.id(),
-        };
+            Some(Ok(_)) => {}
+        }
         let has_conflicts = match repo.index() {
             Ok(index) => index.has_conflicts(),
             Err(e) => {
@@ -71,9 +54,13 @@ fn run_rebase_with(
             let _ = rebase.abort();
             return Err(Error::RebaseConflict(conflict_msg.into()));
         }
-        if let Err(e) = step(&mut rebase, op_id) {
-            let _ = rebase.abort();
-            return Err(e);
+        match step(&mut rebase) {
+            Ok(()) => {}
+            Err(e) if e.code() == git2::ErrorCode::Applied => {}
+            Err(e) => {
+                let _ = rebase.abort();
+                return Err(Error::Git(e));
+            }
         }
     }
     if let Err(e) = rebase.finish(None) {
@@ -654,11 +641,9 @@ fn reword_in(repo: &git2::Repository, oid: &str, message: &str) -> Result<()> {
         .map(|i| target.parent(i))
         .collect::<std::result::Result<_, _>>()?;
     let parent_refs: Vec<&git2::Commit> = parents.iter().collect();
-    // The rebuilt commit has no `encoding` header (UTF-8), so a kept author
-    // from a declared-encoding commit must be re-encoded; otherwise keep it as is.
-    let orig_author = target.author();
-    let author = CommitDecoder::new(&target).utf8_signature(&orig_author);
-    let new_oid = repo.commit(None, author.as_ref().unwrap_or(&orig_author), &sig, msg, &tree, &parent_refs)?;
+    // Like `git commit --amend`: the message is UTF-8 with no `encoding`
+    // header and the author is copied raw (byte-identical).
+    let new_oid = repo.commit(None, &target.author(), &sig, msg, &tree, &parent_refs)?;
 
     // Target was HEAD — no descendants to replay, just move the branch tip.
     if target_oid == head_oid {
@@ -887,30 +872,30 @@ mod tests {
     use git2::Repository;
     use std::path::{Path, PathBuf};
 
-    fn assert_utf8_commit(repo: &Repository, oid: git2::Oid, msg: &str) {
+    /// The reworded commit is plain UTF-8 (no `encoding` header) and its
+    /// author bytes are exactly the original's.
+    fn assert_reworded_like_git(repo: &Repository, oid: git2::Oid, msg: &str) {
         let c = repo.find_commit(oid).unwrap();
-        // The strict &str accessors only succeed on valid UTF-8 bytes.
-        assert_eq!(c.author().name(), Ok("André"));
+        assert_eq!(c.author().name_bytes(), b"Andr\xe9");
+        assert_eq!(c.author().when().seconds(), 1_000_000_000);
         assert_eq!(c.message().unwrap().trim(), msg);
-        let dec = CommitDecoder::new(&c);
-        assert_eq!(dec.text(c.author().name_bytes()), "André");
-        assert_eq!(dec.text(c.summary_bytes()), msg);
-        assert!(!dec.text(c.message_bytes()).contains('\u{FFFD}'));
+        let raw = crate::repo::test_support::raw_object(repo, oid);
+        assert!(!String::from_utf8_lossy(&raw).contains("\nencoding "));
     }
 
     #[test]
-    fn reword_head_commit_keeps_author_as_utf8() {
+    fn reword_head_commit_keeps_author_raw() {
         let (dir, repo) = crate::repo::test_support::make_repo_with_commit();
         let target = crate::repo::test_support::push_latin1_commit(&repo);
         reword_in(&repo, &target.to_string(), "Fixé le bug").unwrap();
         let new = repo.head().unwrap().peel_to_commit().unwrap();
         assert_ne!(new.id(), target);
-        assert_utf8_commit(&repo, new.id(), "Fixé le bug");
+        assert_reworded_like_git(&repo, new.id(), "Fixé le bug");
         let _ = std::fs::remove_dir_all(dir);
     }
 
     #[test]
-    fn reword_interior_commit_keeps_author_as_utf8_through_replay() {
+    fn reword_interior_commit_keeps_author_raw_through_replay() {
         let (dir, repo) = crate::repo::test_support::make_repo_with_commit();
         let target = crate::repo::test_support::push_latin1_commit(&repo);
         // A child commit on top so the reworded one is replayed under.
@@ -926,7 +911,7 @@ mod tests {
         reword_in(&repo, &target.to_string(), "Fixé le bug").unwrap();
         let child = repo.head().unwrap().peel_to_commit().unwrap();
         assert_eq!(child.summary(), Ok(Some("child")));
-        assert_utf8_commit(&repo, child.parent_id(0).unwrap(), "Fixé le bug");
+        assert_reworded_like_git(&repo, child.parent_id(0).unwrap(), "Fixé le bug");
         let _ = std::fs::remove_dir_all(dir);
     }
 
@@ -949,7 +934,7 @@ mod tests {
     }
 
     #[test]
-    fn interior_reword_over_declared_encoding_with_empty_signature_succeeds() {
+    fn interior_reword_over_empty_signature_descendant_succeeds() {
         use crate::repo::test_support::*;
         let (dir, repo) = make_repo_with_commit();
         let t = b"T <t@example.com> 1600000000 +0000";
@@ -961,9 +946,32 @@ mod tests {
         assert_clean_on_branch(&repo, &branch_ref);
         let c = repo.head().unwrap().peel_to_commit().unwrap();
         assert_ne!(c.id(), desc);
-        assert_eq!(c.message().unwrap().trim(), "Corrigé");
         let raw = String::from_utf8_lossy(&raw_object(&repo, c.id())).into_owned();
         assert!(raw.contains("\nauthor  <> 1000000000 +0000\n"), "{raw}");
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    /// An empty commit (tree equals its parent's) in the replayed range makes
+    /// libgit2 return `Applied`; git skips it, so must we.
+    #[test]
+    fn interior_reword_skips_an_empty_descendant() {
+        use crate::repo::test_support::*;
+        let (dir, repo) = make_repo_with_commit();
+        let t = b"T <t@example.com> 1600000000 +0000";
+        let target = push_raw_commit(&repo, "b.txt", t, t, b"", b"target\n");
+        let head = repo.head().unwrap().peel_to_commit().unwrap();
+        let sig = repo.signature().unwrap();
+        let empty = repo.commit(None, &sig, &sig, "empty", &head.tree().unwrap(), &[&head]).unwrap();
+        let name = repo.head().unwrap().name().unwrap().to_owned();
+        repo.reference(&name, empty, true, "test").unwrap();
+        let top = push_raw_commit(&repo, "c.txt", t, t, b"", b"top\n");
+        reword_in(&repo, &target.to_string(), "reworded").unwrap();
+        assert_clean_on_branch(&repo, &name);
+        let tip = repo.head().unwrap().peel_to_commit().unwrap();
+        assert_ne!(tip.id(), top);
+        assert_eq!(tip.summary(), Ok(Some("top")));
+        let mid = tip.parent(0).unwrap();
+        assert_eq!(mid.summary(), Ok(Some("reworded")));
         let _ = std::fs::remove_dir_all(dir);
     }
 
@@ -978,15 +986,15 @@ mod tests {
         let head = repo.reference_to_annotated_commit(&repo.head().unwrap()).unwrap();
         let upstream = repo.find_annotated_commit(target).unwrap();
         let rebase = repo.rebase(Some(&head), Some(&upstream), None, None).unwrap();
-        let err = run_rebase_with(&repo, rebase, "conflict", |_, _| Err(Error::InvalidArg("boom".into())));
-        assert!(matches!(err, Err(Error::InvalidArg(_))));
+        let err = run_rebase_with(&repo, rebase, "conflict", |_| Err(git2::Error::from_str("boom")));
+        assert!(matches!(err, Err(Error::Git(_))));
         assert_clean_on_branch(&repo, &branch_ref);
         assert_eq!(repo.head().unwrap().peel_to_commit().unwrap().id(), tip);
         let _ = std::fs::remove_dir_all(dir);
     }
 
     #[test]
-    fn interior_reword_replays_latin1_descendant_as_consistent_utf8() {
+    fn interior_reword_replays_latin1_descendant_like_git() {
         use crate::repo::test_support::*;
         let (dir, repo) = make_repo_with_commit();
         let t = b"T <t@example.com> 1600000000 +0000";
@@ -996,11 +1004,11 @@ mod tests {
         reword_in(&repo, &target.to_string(), "reworded").unwrap();
         let c = repo.head().unwrap().peel_to_commit().unwrap();
         let raw = raw_object(&repo, c.id());
-        assert!(!String::from_utf8_lossy(&raw).contains("ISO-8859-1"));
-        assert_eq!(c.author().name(), Ok("André"));
+        assert!(String::from_utf8_lossy(&raw).contains("\nencoding ISO-8859-1\n"));
+        assert_eq!(c.author().name_bytes(), b"Andr\xe9");
         assert_eq!(c.author().when().seconds(), 1_000_000_000);
         assert_eq!(c.committer().name(), Ok("Test User"));
-        assert_eq!(c.message().unwrap().trim(), "Corrigé le bug");
+        assert_eq!(c.message_bytes(), b"Corrig\xe9 le bug\n");
         let _ = std::fs::remove_dir_all(dir);
     }
 

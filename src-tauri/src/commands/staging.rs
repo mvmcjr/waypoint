@@ -3,7 +3,6 @@ use serde::Serialize;
 use tauri::State;
 
 use crate::error::{Error, Result};
-use crate::git_text::CommitDecoder;
 use crate::repo::RepoState;
 
 #[derive(Debug, Serialize)]
@@ -474,35 +473,34 @@ pub fn amend_commit(repo_id: String, message: String, state: State<RepoState>) -
     amend_in(repo, &message)
 }
 
-/// Core of `amend_commit`. The amended message is always UTF-8. When the
-/// original has an `encoding` header (usable or not), the amended commit gets
-/// an explicit UTF-8 `encoding` header instead of inheriting the original, and
-/// the kept author is re-encoded when the declared encoding is usable (and
-/// kept byte-for-byte when it can't be). A commit without an `encoding` header
-/// stays header-less, as git writes it.
+/// Core of `amend_commit`, matching `git commit --amend`: the new message is
+/// written as UTF-8 with no `encoding` header, and the original author is
+/// copied raw (byte-identical, even when empty or non-UTF-8). libgit2's
+/// `Commit::amend` would inherit or write an `encoding` header, so the commit
+/// is built with `repo.commit` over the original's parents and the branch (or
+/// detached HEAD) is moved to it.
 fn amend_in(repo: &git2::Repository, message: &str) -> Result<()> {
-    let head_commit = repo.head()?.peel_to_commit()?;
-    let dec = CommitDecoder::new(&head_commit);
-    let author = dec.utf8_signature(&head_commit.author());
-    // Any `encoding` header on the original (usable or not, e.g. UTF-16 or an
-    // unknown label) would be copied next to our UTF-8 message, so override it.
-    let encoding = head_commit.message_encoding().ok().flatten().is_some().then_some("UTF-8");
+    let head = repo.head()?;
+    let head_commit = head.peel_to_commit()?;
+    let branch_ref = head.is_branch().then(|| head.name().map(str::to_owned)).transpose()?;
 
     let mut index = repo.index()?;
     let tree_oid = index.write_tree()?;
     let tree = repo.find_tree(tree_oid)?;
 
     let sig = repo.signature()?;
+    let parents: Vec<git2::Commit> = (0..head_commit.parent_count())
+        .map(|i| head_commit.parent(i))
+        .collect::<std::result::Result<_, _>>()?;
+    let parent_refs: Vec<&git2::Commit> = parents.iter().collect();
+    let new_oid = repo.commit(None, &head_commit.author(), &sig, message, &tree, &parent_refs)?;
 
-    head_commit.amend(
-        Some("HEAD"),
-        author.as_ref(), // None keeps the original author as-is
-        Some(&sig),      // update committer to current user
-        encoding,        // overrides any inherited `encoding` header
-        Some(message),
-        Some(&tree),
-    )?;
-
+    match branch_ref {
+        Some(name) => {
+            repo.reference(&name, new_oid, true, "commit (amend)")?;
+        }
+        None => repo.set_head_detached(new_oid)?,
+    }
     Ok(())
 }
 
@@ -513,18 +511,35 @@ mod tests {
     use std::path::{Path, PathBuf};
 
     #[test]
-    fn amend_over_latin1_commit_writes_consistent_utf8() {
+    fn amend_over_latin1_commit_writes_utf8_message_and_raw_author() {
         let (dir, repo) = crate::repo::test_support::make_repo_with_commit();
         let old = crate::repo::test_support::push_latin1_commit(&repo);
+        let old_author = repo.find_commit(old).unwrap().author().name_bytes().to_vec();
         amend_in(&repo, "Fixé le bug").unwrap();
         let c = repo.head().unwrap().peel_to_commit().unwrap();
         assert_ne!(c.id(), old);
-        assert_eq!(c.author().name(), Ok("André"));
-        assert_eq!(c.author().when().seconds(), 1_000_000_000);
+        let raw = crate::repo::test_support::raw_object(&repo, c.id());
+        assert!(!String::from_utf8_lossy(&raw).contains("\nencoding "));
         assert_eq!(c.message(), Ok("Fixé le bug"));
-        let dec = CommitDecoder::new(&c);
-        assert_eq!(dec.text(c.author().name_bytes()), "André");
-        assert_eq!(dec.text(c.message_bytes()), "Fixé le bug");
+        assert_eq!(c.author().name_bytes(), old_author.as_slice());
+        assert_eq!(c.author().name_bytes(), b"Andr\xe9");
+        assert_eq!(c.author().when().seconds(), 1_000_000_000);
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn amend_moves_the_branch_and_detached_head() {
+        let (dir, repo) = crate::repo::test_support::make_repo_with_commit();
+        let branch_ref = repo.head().unwrap().name().unwrap().to_owned();
+        amend_in(&repo, "one").unwrap();
+        assert_eq!(repo.head().unwrap().name(), Ok(branch_ref.as_str()));
+        let tip = repo.head().unwrap().peel_to_commit().unwrap();
+        assert_eq!(tip.message(), Ok("one"));
+        assert_eq!(repo.find_reference(&branch_ref).unwrap().target(), Some(tip.id()));
+        repo.set_head_detached(tip.id()).unwrap();
+        amend_in(&repo, "two").unwrap();
+        assert!(repo.head_detached().unwrap());
+        assert_eq!(repo.head().unwrap().peel_to_commit().unwrap().message(), Ok("two"));
         let _ = std::fs::remove_dir_all(dir);
     }
 
@@ -549,20 +564,6 @@ mod tests {
         let c = repo.head().unwrap().peel_to_commit().unwrap();
         let raw = String::from_utf8(raw_object(&repo, c.id())).unwrap();
         assert!(!raw.contains("\nencoding "), "{raw}");
-        let _ = std::fs::remove_dir_all(dir);
-    }
-
-    #[test]
-    fn amend_replaces_an_unusable_encoding_header() {
-        use crate::repo::test_support::*;
-        let (dir, repo) = make_repo_with_commit();
-        let a = b"A <a@example.com> 1600000000 +0000";
-        push_raw_commit(&repo, "b.txt", a, a, b"encoding x-bogus\n", b"msg\n");
-        amend_in(&repo, "new msg").unwrap();
-        let c = repo.head().unwrap().peel_to_commit().unwrap();
-        let raw = String::from_utf8(raw_object(&repo, c.id())).unwrap();
-        assert!(!raw.contains("x-bogus"), "{raw}");
-        assert_eq!(c.message(), Ok("new msg"));
         let _ = std::fs::remove_dir_all(dir);
     }
 
