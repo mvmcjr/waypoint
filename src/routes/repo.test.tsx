@@ -25,7 +25,7 @@ vi.mock("@/lib/ipc", () => ({
     fetchRemote: vi.fn(),
     pullBranch: vi.fn(),
     pushBranch: vi.fn(),
-    getBranchUpstream: vi.fn(),
+    getSyncTargets: vi.fn(),
   },
 }));
 
@@ -127,6 +127,12 @@ vi.mock("@/components/detail/StagingFileDiffPanel", () => ({
 // can assert on the `worktree` prop RepoView computes for it, without needing
 // the real dialog's ipc/query dependencies wired up in this test file.
 vi.mock("@/components/actions/Dialogs", () => ({
+  PushRejectedDialog: ({ remoteName, branchName, destinationBranch }: { remoteName: string; branchName: string; destinationBranch?: string }) => (
+    <div data-testid="push-rejected" data-remote={remoteName} data-branch={branchName} data-destination={destinationBranch}>
+      PushRejectedDialog
+    </div>
+  ),
+  RemoteErrorDialog: ({ message }: { message: string }) => <div data-testid="remote-error">{message}</div>,
   MergeDialog: ({ worktree }: { worktree: { name: string; path: string } | null }) => (
     <div data-testid="merge-dialog" data-worktree={JSON.stringify(worktree)}>
       MergeDialog
@@ -168,6 +174,7 @@ describe("RepoView", () => {
     vi.mocked(useFileStatus).mockReturnValue({ data: [] } as any);
     vi.mocked(useRefreshRepo).mockReturnValue(mockRefresh);
     vi.mocked(useOpenWorktree).mockReturnValue(vi.fn().mockResolvedValue(undefined));
+    vi.mocked(ipc.getSyncTargets).mockResolvedValue({ pull: null, push: null });
   });
 
   it("renders the sidebar and timeline by default", () => {
@@ -301,7 +308,7 @@ describe("RepoView", () => {
     act(() => resolveFetch());
   });
 
-  describe("pull/push follow the branch's upstream remote", () => {
+  describe("pull/push use the backend-resolved sync targets", () => {
     const TWO_REMOTES = [
       { name: "origin", url: "https://github.com/x/y" },
       { name: "fork", url: "https://github.com/me/y" },
@@ -313,28 +320,92 @@ describe("RepoView", () => {
       vi.mocked(ipc.pushBranch).mockResolvedValue(undefined as any);
     });
 
-    it("pulls from the upstream remote when the branch has one", async () => {
-      vi.mocked(ipc.getBranchUpstream).mockResolvedValue({ remote: "fork", branch: "main" });
+    it("pulls from the resolved pull remote", async () => {
+      vi.mocked(ipc.getSyncTargets).mockResolvedValue({
+        pull: { remote: "fork", branch: "main" },
+        push: { remote: "fork", branch: "main", set_upstream: false },
+      });
       render(<RepoView />);
       fireEvent.click(screen.getByRole("button", { name: /pull/i }));
       await waitFor(() => expect(ipc.pullBranch).toHaveBeenCalledWith("repo1", "fork"));
-      expect(ipc.getBranchUpstream).toHaveBeenCalledWith("repo1", "main");
+      expect(ipc.getSyncTargets).toHaveBeenCalledWith("repo1", "main");
     });
 
-    it("pushes to the upstream remote when the branch has one", async () => {
-      vi.mocked(ipc.getBranchUpstream).mockResolvedValue({ remote: "fork", branch: "main" });
+    it("pushes to the resolved push remote", async () => {
+      vi.mocked(ipc.getSyncTargets).mockResolvedValue({
+        pull: { remote: "fork", branch: "main" },
+        push: { remote: "fork", branch: "main", set_upstream: false },
+      });
       render(<RepoView />);
       fireEvent.click(screen.getByRole("button", { name: /push/i }));
       await waitFor(() => expect(ipc.pushBranch).toHaveBeenCalledWith("repo1", "fork", "main", false));
     });
 
-    it("falls back to the default remote without an upstream", async () => {
-      vi.mocked(ipc.getBranchUpstream).mockResolvedValue(null);
+    it("falls back to the default remote when targets cannot be resolved", async () => {
+      vi.mocked(ipc.getSyncTargets).mockRejectedValue(new Error("boom"));
       render(<RepoView />);
       fireEvent.click(screen.getByRole("button", { name: /pull/i }));
       await waitFor(() => expect(ipc.pullBranch).toHaveBeenCalledWith("repo1", "origin"));
       fireEvent.click(screen.getByRole("button", { name: /push/i }));
       await waitFor(() => expect(ipc.pushBranch).toHaveBeenCalledWith("repo1", "origin", "main", false));
+    });
+
+    it("force-push dialog names the real destination, not the local branch name", async () => {
+      vi.mocked(useHeadInfo).mockReturnValue({ data: { oid: "abcdef", branch: "feature" } } as any);
+      vi.mocked(ipc.getSyncTargets).mockResolvedValue({
+        pull: { remote: "origin", branch: "main" },
+        push: { remote: "origin", branch: "main", set_upstream: false },
+      });
+      vi.mocked(ipc.pushBranch).mockRejectedValue("! [rejected] (non-fast-forward)");
+      render(<RepoView />);
+      fireEvent.click(screen.getByRole("button", { name: /push/i }));
+      const dlg = await screen.findByTestId("push-rejected");
+      expect(dlg).toHaveAttribute("data-remote", "origin");
+      expect(dlg).toHaveAttribute("data-branch", "feature");
+      expect(dlg).toHaveAttribute("data-destination", "main");
+    });
+  });
+
+  describe("fetch also fetches the branch's upstream remote", () => {
+    const TWO_REMOTES = [
+      { name: "origin", url: "https://github.com/x/y" },
+      { name: "fork", url: "https://github.com/me/y" },
+    ];
+
+    beforeEach(() => {
+      vi.mocked(useRemotes).mockReturnValue({ data: TWO_REMOTES } as any);
+      vi.mocked(ipc.fetchRemote).mockResolvedValue(undefined as any);
+    });
+
+    it("fetches the default remote and a different upstream remote", async () => {
+      vi.mocked(ipc.getSyncTargets).mockResolvedValue({
+        pull: { remote: "fork", branch: "main" },
+        push: { remote: "fork", branch: "main", set_upstream: false },
+      });
+      render(<RepoView />);
+      fireEvent.click(screen.getByRole("button", { name: /fetch/i }));
+      await waitFor(() => expect(ipc.fetchRemote).toHaveBeenCalledTimes(2));
+      expect(ipc.fetchRemote).toHaveBeenNthCalledWith(1, "repo1", "origin");
+      expect(ipc.fetchRemote).toHaveBeenNthCalledWith(2, "repo1", "fork");
+    });
+
+    it("fetches once when the upstream remote is the default", async () => {
+      vi.mocked(ipc.getSyncTargets).mockResolvedValue({
+        pull: { remote: "origin", branch: "main" },
+        push: { remote: "origin", branch: "main", set_upstream: false },
+      });
+      render(<RepoView />);
+      fireEvent.click(screen.getByRole("button", { name: /fetch/i }));
+      await waitFor(() => expect(ipc.fetchRemote).toHaveBeenCalledTimes(1));
+      expect(ipc.fetchRemote).toHaveBeenCalledWith("repo1", "origin");
+    });
+
+    it("fetches only the default remote on a detached HEAD", async () => {
+      vi.mocked(useHeadInfo).mockReturnValue({ data: { oid: "abcdef", branch: null } } as any);
+      render(<RepoView />);
+      fireEvent.click(screen.getByRole("button", { name: /fetch/i }));
+      await waitFor(() => expect(ipc.fetchRemote).toHaveBeenCalledTimes(1));
+      expect(ipc.getSyncTargets).not.toHaveBeenCalled();
     });
   });
 

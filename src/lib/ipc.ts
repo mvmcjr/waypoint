@@ -134,9 +134,21 @@ export interface SquashPreview {
   default_body: string;
 }
 
-export interface BranchUpstream {
+/** A remote and a branch name on it. */
+export interface SyncTarget {
   remote: string;
   branch: string;
+}
+
+/** Where a push goes; `branch` is the destination name on the remote. */
+export interface PushTarget extends SyncTarget {
+  set_upstream: boolean;
+}
+
+/** Backend-resolved pull/push targets for a branch (null: no remote to use). */
+export interface SyncTargets {
+  pull: SyncTarget | null;
+  push: PushTarget | null;
 }
 
 export interface PullResult {
@@ -368,8 +380,8 @@ export const ipc = {
   fetchRemote: (repoId: string, remoteName: string) =>
     invoke<void>("fetch_remote", { repoId, remoteName }),
 
-  getBranchUpstream: (repoId: string, branchName: string) =>
-    invoke<BranchUpstream | null>("get_branch_upstream", { repoId, branchName }),
+  getSyncTargets: (repoId: string, branchName: string) =>
+    invoke<SyncTargets>("get_sync_targets", { repoId, branchName }),
 
   pushBranch: (repoId: string, remoteName: string, branchName: string, force: boolean) =>
     invoke<void>("push_branch", { repoId, remoteName, branchName, force }),

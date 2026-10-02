@@ -149,12 +149,15 @@ export function PullConflictsDialog({ repoId, onClose, onAbort }: PullConflictsP
 interface PushRejectedProps {
   repoId: string;
   remoteName: string;
+  /** Local branch being pushed; the backend resolves the same destination again for the force push. */
   branchName: string;
+  /** Branch on the remote the push (and the force push) goes to; defaults to `branchName`. */
+  destinationBranch?: string;
   onClose: () => void;
   onSuccess: () => void;
 }
 
-export function PushRejectedDialog({ repoId, remoteName, branchName, onClose, onSuccess }: PushRejectedProps) {
+export function PushRejectedDialog({ repoId, remoteName, branchName, destinationBranch, onClose, onSuccess }: PushRejectedProps) {
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
@@ -177,7 +180,7 @@ export function PushRejectedDialog({ repoId, remoteName, branchName, onClose, on
         <DialogHeader>
           <DialogTitle>Push rejected</DialogTitle>
           <DialogDescription>
-            <code className="font-mono">{remoteName}/{branchName}</code> has diverged from your local branch. You can force push to overwrite it.
+            <code className="font-mono">{remoteName}/{destinationBranch ?? branchName}</code> has diverged from your local branch. You can force push to overwrite it.
           </DialogDescription>
         </DialogHeader>
         <RiskBanner level="danger">

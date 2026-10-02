@@ -38,24 +38,44 @@ import {
 import { RemoveWorktreeDialog } from "@/components/actions/RemoveWorktreeDialog";
 import type { CommitAction } from "@/components/timeline/CommitContextMenu";
 import type { RefAction } from "@/components/sidebar/RefTree";
-import { ipc, type RefInfo, type RemoteInfo, type WorktreeInfo } from "@/lib/ipc";
+import { ipc, type RefInfo, type RemoteInfo, type SyncTargets, type WorktreeInfo } from "@/lib/ipc";
 import { RefreshCw, ArrowDown, ArrowUp, Puzzle } from "lucide-react";
 import { usePluginRegistry, commandsForSurface } from "@/lib/plugins/registry";
 import { usePluginRunner } from "@/components/plugins/PluginRunnerProvider";
 import { useOpenWorktree, isRepoGoneError } from "@/lib/useOpenRepo";
 import { worktreeName } from "@/lib/utils";
 import { trackingBranchWebUrl } from "@/lib/remoteUrl";
-import { chooseRemote, getDefaultRemote } from "@/lib/remoteChoice";
+import { getDefaultRemote, remotesToFetch } from "@/lib/remoteChoice";
 import { toast } from "sonner";
 import { Button } from "@/components/ui/button";
 
 const AUTO_FETCH_INTERVAL_MS = 5 * 60 * 1000;
 const FOCUS_FETCH_COOLDOWN_MS = 60 * 1000;
 
-/** Upstream lookup failure must not block pull/push — fall back to the default remote. */
-async function upstreamRemoteFor(repoId: string, remotes: RemoteInfo[], branchName: string): Promise<string> {
-  const upstream = await ipc.getBranchUpstream(repoId, branchName).catch(() => null);
-  return chooseRemote(remotes, upstream);
+/**
+ * Pull/push targets for `branchName`, resolved by the backend (the single place
+ * that applies upstream + push.default rules). A lookup failure must not block
+ * pull/push — fall back to the default remote and same-named branch.
+ */
+async function syncTargetsFor(repoId: string, remotes: RemoteInfo[], branchName: string): Promise<SyncTargets> {
+  const targets = await ipc.getSyncTargets(repoId, branchName).catch(() => null);
+  if (targets) return targets;
+  const remote = getDefaultRemote(remotes);
+  if (!remote) return { pull: null, push: null };
+  return {
+    pull: { remote, branch: branchName },
+    push: { remote, branch: branchName, set_upstream: false },
+  };
+}
+
+/** Default remote plus the current branch's upstream remote (when it differs). */
+async function remotesToFetchFor(repoId: string, remotes: RemoteInfo[], branchName: string | null | undefined): Promise<string[]> {
+  const targets = branchName ? await ipc.getSyncTargets(repoId, branchName).catch(() => null) : null;
+  return remotesToFetch(getDefaultRemote(remotes), targets);
+}
+
+async function fetchAll(repoId: string, remoteNames: string[]) {
+  for (const name of remoteNames) await ipc.fetchRemote(repoId, name);
 }
 
 // ─── Dialog state ──────────────────────────────────────────────────────────
@@ -77,7 +97,7 @@ type DialogState =
   | { kind: "revert"; oid: string; summary: string }
   | { kind: "check-in-branch"; oid: string; summary: string }
   | { kind: "pull-conflicts" }
-  | { kind: "push-rejected"; branchName: string; remoteName: string }
+  | { kind: "push-rejected"; branchName: string; remoteName: string; destinationBranch: string }
   | { kind: "remote-error"; message: string }
   | { kind: "create-tag"; oid: string }
   | { kind: "delete-tag"; tagName: string }
@@ -152,15 +172,17 @@ export function RepoView() {
   isFetchingRef.current = isFetching;
   const refreshRef = useRef(refresh);
   refreshRef.current = refresh;
+  const headBranchRef = useRef(head?.branch);
+  headBranchRef.current = head?.branch;
   const lastAutoFetchRef = useRef<number>(0);
   const autoFetchInFlightRef = useRef(false);
 
-  async function silentFetch(forRepoId: string, remoteName: string) {
+  async function silentFetch(forRepoId: string, rs: RemoteInfo[]) {
     if (autoFetchInFlightRef.current || isFetchingRef.current) return;
     autoFetchInFlightRef.current = true;
     lastAutoFetchRef.current = Date.now();
     try {
-      await ipc.fetchRemote(forRepoId, remoteName);
+      await fetchAll(forRepoId, await remotesToFetchFor(forRepoId, rs, headBranchRef.current));
       if (repoIdRef.current !== forRepoId) return;
       refreshRef.current();
     } catch {
@@ -174,23 +196,24 @@ export function RepoView() {
     const r = remotesRef.current;
     const id = repoIdRef.current;
     if (!id || !r || r.length === 0) return;
-    const remoteName = getDefaultRemote(r);
-    if (!remoteName) return;
-    void silentFetch(id, remoteName);
+    if (!getDefaultRemote(r)) return;
+    void silentFetch(id, r);
   }
 
   async function handleFetch() {
     if (!remotes || remotes.length === 0 || !repoId) return;
     if (autoFetchInFlightRef.current) return;
-    const remoteName = getDefaultRemote(remotes);
-    if (!remoteName) return;
+    if (!getDefaultRemote(remotes)) return;
     const myRepoId = repoId;
 
     setIsFetching(true);
-    const p = ipc.fetchRemote(repoId, remoteName);
+    const p = remotesToFetchFor(repoId, remotes, head?.branch).then(async (names) => {
+      await fetchAll(myRepoId, names);
+      return names.join(", ");
+    });
     toast.promise(p, {
-      loading: `Fetching from ${remoteName}…`,
-      success: `Fetched from ${remoteName}`,
+      loading: "Fetching…",
+      success: (names) => `Fetched from ${names}`,
       error: (e) => `Fetch failed: ${e}`,
     });
     try {
@@ -210,14 +233,14 @@ export function RepoView() {
     if (!remotes || remotes.length === 0 || !repoId || !head?.branch) return;
     const myRepoId = repoId;
     setIsPulling(true);
-    const remoteName = await upstreamRemoteFor(repoId, remotes, head.branch);
-    if (!remoteName || repoIdRef.current !== myRepoId) {
+    const pull = (await syncTargetsFor(repoId, remotes, head.branch)).pull;
+    if (!pull || repoIdRef.current !== myRepoId) {
       if (repoIdRef.current === myRepoId) setIsPulling(false);
       return;
     }
-    const p = ipc.pullBranch(repoId, remoteName);
+    const p = ipc.pullBranch(repoId, pull.remote);
     toast.promise(p, {
-      loading: `Pulling from ${remoteName}…`,
+      loading: `Pulling ${pull.remote}/${pull.branch}…`,
       success: (result) =>
         result.kind === "up_to_date"
           ? "Already up to date"
@@ -247,15 +270,16 @@ export function RepoView() {
     if (!remotes || remotes.length === 0 || !repoId) return;
     const myRepoId = repoId;
     setIsPushing(true);
-    const remoteName = await upstreamRemoteFor(repoId, remotes, branchName);
-    if (!remoteName || repoIdRef.current !== myRepoId) {
+    const push = (await syncTargetsFor(repoId, remotes, branchName)).push;
+    if (!push || repoIdRef.current !== myRepoId) {
       if (repoIdRef.current === myRepoId) setIsPushing(false);
       return;
     }
+    const { remote: remoteName, branch: destinationBranch } = push;
     const p = ipc.pushBranch(repoId, remoteName, branchName, false);
     toast.promise(p, {
-      loading: `Pushing ${branchName}…`,
-      success: `Pushed ${branchName} to ${remoteName}`,
+      loading: `Pushing ${branchName} to ${remoteName}/${destinationBranch}…`,
+      success: `Pushed ${branchName} to ${remoteName}/${destinationBranch}`,
       error: () => null, // handled below with dialog
     });
     try {
@@ -266,7 +290,7 @@ export function RepoView() {
       if (repoIdRef.current !== myRepoId) return;
       const msg = String(e);
       if (msg.includes("non-fast-forward") || msg.includes("rejected") || msg.includes("fetch first")) {
-        setDialog({ kind: "push-rejected", branchName, remoteName });
+        setDialog({ kind: "push-rejected", branchName, remoteName, destinationBranch });
       } else {
         setDialog({ kind: "remote-error", message: msg });
       }
@@ -1030,6 +1054,7 @@ export function RepoView() {
           repoId={repoId}
           remoteName={dialog.remoteName}
           branchName={dialog.branchName}
+          destinationBranch={dialog.destinationBranch}
           onClose={() => setDialog({ kind: "none" })}
           onSuccess={() => { setDialog({ kind: "none" }); refresh(); }}
         />

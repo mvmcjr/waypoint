@@ -103,41 +103,114 @@ fn branch_upstream(repo: &git2::Repository, branch_name: &str) -> Option<BranchU
     Some(BranchUpstream { remote: remote.as_str().ok()?.to_owned(), branch: branch.to_owned() })
 }
 
+/// The remote a pull/push of `branch_name` uses: `requested` if given, else the
+/// branch's upstream remote when it still exists, else "origin", else the first
+/// remote. `None` when the repo has no remotes (and none was requested).
+fn choose_remote(repo: &git2::Repository, branch_name: &str, requested: Option<&str>) -> Option<String> {
+    if let Some(r) = requested {
+        return Some(r.to_owned());
+    }
+    let remotes = repo.remotes().ok()?;
+    let names: Vec<&str> = remotes.iter().flatten().flatten().collect();
+    if let Some(up) = branch_upstream(repo, branch_name) {
+        if names.contains(&up.remote.as_str()) {
+            return Some(up.remote);
+        }
+    }
+    if names.contains(&"origin") {
+        return Some("origin".to_owned());
+    }
+    names.first().map(|n| (*n).to_owned())
+}
+
+/// A remote and a branch name on it (the pull source, or a label for it).
+#[derive(Debug, Serialize)]
+pub struct SyncTarget {
+    pub remote: String,
+    pub branch: String,
+}
+
+/// Where a push of a local branch goes. `branch` is the destination name.
+#[derive(Debug, Serialize)]
+pub struct PushTarget {
+    pub remote: String,
+    pub branch: String,
+    /// First push of a branch with no upstream: record one (`--set-upstream`).
+    pub set_upstream: bool,
+}
+
+/// Everything the UI needs to label pull/push for a branch. Either side is
+/// `None` when the repo has no remote to use.
+#[derive(Debug, Serialize)]
+pub struct SyncTargets {
+    pub pull: Option<SyncTarget>,
+    pub push: Option<PushTarget>,
+}
+
+/// Mirrors git's `push.default`: with `upstream`/`tracking` and the upstream on
+/// the target remote the push goes to the upstream branch; otherwise (unset,
+/// `simple`, `current`, ...) to the SAME-named branch — never onto a
+/// differently-named upstream, so a `feature` made from `origin/main` can't
+/// overwrite `main`. A branch with no upstream at all gets `--set-upstream`.
+fn resolve_push_target(repo: &git2::Repository, remote: Option<&str>, branch_name: &str) -> Option<PushTarget> {
+    let remote = choose_remote(repo, branch_name, remote)?;
+    let upstream = branch_upstream(repo, branch_name);
+    let follow_upstream = repo
+        .config()
+        .ok()
+        .and_then(|c| c.get_string("push.default").ok())
+        .is_some_and(|v| matches!(v.trim().to_ascii_lowercase().as_str(), "upstream" | "tracking"));
+    let branch = match &upstream {
+        Some(up) if follow_upstream && up.remote == remote => up.branch.clone(),
+        _ => branch_name.to_owned(),
+    };
+    let local_ref = format!("refs/heads/{}", branch_name);
+    let set_upstream = upstream.is_none() && repo.branch_upstream_remote(&local_ref).is_err();
+    Some(PushTarget { remote, branch, set_upstream })
+}
+
+/// Pull counterpart of `resolve_push_target`: the branch's upstream when it is
+/// on the chosen remote, otherwise the same-named branch there.
+fn resolve_pull_target(repo: &git2::Repository, remote: Option<&str>, branch_name: &str) -> Option<SyncTarget> {
+    let remote = choose_remote(repo, branch_name, remote)?;
+    let branch = match branch_upstream(repo, branch_name) {
+        Some(up) if up.remote == remote => up.branch,
+        _ => branch_name.to_owned(),
+    };
+    Some(SyncTarget { remote, branch })
+}
+
+fn sync_targets(repo: &git2::Repository, branch_name: &str) -> SyncTargets {
+    SyncTargets {
+        pull: resolve_pull_target(repo, None, branch_name),
+        push: resolve_push_target(repo, None, branch_name),
+    }
+}
+
 #[tauri::command]
-pub fn get_branch_upstream(
+pub fn get_sync_targets(
     repo_id: String,
     branch_name: String,
     state: State<'_, RepoState>,
-) -> Result<Option<BranchUpstream>> {
+) -> Result<SyncTargets> {
     let repos = state.0.lock().unwrap();
     let repo = repos.get(&repo_id).ok_or_else(|| Error::RepoNotFound(repo_id.clone()))?;
-    Ok(branch_upstream(repo, &branch_name))
+    Ok(sync_targets(repo, &branch_name))
 }
 
-/// Arguments for `git push` of `branch_name` to `remote_name`. Follows the
-/// branch's upstream when it is on that remote (local `main` tracking
-/// `origin/master` updates `master`); records one on first push when the branch
-/// has none; leaves an upstream on a different remote alone.
-fn push_args(repo: &git2::Repository, remote_name: &str, branch_name: &str, force: bool) -> Result<Vec<String>> {
+/// Arguments for `git push` of `branch_name` to `target`. Full ref names on both
+/// sides: a bare name could resolve to a same-named tag.
+fn push_args(target: &PushTarget, branch_name: &str, force: bool) -> Vec<String> {
     let mut args = vec!["push".to_owned()];
     if force {
         args.push("--force".into());
     }
-    let local_ref = format!("refs/heads/{}", branch_name);
-    let has_any_upstream = repo.branch_upstream_remote(&local_ref).is_ok();
-    let refspec = match branch_upstream(repo, branch_name) {
-        Some(up) if up.remote == remote_name => format!("{}:refs/heads/{}", branch_name, up.branch),
-        Some(_) => branch_name.to_owned(),
-        None => {
-            if !has_any_upstream {
-                args.push("--set-upstream".into());
-            }
-            branch_name.to_owned()
-        }
-    };
-    args.push(remote_name.to_owned());
-    args.push(refspec);
-    Ok(args)
+    if target.set_upstream {
+        args.push("--set-upstream".into());
+    }
+    args.push(target.remote.clone());
+    args.push(format!("refs/heads/{}:refs/heads/{}", branch_name, target.branch));
+    args
 }
 
 #[tauri::command]
@@ -152,7 +225,9 @@ pub async fn push_branch(
     let (args, workdir) = {
         let repos = state.0.lock().unwrap();
         let repo = repos.get(&repo_id).ok_or_else(|| Error::RepoNotFound(repo_id.clone()))?;
-        (push_args(repo, &remote_name, &branch_name, force)?, crate::repo::workdir(repo)?)
+        let target = resolve_push_target(repo, Some(&remote_name), &branch_name)
+            .ok_or_else(|| Error::InvalidArg("no remote to push to".into()))?;
+        (push_args(&target, &branch_name, force), crate::repo::workdir(repo)?)
     };
     let args: Vec<&str> = args.iter().map(String::as_str).collect();
     run_git(&workdir, &args).await
@@ -209,22 +284,28 @@ pub async fn rename_remote_branch(
 /// a different branch than the one configured.
 fn resolve_pull_source(repo: &git2::Repository, remote_name: &str, branch_name: &str) -> Result<(String, String)> {
     let local_ref = format!("refs/heads/{}", branch_name);
-    let upstream_remote = repo.branch_upstream_remote(&local_ref).ok();
-    if upstream_remote.as_ref().and_then(|r| r.as_str().ok()) != Some(remote_name) {
+    let Some(up) = branch_upstream(repo, branch_name).filter(|u| u.remote == remote_name) else {
+        // Tracking something that isn't a branch (e.g. refs/tags/*) on this
+        // remote can't be followed — error rather than guess a same-named branch.
+        let tracks_here = repo.branch_upstream_remote(&local_ref).ok().is_some_and(|r| r.as_str().ok() == Some(remote_name));
+        if tracks_here {
+            let merge = repo.branch_upstream_merge(&local_ref)?;
+            return Err(Error::InvalidArg(format!(
+                "'{}' tracks '{}', which is not a branch on {}.",
+                branch_name,
+                merge.as_str()?,
+                remote_name
+            )));
+        }
         return Ok((branch_name.to_owned(), format!("refs/remotes/{}/{}", remote_name, branch_name)));
-    }
-    let merge = repo.branch_upstream_merge(&local_ref)?;
-    let merge = merge.as_str()?;
-    let remote_branch = merge.strip_prefix("refs/heads/").ok_or_else(|| {
-        Error::InvalidArg(format!("'{}' tracks '{}', which is not a branch on {}.", branch_name, merge, remote_name))
-    })?;
+    };
     let tracking_ref = repo.branch_upstream_name(&local_ref).map_err(|_| {
         Error::InvalidArg(format!(
             "'{}' tracks {}/{}, but no fetch refspec maps it to a remote-tracking branch.",
-            branch_name, remote_name, remote_branch
+            branch_name, remote_name, up.branch
         ))
     })?;
-    Ok((remote_branch.to_owned(), tracking_ref.as_str()?.to_owned()))
+    Ok((up.branch, tracking_ref.as_str()?.to_owned()))
 }
 
 #[tauri::command]
@@ -426,39 +507,131 @@ mod tests {
         v.iter().map(|s| s.to_string()).collect()
     }
 
+    fn set_push_default(repo: &Repository, value: &str) {
+        repo.config().unwrap().set_str("push.default", value).unwrap();
+    }
+
+    /// Resolve the push target for `remote` (or the default) and build its args.
+    fn push(repo: &Repository, remote: Option<&str>, branch: &str, force: bool) -> (PushTarget, Vec<String>) {
+        let target = resolve_push_target(repo, remote, branch).unwrap();
+        let a = push_args(&target, branch, force);
+        (target, a)
+    }
+
+    /// `git switch -c feature origin/main`: tracks main, but must NOT push onto it.
     #[test]
-    fn push_to_upstream_uses_the_upstream_branch_name() {
+    fn push_never_targets_a_differently_named_upstream_by_default() {
+        let (dir, repo) = make_repo();
+        set_upstream(&repo, "feature", "origin", "refs/heads/main");
+        let (t, a) = push(&repo, None, "feature", false);
+        assert_eq!(t.branch, "feature");
+        assert_eq!(t.remote, "origin");
+        assert!(!t.set_upstream);
+        assert_eq!(a, args(&["push", "origin", "refs/heads/feature:refs/heads/feature"]));
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn push_default_upstream_follows_the_upstream_branch_name() {
+        let (dir, repo) = make_repo();
+        set_upstream(&repo, "feature", "origin", "refs/heads/main");
+        set_push_default(&repo, "upstream");
+        let (t, a) = push(&repo, None, "feature", false);
+        assert_eq!(t.branch, "main");
+        assert_eq!(a, args(&["push", "origin", "refs/heads/feature:refs/heads/main"]));
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn push_default_simple_and_current_use_the_same_name_tracking_uses_upstream() {
         let (dir, repo) = make_repo();
         set_upstream(&repo, "main", "origin", "refs/heads/master");
-        let got = push_args(&repo, "origin", "main", false).unwrap();
-        assert_eq!(got, args(&["push", "origin", "main:refs/heads/master"]));
+        for (value, want) in [("simple", "main"), ("current", "main"), ("matching", "main"), ("tracking", "master"), ("UPSTREAM", "master")] {
+            set_push_default(&repo, value);
+            assert_eq!(resolve_push_target(&repo, None, "main").unwrap().branch, want, "push.default={value}");
+        }
         let _ = std::fs::remove_dir_all(dir);
     }
 
     #[test]
-    fn push_without_upstream_sets_it() {
-        let (dir, repo) = make_repo();
-        let got = push_args(&repo, "origin", "main", false).unwrap();
-        assert_eq!(got, args(&["push", "--set-upstream", "origin", "main"]));
-        let _ = std::fs::remove_dir_all(dir);
-    }
-
-    #[test]
-    fn push_to_another_remote_keeps_upstream_untouched() {
+    fn push_default_upstream_ignored_when_upstream_is_on_another_remote() {
         let (dir, repo) = make_repo();
         repo.remote("fork", "https://example.invalid/fork.git").unwrap();
         set_upstream(&repo, "main", "origin", "refs/heads/master");
-        let got = push_args(&repo, "fork", "main", false).unwrap();
-        assert_eq!(got, args(&["push", "fork", "main"]));
+        set_push_default(&repo, "upstream");
+        let (t, a) = push(&repo, Some("fork"), "main", false);
+        assert_eq!(t.branch, "main");
+        assert!(!t.set_upstream);
+        assert_eq!(a, args(&["push", "fork", "refs/heads/main:refs/heads/main"]));
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn push_without_upstream_sets_it_with_the_same_name() {
+        let (dir, repo) = make_repo();
+        let (t, a) = push(&repo, None, "main", false);
+        assert!(t.set_upstream);
+        assert_eq!(a, args(&["push", "--set-upstream", "origin", "refs/heads/main:refs/heads/main"]));
         let _ = std::fs::remove_dir_all(dir);
     }
 
     #[test]
     fn push_force_flag_is_kept() {
         let (dir, repo) = make_repo();
-        set_upstream(&repo, "main", "origin", "refs/heads/master");
-        let got = push_args(&repo, "origin", "main", true).unwrap();
-        assert_eq!(got, args(&["push", "--force", "origin", "main:refs/heads/master"]));
+        set_upstream(&repo, "main", "origin", "refs/heads/main");
+        let (_, a) = push(&repo, None, "main", true);
+        assert_eq!(a, args(&["push", "--force", "origin", "refs/heads/main:refs/heads/main"]));
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn remote_choice_prefers_upstream_remote_then_origin_then_first() {
+        let dir = make_temp_dir("remote");
+        let repo = Repository::init(&dir).unwrap();
+        repo.remote("zeta", "https://example.invalid/z.git").unwrap();
+        repo.remote("fork", "https://example.invalid/f.git").unwrap();
+        // No origin, no upstream: first remote (libgit2 lists them sorted).
+        assert_eq!(choose_remote(&repo, "main", None).as_deref(), Some("fork"));
+        set_upstream(&repo, "main", "zeta", "refs/heads/main");
+        assert_eq!(choose_remote(&repo, "main", None).as_deref(), Some("zeta"));
+        // Upstream remote that no longer exists is ignored.
+        set_upstream(&repo, "main", "gone", "refs/heads/main");
+        assert_eq!(choose_remote(&repo, "main", None).as_deref(), Some("fork"));
+        repo.remote("origin", "https://example.invalid/o.git").unwrap();
+        assert_eq!(choose_remote(&repo, "main", None).as_deref(), Some("origin"));
+        // Explicit remote wins.
+        assert_eq!(choose_remote(&repo, "main", Some("zeta")).as_deref(), Some("zeta"));
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn sync_targets_pull_follows_upstream_push_follows_push_default() {
+        let (dir, repo) = make_repo();
+        set_upstream(&repo, "feature", "origin", "refs/heads/main");
+        let t = sync_targets(&repo, "feature");
+        let pull = t.pull.unwrap();
+        assert_eq!((pull.remote.as_str(), pull.branch.as_str()), ("origin", "main"));
+        let push = t.push.unwrap();
+        assert_eq!((push.remote.as_str(), push.branch.as_str(), push.set_upstream), ("origin", "feature", false));
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn sync_targets_without_remotes_are_none() {
+        let dir = make_temp_dir("remote");
+        let repo = Repository::init(&dir).unwrap();
+        let t = sync_targets(&repo, "main");
+        assert!(t.pull.is_none() && t.push.is_none());
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn sync_targets_without_upstream_use_the_same_name() {
+        let (dir, repo) = make_repo();
+        let t = sync_targets(&repo, "main");
+        let pull = t.pull.unwrap();
+        assert_eq!((pull.remote.as_str(), pull.branch.as_str()), ("origin", "main"));
+        assert!(t.push.unwrap().set_upstream);
         let _ = std::fs::remove_dir_all(dir);
     }
 

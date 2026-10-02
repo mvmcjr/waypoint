@@ -403,6 +403,24 @@ describe("Dialogs", () => {
       });
     });
 
+    it("names the destination branch and force pushes the local branch", async () => {
+      vi.mocked(ipc.pushBranch).mockResolvedValue(undefined);
+      render(
+        <PushRejectedDialog
+          repoId="repo1"
+          remoteName="origin"
+          branchName="feature"
+          destinationBranch="main"
+          onClose={mockOnClose}
+          onSuccess={mockOnSuccess}
+        />
+      );
+      expect(screen.getByText("origin/main")).toBeInTheDocument();
+      fireEvent.click(screen.getByRole("button", { name: "Force push" }));
+      expect(ipc.pushBranch).toHaveBeenCalledWith("repo1", "origin", "feature", true);
+      await waitFor(() => expect(mockOnSuccess).toHaveBeenCalled());
+    });
+
     it("calls onClose when Cancel is clicked", () => {
       render(
         <PushRejectedDialog

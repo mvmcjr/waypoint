@@ -1,4 +1,4 @@
-import type { BranchUpstream, RemoteInfo } from "@/lib/ipc";
+import type { RemoteInfo, SyncTargets } from "@/lib/ipc";
 
 /** The remote fetch uses: "origin" if present, otherwise the first remote. */
 export function getDefaultRemote(remotes: RemoteInfo[]): string {
@@ -6,11 +6,10 @@ export function getDefaultRemote(remotes: RemoteInfo[]): string {
 }
 
 /**
- * The remote pull/push should use: the branch's upstream remote when it has
- * one (and that remote still exists), otherwise the default remote. "" when
- * there are no remotes.
+ * Remotes a fetch should hit: the default remote plus the branch's upstream
+ * remote when it differs (the backend resolves that remote as `targets.pull`).
  */
-export function chooseRemote(remotes: RemoteInfo[], upstream: BranchUpstream | null | undefined): string {
-  if (upstream && remotes.some((r) => r.name === upstream.remote)) return upstream.remote;
-  return getDefaultRemote(remotes);
+export function remotesToFetch(defaultRemote: string, targets: SyncTargets | null | undefined): string[] {
+  const upstream = targets?.pull?.remote;
+  return upstream && upstream !== defaultRemote ? [defaultRemote, upstream] : [defaultRemote];
 }
