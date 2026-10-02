@@ -25,6 +25,7 @@ vi.mock("@/lib/ipc", () => ({
     fetchRemote: vi.fn(),
     pullBranch: vi.fn(),
     pushBranch: vi.fn(),
+    getBranchUpstream: vi.fn(),
   },
 }));
 
@@ -298,6 +299,43 @@ describe("RepoView", () => {
 
     // Clean up — resolve the dangling promise
     act(() => resolveFetch());
+  });
+
+  describe("pull/push follow the branch's upstream remote", () => {
+    const TWO_REMOTES = [
+      { name: "origin", url: "https://github.com/x/y" },
+      { name: "fork", url: "https://github.com/me/y" },
+    ];
+
+    beforeEach(() => {
+      vi.mocked(useRemotes).mockReturnValue({ data: TWO_REMOTES } as any);
+      vi.mocked(ipc.pullBranch).mockResolvedValue({ kind: "up_to_date", conflicted: [] } as any);
+      vi.mocked(ipc.pushBranch).mockResolvedValue(undefined as any);
+    });
+
+    it("pulls from the upstream remote when the branch has one", async () => {
+      vi.mocked(ipc.getBranchUpstream).mockResolvedValue({ remote: "fork", branch: "main" });
+      render(<RepoView />);
+      fireEvent.click(screen.getByRole("button", { name: /pull/i }));
+      await waitFor(() => expect(ipc.pullBranch).toHaveBeenCalledWith("repo1", "fork"));
+      expect(ipc.getBranchUpstream).toHaveBeenCalledWith("repo1", "main");
+    });
+
+    it("pushes to the upstream remote when the branch has one", async () => {
+      vi.mocked(ipc.getBranchUpstream).mockResolvedValue({ remote: "fork", branch: "main" });
+      render(<RepoView />);
+      fireEvent.click(screen.getByRole("button", { name: /push/i }));
+      await waitFor(() => expect(ipc.pushBranch).toHaveBeenCalledWith("repo1", "fork", "main", false));
+    });
+
+    it("falls back to the default remote without an upstream", async () => {
+      vi.mocked(ipc.getBranchUpstream).mockResolvedValue(null);
+      render(<RepoView />);
+      fireEvent.click(screen.getByRole("button", { name: /pull/i }));
+      await waitFor(() => expect(ipc.pullBranch).toHaveBeenCalledWith("repo1", "origin"));
+      fireEvent.click(screen.getByRole("button", { name: /push/i }));
+      await waitFor(() => expect(ipc.pushBranch).toHaveBeenCalledWith("repo1", "origin", "main", false));
+    });
   });
 
   // ── V4: StagingFileDiffPanel only renders for the current repo ─────────────

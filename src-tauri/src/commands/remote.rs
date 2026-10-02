@@ -86,6 +86,60 @@ pub async fn fetch_remote(
     run_git(&get_workdir(&state, &repo_id)?, &["fetch", &remote_name]).await
 }
 
+/// A branch's configured upstream: the remote and the branch name on it.
+#[derive(Debug, Serialize)]
+pub struct BranchUpstream {
+    pub remote: String,
+    pub branch: String,
+}
+
+/// The configured upstream of local `branch_name`, if it tracks a branch
+/// (`refs/heads/*`) on a remote. Anything else reads as "no upstream".
+fn branch_upstream(repo: &git2::Repository, branch_name: &str) -> Option<BranchUpstream> {
+    let local_ref = format!("refs/heads/{}", branch_name);
+    let remote = repo.branch_upstream_remote(&local_ref).ok()?;
+    let merge = repo.branch_upstream_merge(&local_ref).ok()?;
+    let branch = merge.as_str().ok()?.strip_prefix("refs/heads/")?;
+    Some(BranchUpstream { remote: remote.as_str().ok()?.to_owned(), branch: branch.to_owned() })
+}
+
+#[tauri::command]
+pub fn get_branch_upstream(
+    repo_id: String,
+    branch_name: String,
+    state: State<'_, RepoState>,
+) -> Result<Option<BranchUpstream>> {
+    let repos = state.0.lock().unwrap();
+    let repo = repos.get(&repo_id).ok_or_else(|| Error::RepoNotFound(repo_id.clone()))?;
+    Ok(branch_upstream(repo, &branch_name))
+}
+
+/// Arguments for `git push` of `branch_name` to `remote_name`. Follows the
+/// branch's upstream when it is on that remote (local `main` tracking
+/// `origin/master` updates `master`); records one on first push when the branch
+/// has none; leaves an upstream on a different remote alone.
+fn push_args(repo: &git2::Repository, remote_name: &str, branch_name: &str, force: bool) -> Result<Vec<String>> {
+    let mut args = vec!["push".to_owned()];
+    if force {
+        args.push("--force".into());
+    }
+    let local_ref = format!("refs/heads/{}", branch_name);
+    let has_any_upstream = repo.branch_upstream_remote(&local_ref).is_ok();
+    let refspec = match branch_upstream(repo, branch_name) {
+        Some(up) if up.remote == remote_name => format!("{}:refs/heads/{}", branch_name, up.branch),
+        Some(_) => branch_name.to_owned(),
+        None => {
+            if !has_any_upstream {
+                args.push("--set-upstream".into());
+            }
+            branch_name.to_owned()
+        }
+    };
+    args.push(remote_name.to_owned());
+    args.push(refspec);
+    Ok(args)
+}
+
 #[tauri::command]
 pub async fn push_branch(
     repo_id: String,
@@ -94,13 +148,13 @@ pub async fn push_branch(
     force: bool,
     state: State<'_, RepoState>,
 ) -> Result<()> {
-    let workdir = get_workdir(&state, &repo_id)?;
-    let mut args: Vec<&str> = vec!["push"];
-    if force {
-        args.push("--force");
-    }
-    args.push(&remote_name);
-    args.push(&branch_name);
+    // Compute args and release the lock before the async network call.
+    let (args, workdir) = {
+        let repos = state.0.lock().unwrap();
+        let repo = repos.get(&repo_id).ok_or_else(|| Error::RepoNotFound(repo_id.clone()))?;
+        (push_args(repo, &remote_name, &branch_name, force)?, crate::repo::workdir(repo)?)
+    };
+    let args: Vec<&str> = args.iter().map(String::as_str).collect();
     run_git(&workdir, &args).await
 }
 
@@ -365,6 +419,71 @@ mod tests {
         set_upstream(&repo, "main", "origin", "refs/heads/release");
         let err = resolve_pull_source(&repo, "origin", "main").unwrap_err();
         assert!(err.to_string().contains("origin/release"), "{err}");
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    fn args(v: &[&str]) -> Vec<String> {
+        v.iter().map(|s| s.to_string()).collect()
+    }
+
+    #[test]
+    fn push_to_upstream_uses_the_upstream_branch_name() {
+        let (dir, repo) = make_repo();
+        set_upstream(&repo, "main", "origin", "refs/heads/master");
+        let got = push_args(&repo, "origin", "main", false).unwrap();
+        assert_eq!(got, args(&["push", "origin", "main:refs/heads/master"]));
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn push_without_upstream_sets_it() {
+        let (dir, repo) = make_repo();
+        let got = push_args(&repo, "origin", "main", false).unwrap();
+        assert_eq!(got, args(&["push", "--set-upstream", "origin", "main"]));
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn push_to_another_remote_keeps_upstream_untouched() {
+        let (dir, repo) = make_repo();
+        repo.remote("fork", "https://example.invalid/fork.git").unwrap();
+        set_upstream(&repo, "main", "origin", "refs/heads/master");
+        let got = push_args(&repo, "fork", "main", false).unwrap();
+        assert_eq!(got, args(&["push", "fork", "main"]));
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn push_force_flag_is_kept() {
+        let (dir, repo) = make_repo();
+        set_upstream(&repo, "main", "origin", "refs/heads/master");
+        let got = push_args(&repo, "origin", "main", true).unwrap();
+        assert_eq!(got, args(&["push", "--force", "origin", "main:refs/heads/master"]));
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn branch_upstream_configured() {
+        let (dir, repo) = make_repo();
+        set_upstream(&repo, "main", "origin", "refs/heads/master");
+        let got = branch_upstream(&repo, "main").unwrap();
+        assert_eq!(got.remote, "origin");
+        assert_eq!(got.branch, "master");
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn branch_upstream_none_when_unset() {
+        let (dir, repo) = make_repo();
+        assert!(branch_upstream(&repo, "main").is_none());
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn branch_upstream_none_for_non_branch_merge_ref() {
+        let (dir, repo) = make_repo();
+        set_upstream(&repo, "main", "origin", "refs/tags/v1");
+        assert!(branch_upstream(&repo, "main").is_none());
         let _ = std::fs::remove_dir_all(dir);
     }
 }

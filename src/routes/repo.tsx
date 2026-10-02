@@ -45,14 +45,17 @@ import { usePluginRunner } from "@/components/plugins/PluginRunnerProvider";
 import { useOpenWorktree, isRepoGoneError } from "@/lib/useOpenRepo";
 import { worktreeName } from "@/lib/utils";
 import { trackingBranchWebUrl } from "@/lib/remoteUrl";
+import { chooseRemote, getDefaultRemote } from "@/lib/remoteChoice";
 import { toast } from "sonner";
 import { Button } from "@/components/ui/button";
 
 const AUTO_FETCH_INTERVAL_MS = 5 * 60 * 1000;
 const FOCUS_FETCH_COOLDOWN_MS = 60 * 1000;
 
-function getDefaultRemote(remotes: RemoteInfo[]): string {
-  return remotes.find((r) => r.name === "origin")?.name ?? remotes[0]?.name ?? "";
+/** Upstream lookup failure must not block pull/push — fall back to the default remote. */
+async function upstreamRemoteFor(repoId: string, remotes: RemoteInfo[], branchName: string): Promise<string> {
+  const upstream = await ipc.getBranchUpstream(repoId, branchName).catch(() => null);
+  return chooseRemote(remotes, upstream);
 }
 
 // ─── Dialog state ──────────────────────────────────────────────────────────
@@ -205,10 +208,13 @@ export function RepoView() {
 
   async function handlePull() {
     if (!remotes || remotes.length === 0 || !repoId || !head?.branch) return;
-    const remoteName = getDefaultRemote(remotes);
-    if (!remoteName) return;
     const myRepoId = repoId;
     setIsPulling(true);
+    const remoteName = await upstreamRemoteFor(repoId, remotes, head.branch);
+    if (!remoteName || repoIdRef.current !== myRepoId) {
+      if (repoIdRef.current === myRepoId) setIsPulling(false);
+      return;
+    }
     const p = ipc.pullBranch(repoId, remoteName);
     toast.promise(p, {
       loading: `Pulling from ${remoteName}…`,
@@ -239,10 +245,13 @@ export function RepoView() {
 
   async function handlePushBranch(branchName: string) {
     if (!remotes || remotes.length === 0 || !repoId) return;
-    const remoteName = getDefaultRemote(remotes);
-    if (!remoteName) return;
     const myRepoId = repoId;
     setIsPushing(true);
+    const remoteName = await upstreamRemoteFor(repoId, remotes, branchName);
+    if (!remoteName || repoIdRef.current !== myRepoId) {
+      if (repoIdRef.current === myRepoId) setIsPushing(false);
+      return;
+    }
     const p = ipc.pushBranch(repoId, remoteName, branchName, false);
     toast.promise(p, {
       loading: `Pushing ${branchName}…`,

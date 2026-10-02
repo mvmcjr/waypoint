@@ -134,6 +134,11 @@ export interface SquashPreview {
   default_body: string;
 }
 
+export interface BranchUpstream {
+  remote: string;
+  branch: string;
+}
+
 export interface PullResult {
   kind: "up_to_date" | "fast_forward" | "merged" | "conflicts";
   conflicted: string[];
@@ -362,6 +367,9 @@ export const ipc = {
 
   fetchRemote: (repoId: string, remoteName: string) =>
     invoke<void>("fetch_remote", { repoId, remoteName }),
+
+  getBranchUpstream: (repoId: string, branchName: string) =>
+    invoke<BranchUpstream | null>("get_branch_upstream", { repoId, branchName }),
 
   pushBranch: (repoId: string, remoteName: string, branchName: string, force: boolean) =>
     invoke<void>("push_branch", { repoId, remoteName, branchName, force }),
