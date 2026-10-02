@@ -5,6 +5,19 @@ import { useStore } from "@/lib/store";
 import { useCommits, useFileStatus, useHeadInfo, useRefreshRepo, useRefs, useRemotes, useRepoStatus } from "@/lib/queries";
 import { ipc } from "@/lib/ipc";
 import { useOpenWorktree } from "@/lib/useOpenRepo";
+import { toast } from "sonner";
+
+vi.mock("sonner", () => ({
+  toast: {
+    loading: vi.fn(() => "toast-id"),
+    success: vi.fn(),
+    warning: vi.fn(),
+    error: vi.fn(),
+    info: vi.fn(),
+    promise: vi.fn(),
+    dismiss: vi.fn(),
+  },
+}));
 
 // Mock Tauri window
 vi.mock("@tauri-apps/api/window", () => ({
@@ -127,8 +140,8 @@ vi.mock("@/components/detail/StagingFileDiffPanel", () => ({
 // can assert on the `worktree` prop RepoView computes for it, without needing
 // the real dialog's ipc/query dependencies wired up in this test file.
 vi.mock("@/components/actions/Dialogs", () => ({
-  PushRejectedDialog: ({ remoteName, branchName, destinationBranch }: { remoteName: string; branchName: string; destinationBranch?: string }) => (
-    <div data-testid="push-rejected" data-remote={remoteName} data-branch={branchName} data-destination={destinationBranch}>
+  PushRejectedDialog: ({ remoteName, branchName, destinationBranch, setUpstream }: { remoteName: string; branchName: string; destinationBranch?: string; setUpstream?: boolean }) => (
+    <div data-testid="push-rejected" data-remote={remoteName} data-branch={branchName} data-destination={destinationBranch} data-set-upstream={String(setUpstream)}>
       PushRejectedDialog
     </div>
   ),
@@ -338,7 +351,7 @@ describe("RepoView", () => {
       });
       render(<RepoView />);
       fireEvent.click(screen.getByRole("button", { name: /push/i }));
-      await waitFor(() => expect(ipc.pushBranch).toHaveBeenCalledWith("repo1", "fork", "main", false));
+      await waitFor(() => expect(ipc.pushBranch).toHaveBeenCalledWith("repo1", "fork", "main", false, { branch: "main", set_upstream: false }));
     });
 
     it("falls back to the default remote when targets cannot be resolved", async () => {
@@ -347,7 +360,7 @@ describe("RepoView", () => {
       fireEvent.click(screen.getByRole("button", { name: /pull/i }));
       await waitFor(() => expect(ipc.pullBranch).toHaveBeenCalledWith("repo1", "origin"));
       fireEvent.click(screen.getByRole("button", { name: /push/i }));
-      await waitFor(() => expect(ipc.pushBranch).toHaveBeenCalledWith("repo1", "origin", "main", false));
+      await waitFor(() => expect(ipc.pushBranch).toHaveBeenCalledWith("repo1", "origin", "main", false, { branch: "main", set_upstream: false }));
     });
 
     it("force-push dialog names the real destination, not the local branch name", async () => {
@@ -364,6 +377,29 @@ describe("RepoView", () => {
       expect(dlg).toHaveAttribute("data-branch", "feature");
       expect(dlg).toHaveAttribute("data-destination", "main");
     });
+
+    it("hands the resolved target (incl. set_upstream) on to the force-push dialog", async () => {
+      vi.mocked(ipc.getSyncTargets).mockResolvedValue({
+        pull: { remote: "origin", branch: "main" },
+        push: { remote: "origin", branch: "main", set_upstream: true },
+      });
+      vi.mocked(ipc.pushBranch).mockRejectedValue("! [rejected] (non-fast-forward)");
+      render(<RepoView />);
+      fireEvent.click(screen.getByRole("button", { name: /push/i }));
+      const dlg = await screen.findByTestId("push-rejected");
+      expect(ipc.pushBranch).toHaveBeenCalledWith("repo1", "origin", "main", false, { branch: "main", set_upstream: true });
+      expect(dlg).toHaveAttribute("data-set-upstream", "true");
+    });
+
+    it("still pulls (and lets the backend report the error) when the pull branch is unresolvable", async () => {
+      vi.mocked(ipc.getSyncTargets).mockResolvedValue({
+        pull: { remote: "origin", branch: null },
+        push: { remote: "origin", branch: "main", set_upstream: false },
+      });
+      render(<RepoView />);
+      fireEvent.click(screen.getByRole("button", { name: /pull/i }));
+      await waitFor(() => expect(ipc.pullBranch).toHaveBeenCalledWith("repo1", "origin"));
+    });
   });
 
   describe("fetch also fetches the branch's upstream remote", () => {
@@ -375,6 +411,9 @@ describe("RepoView", () => {
     beforeEach(() => {
       vi.mocked(useRemotes).mockReturnValue({ data: TWO_REMOTES } as any);
       vi.mocked(ipc.fetchRemote).mockResolvedValue(undefined as any);
+      vi.mocked(toast.warning).mockClear();
+      vi.mocked(toast.error).mockClear();
+      vi.mocked(toast.success).mockClear();
     });
 
     it("fetches the default remote and a different upstream remote", async () => {
@@ -398,6 +437,34 @@ describe("RepoView", () => {
       fireEvent.click(screen.getByRole("button", { name: /fetch/i }));
       await waitFor(() => expect(ipc.fetchRemote).toHaveBeenCalledTimes(1));
       expect(ipc.fetchRemote).toHaveBeenCalledWith("repo1", "origin");
+    });
+
+    it("refreshes and reports per remote when one remote fails and the other succeeds", async () => {
+      vi.mocked(ipc.getSyncTargets).mockResolvedValue({
+        pull: { remote: "fork", branch: "main" },
+        push: { remote: "fork", branch: "main", set_upstream: false },
+      });
+      vi.mocked(ipc.fetchRemote).mockImplementation((_id: string, name: string) =>
+        name === "fork" ? Promise.reject("fork unreachable") : Promise.resolve(undefined as any));
+      const refreshCalls = mockRefresh.mock.calls.length;
+      render(<RepoView />);
+      fireEvent.click(screen.getByRole("button", { name: /fetch/i }));
+      await waitFor(() => expect(ipc.fetchRemote).toHaveBeenCalledTimes(2));
+      await waitFor(() => expect(mockRefresh.mock.calls.length).toBeGreaterThan(refreshCalls));
+      await waitFor(() => expect(toast.warning).toHaveBeenCalled());
+      const msg = String(vi.mocked(toast.warning).mock.calls[0][0]);
+      expect(msg).toContain("fork");
+      expect(msg).toContain("fork unreachable");
+      expect(msg).toContain("Fetched from origin");
+    });
+
+    it("reports an error and does not refresh when every remote fails", async () => {
+      vi.mocked(ipc.fetchRemote).mockRejectedValue("offline");
+      const refreshCalls = mockRefresh.mock.calls.length;
+      render(<RepoView />);
+      fireEvent.click(screen.getByRole("button", { name: /fetch/i }));
+      await waitFor(() => expect(toast.error).toHaveBeenCalled());
+      expect(mockRefresh.mock.calls.length).toBe(refreshCalls);
     });
 
     it("fetches only the default remote on a detached HEAD", async () => {

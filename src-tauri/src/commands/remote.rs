@@ -87,47 +87,73 @@ pub async fn fetch_remote(
 }
 
 /// A branch's configured upstream: the remote and the branch name on it.
-#[derive(Debug, Serialize)]
-pub struct BranchUpstream {
-    pub remote: String,
-    pub branch: String,
+struct Upstream {
+    remote: String,
+    branch: String,
 }
 
 /// The configured upstream of local `branch_name`, if it tracks a branch
 /// (`refs/heads/*`) on a remote. Anything else reads as "no upstream".
-fn branch_upstream(repo: &git2::Repository, branch_name: &str) -> Option<BranchUpstream> {
+fn branch_upstream(repo: &git2::Repository, branch_name: &str) -> Option<Upstream> {
     let local_ref = format!("refs/heads/{}", branch_name);
     let remote = repo.branch_upstream_remote(&local_ref).ok()?;
     let merge = repo.branch_upstream_merge(&local_ref).ok()?;
     let branch = merge.as_str().ok()?.strip_prefix("refs/heads/")?;
-    Some(BranchUpstream { remote: remote.as_str().ok()?.to_owned(), branch: branch.to_owned() })
+    Some(Upstream { remote: remote.as_str().ok()?.to_owned(), branch: branch.to_owned() })
 }
 
-/// The remote a pull/push of `branch_name` uses: `requested` if given, else the
+fn remote_names(repo: &git2::Repository) -> Vec<String> {
+    repo.remotes()
+        .map(|r| r.iter().flatten().flatten().map(str::to_owned).collect())
+        .unwrap_or_default()
+}
+
+/// The remote a pull of `branch_name` uses: `requested` if given, else the
 /// branch's upstream remote when it still exists, else "origin", else the first
 /// remote. `None` when the repo has no remotes (and none was requested).
 fn choose_remote(repo: &git2::Repository, branch_name: &str, requested: Option<&str>) -> Option<String> {
     if let Some(r) = requested {
         return Some(r.to_owned());
     }
-    let remotes = repo.remotes().ok()?;
-    let names: Vec<&str> = remotes.iter().flatten().flatten().collect();
+    let names = remote_names(repo);
     if let Some(up) = branch_upstream(repo, branch_name) {
-        if names.contains(&up.remote.as_str()) {
+        if names.contains(&up.remote) {
             return Some(up.remote);
         }
     }
-    if names.contains(&"origin") {
+    if names.iter().any(|n| n == "origin") {
         return Some("origin".to_owned());
     }
-    names.first().map(|n| (*n).to_owned())
+    names.into_iter().next()
 }
 
-/// A remote and a branch name on it (the pull source, or a label for it).
+/// The remote a push of `branch_name` uses, following git: `requested`, else
+/// `branch.<name>.pushRemote`, else `remote.pushDefault`, else the pull remote
+/// (upstream remote / origin / first). Configured names of missing remotes are
+/// ignored.
+fn choose_push_remote(repo: &git2::Repository, branch_name: &str, requested: Option<&str>) -> Option<String> {
+    if let Some(r) = requested {
+        return Some(r.to_owned());
+    }
+    let names = remote_names(repo);
+    let cfg = repo.config().ok();
+    let configured = |key: String| {
+        cfg.as_ref()
+            .and_then(|c| c.get_string(&key).ok())
+            .map(|v| v.trim().to_owned())
+            .filter(|v| names.contains(v))
+    };
+    configured(format!("branch.{}.pushRemote", branch_name))
+        .or_else(|| configured("remote.pushDefault".to_owned()))
+        .or_else(|| choose_remote(repo, branch_name, None))
+}
+
+/// The pull source shown in the UI. `branch` is `None` when the branch's
+/// configured upstream on `remote` can't be pulled (the pull itself reports why).
 #[derive(Debug, Serialize)]
 pub struct SyncTarget {
     pub remote: String,
-    pub branch: String,
+    pub branch: Option<String>,
 }
 
 /// Where a push of a local branch goes. `branch` is the destination name.
@@ -148,12 +174,12 @@ pub struct SyncTargets {
 }
 
 /// Mirrors git's `push.default`: with `upstream`/`tracking` and the upstream on
-/// the target remote the push goes to the upstream branch; otherwise (unset,
+/// the push remote the push goes to the upstream branch; otherwise (unset,
 /// `simple`, `current`, ...) to the SAME-named branch — never onto a
 /// differently-named upstream, so a `feature` made from `origin/main` can't
 /// overwrite `main`. A branch with no upstream at all gets `--set-upstream`.
 fn resolve_push_target(repo: &git2::Repository, remote: Option<&str>, branch_name: &str) -> Option<PushTarget> {
-    let remote = choose_remote(repo, branch_name, remote)?;
+    let remote = choose_push_remote(repo, branch_name, remote)?;
     let upstream = branch_upstream(repo, branch_name);
     let follow_upstream = repo
         .config()
@@ -169,20 +195,17 @@ fn resolve_push_target(repo: &git2::Repository, remote: Option<&str>, branch_nam
     Some(PushTarget { remote, branch, set_upstream })
 }
 
-/// Pull counterpart of `resolve_push_target`: the branch's upstream when it is
-/// on the chosen remote, otherwise the same-named branch there.
-fn resolve_pull_target(repo: &git2::Repository, remote: Option<&str>, branch_name: &str) -> Option<SyncTarget> {
-    let remote = choose_remote(repo, branch_name, remote)?;
-    let branch = match branch_upstream(repo, branch_name) {
-        Some(up) if up.remote == remote => up.branch,
-        _ => branch_name.to_owned(),
-    };
+/// Pull label for `branch_name`, derived from the same resolver the pull uses
+/// so the two can't disagree.
+fn resolve_pull_target(repo: &git2::Repository, branch_name: &str) -> Option<SyncTarget> {
+    let remote = choose_remote(repo, branch_name, None)?;
+    let branch = resolve_pull_source(repo, &remote, branch_name).ok().map(|(b, _)| b);
     Some(SyncTarget { remote, branch })
 }
 
 fn sync_targets(repo: &git2::Repository, branch_name: &str) -> SyncTargets {
     SyncTargets {
-        pull: resolve_pull_target(repo, None, branch_name),
+        pull: resolve_pull_target(repo, branch_name),
         push: resolve_push_target(repo, None, branch_name),
     }
 }
@@ -213,19 +236,41 @@ fn push_args(target: &PushTarget, branch_name: &str, force: bool) -> Vec<String>
     args
 }
 
+/// The push target for a `push_branch` call: the caller's already-resolved
+/// `destination` used verbatim (what the UI showed is what gets pushed), or,
+/// when absent (plugin API), resolved from config for `remote`.
+fn explicit_or_resolved_push_target(
+    repo: &git2::Repository,
+    remote: &str,
+    branch_name: &str,
+    destination: Option<String>,
+    set_upstream: Option<bool>,
+) -> Option<PushTarget> {
+    match destination {
+        Some(branch) => Some(PushTarget {
+            remote: remote.to_owned(),
+            branch,
+            set_upstream: set_upstream.unwrap_or(false),
+        }),
+        None => resolve_push_target(repo, Some(remote), branch_name),
+    }
+}
+
 #[tauri::command]
 pub async fn push_branch(
     repo_id: String,
     remote_name: String,
     branch_name: String,
     force: bool,
+    destination: Option<String>,
+    set_upstream: Option<bool>,
     state: State<'_, RepoState>,
 ) -> Result<()> {
     // Compute args and release the lock before the async network call.
     let (args, workdir) = {
         let repos = state.0.lock().unwrap();
         let repo = repos.get(&repo_id).ok_or_else(|| Error::RepoNotFound(repo_id.clone()))?;
-        let target = resolve_push_target(repo, Some(&remote_name), &branch_name)
+        let target = explicit_or_resolved_push_target(repo, &remote_name, &branch_name, destination, set_upstream)
             .ok_or_else(|| Error::InvalidArg("no remote to push to".into()))?;
         (push_args(&target, &branch_name, force), crate::repo::workdir(repo)?)
     };
@@ -604,13 +649,111 @@ mod tests {
         let _ = std::fs::remove_dir_all(dir);
     }
 
+    fn set_cfg(repo: &Repository, key: &str, value: &str) {
+        repo.config().unwrap().set_str(key, value).unwrap();
+    }
+
+    fn two_remote_repo() -> (PathBuf, Repository) {
+        let (dir, repo) = make_repo();
+        repo.remote("fork", "https://example.invalid/fork.git").unwrap();
+        (dir, repo)
+    }
+
+    #[test]
+    fn push_remote_config_wins_and_keeps_the_same_branch_name() {
+        let (dir, repo) = two_remote_repo();
+        set_upstream(&repo, "main", "origin", "refs/heads/master");
+        set_cfg(&repo, "branch.main.pushRemote", "fork");
+        set_push_default(&repo, "upstream");
+        let t = resolve_push_target(&repo, None, "main").unwrap();
+        // Upstream is on origin, push goes to fork: upstream name does not apply.
+        assert_eq!((t.remote.as_str(), t.branch.as_str()), ("fork", "main"));
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn remote_push_default_is_used_when_no_push_remote() {
+        let (dir, repo) = two_remote_repo();
+        set_upstream(&repo, "main", "origin", "refs/heads/main");
+        set_cfg(&repo, "remote.pushDefault", "fork");
+        let t = resolve_push_target(&repo, None, "main").unwrap();
+        assert_eq!(t.remote, "fork");
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn push_remote_beats_remote_push_default() {
+        let (dir, repo) = two_remote_repo();
+        repo.remote("third", "https://example.invalid/t.git").unwrap();
+        set_cfg(&repo, "remote.pushDefault", "fork");
+        set_cfg(&repo, "branch.main.pushRemote", "third");
+        assert_eq!(resolve_push_target(&repo, None, "main").unwrap().remote, "third");
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn explicit_remote_overrides_push_remote_and_push_default() {
+        let (dir, repo) = two_remote_repo();
+        set_cfg(&repo, "remote.pushDefault", "fork");
+        set_cfg(&repo, "branch.main.pushRemote", "fork");
+        assert_eq!(resolve_push_target(&repo, Some("origin"), "main").unwrap().remote, "origin");
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn push_remote_naming_a_missing_remote_is_ignored() {
+        let (dir, repo) = make_repo();
+        set_cfg(&repo, "branch.main.pushRemote", "gone");
+        set_cfg(&repo, "remote.pushDefault", "gone");
+        assert_eq!(resolve_push_target(&repo, None, "main").unwrap().remote, "origin");
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn pull_ignores_push_remote_and_uses_the_upstream_remote() {
+        let (dir, repo) = two_remote_repo();
+        set_upstream(&repo, "main", "origin", "refs/heads/main");
+        set_cfg(&repo, "branch.main.pushRemote", "fork");
+        let t = sync_targets(&repo, "main");
+        assert_eq!(t.pull.unwrap().remote, "origin");
+        assert_eq!(t.push.unwrap().remote, "fork");
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn pull_label_does_not_claim_a_branch_when_upstream_is_not_a_branch() {
+        let (dir, repo) = make_repo();
+        set_upstream(&repo, "main", "origin", "refs/tags/v1");
+        let pull = sync_targets(&repo, "main").pull.unwrap();
+        assert_eq!(pull.remote, "origin");
+        assert_eq!(pull.branch, None);
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn explicit_destination_is_used_verbatim_ignoring_config() {
+        let (dir, repo) = make_repo();
+        set_upstream(&repo, "feature", "origin", "refs/heads/other");
+        set_push_default(&repo, "upstream");
+        let t = explicit_or_resolved_push_target(&repo, "fork", "feature", Some("dest".into()), Some(true)).unwrap();
+        assert_eq!((t.remote.as_str(), t.branch.as_str(), t.set_upstream), ("fork", "dest", true));
+        assert_eq!(
+            push_args(&t, "feature", true),
+            args(&["push", "--force", "--set-upstream", "fork", "refs/heads/feature:refs/heads/dest"])
+        );
+        // No destination: resolve from config like the plugin API does.
+        let r = explicit_or_resolved_push_target(&repo, "origin", "feature", None, None).unwrap();
+        assert_eq!((r.remote.as_str(), r.branch.as_str()), ("origin", "other"));
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
     #[test]
     fn sync_targets_pull_follows_upstream_push_follows_push_default() {
         let (dir, repo) = make_repo();
         set_upstream(&repo, "feature", "origin", "refs/heads/main");
         let t = sync_targets(&repo, "feature");
         let pull = t.pull.unwrap();
-        assert_eq!((pull.remote.as_str(), pull.branch.as_str()), ("origin", "main"));
+        assert_eq!((pull.remote.as_str(), pull.branch.as_deref()), ("origin", Some("main")));
         let push = t.push.unwrap();
         assert_eq!((push.remote.as_str(), push.branch.as_str(), push.set_upstream), ("origin", "feature", false));
         let _ = std::fs::remove_dir_all(dir);
@@ -630,7 +773,7 @@ mod tests {
         let (dir, repo) = make_repo();
         let t = sync_targets(&repo, "main");
         let pull = t.pull.unwrap();
-        assert_eq!((pull.remote.as_str(), pull.branch.as_str()), ("origin", "main"));
+        assert_eq!((pull.remote.as_str(), pull.branch.as_deref()), ("origin", Some("main")));
         assert!(t.push.unwrap().set_upstream);
         let _ = std::fs::remove_dir_all(dir);
     }

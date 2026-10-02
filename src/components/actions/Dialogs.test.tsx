@@ -411,13 +411,14 @@ describe("Dialogs", () => {
           remoteName="origin"
           branchName="feature"
           destinationBranch="main"
+          setUpstream
           onClose={mockOnClose}
           onSuccess={mockOnSuccess}
         />
       );
       expect(screen.getByText("origin/main")).toBeInTheDocument();
       fireEvent.click(screen.getByRole("button", { name: "Force push" }));
-      expect(ipc.pushBranch).toHaveBeenCalledWith("repo1", "origin", "feature", true);
+      expect(ipc.pushBranch).toHaveBeenCalledWith("repo1", "origin", "feature", true, { branch: "main", set_upstream: true });
       await waitFor(() => expect(mockOnSuccess).toHaveBeenCalled());
     });
 

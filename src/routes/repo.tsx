@@ -74,8 +74,26 @@ async function remotesToFetchFor(repoId: string, remotes: RemoteInfo[], branchNa
   return remotesToFetch(getDefaultRemote(remotes), targets);
 }
 
-async function fetchAll(repoId: string, remoteNames: string[]) {
-  for (const name of remoteNames) await ipc.fetchRemote(repoId, name);
+interface FetchOutcome {
+  fetched: string[];
+  failed: { remote: string; error: string }[];
+}
+
+/**
+ * Fetches each remote independently, one after another: a failing remote (say
+ * an unreachable fork) must not stop the others or hide that they succeeded.
+ */
+async function fetchAll(repoId: string, remoteNames: string[]): Promise<FetchOutcome> {
+  const outcome: FetchOutcome = { fetched: [], failed: [] };
+  for (const name of remoteNames) {
+    try {
+      await ipc.fetchRemote(repoId, name);
+      outcome.fetched.push(name);
+    } catch (e) {
+      outcome.failed.push({ remote: name, error: String(e) });
+    }
+  }
+  return outcome;
 }
 
 // ─── Dialog state ──────────────────────────────────────────────────────────
@@ -97,7 +115,7 @@ type DialogState =
   | { kind: "revert"; oid: string; summary: string }
   | { kind: "check-in-branch"; oid: string; summary: string }
   | { kind: "pull-conflicts" }
-  | { kind: "push-rejected"; branchName: string; remoteName: string; destinationBranch: string }
+  | { kind: "push-rejected"; branchName: string; remoteName: string; destinationBranch: string; setUpstream: boolean }
   | { kind: "remote-error"; message: string }
   | { kind: "create-tag"; oid: string }
   | { kind: "delete-tag"; tagName: string }
@@ -182,9 +200,9 @@ export function RepoView() {
     autoFetchInFlightRef.current = true;
     lastAutoFetchRef.current = Date.now();
     try {
-      await fetchAll(forRepoId, await remotesToFetchFor(forRepoId, rs, headBranchRef.current));
+      const { fetched } = await fetchAll(forRepoId, await remotesToFetchFor(forRepoId, rs, headBranchRef.current));
       if (repoIdRef.current !== forRepoId) return;
-      refreshRef.current();
+      if (fetched.length > 0) refreshRef.current();
     } catch {
       // silent — user can manually fetch if needed
     } finally {
@@ -207,21 +225,17 @@ export function RepoView() {
     const myRepoId = repoId;
 
     setIsFetching(true);
-    const p = remotesToFetchFor(repoId, remotes, head?.branch).then(async (names) => {
-      await fetchAll(myRepoId, names);
-      return names.join(", ");
-    });
-    toast.promise(p, {
-      loading: "Fetching…",
-      success: (names) => `Fetched from ${names}`,
-      error: (e) => `Fetch failed: ${e}`,
-    });
+    const toastId = toast.loading("Fetching…");
     try {
-      await p;
-      if (repoIdRef.current !== myRepoId) return;
-      refresh();
-    } catch {
-      // error already shown by toast
+      const names = await remotesToFetchFor(myRepoId, remotes, head?.branch);
+      const { fetched, failed } = await fetchAll(myRepoId, names);
+      if (fetched.length > 0 && repoIdRef.current === myRepoId) refresh();
+      const failures = failed.map((f) => `${f.remote} (${f.error})`).join("; ");
+      if (failed.length === 0) toast.success(`Fetched from ${fetched.join(", ")}`, { id: toastId });
+      else if (fetched.length > 0) toast.warning(`Fetched from ${fetched.join(", ")}; failed: ${failures}`, { id: toastId });
+      else toast.error(`Fetch failed: ${failures}`, { id: toastId });
+    } catch (e) {
+      toast.error(`Fetch failed: ${e}`, { id: toastId });
     } finally {
       setIsFetching(false);
     }
@@ -240,7 +254,7 @@ export function RepoView() {
     }
     const p = ipc.pullBranch(repoId, pull.remote);
     toast.promise(p, {
-      loading: `Pulling ${pull.remote}/${pull.branch}…`,
+      loading: pull.branch ? `Pulling ${pull.remote}/${pull.branch}…` : `Pulling from ${pull.remote}…`,
       success: (result) =>
         result.kind === "up_to_date"
           ? "Already up to date"
@@ -276,7 +290,8 @@ export function RepoView() {
       return;
     }
     const { remote: remoteName, branch: destinationBranch } = push;
-    const p = ipc.pushBranch(repoId, remoteName, branchName, false);
+    // Push exactly what the label shows: hand the resolved destination to the backend.
+    const p = ipc.pushBranch(repoId, remoteName, branchName, false, { branch: destinationBranch, set_upstream: push.set_upstream });
     toast.promise(p, {
       loading: `Pushing ${branchName} to ${remoteName}/${destinationBranch}…`,
       success: `Pushed ${branchName} to ${remoteName}/${destinationBranch}`,
@@ -290,7 +305,7 @@ export function RepoView() {
       if (repoIdRef.current !== myRepoId) return;
       const msg = String(e);
       if (msg.includes("non-fast-forward") || msg.includes("rejected") || msg.includes("fetch first")) {
-        setDialog({ kind: "push-rejected", branchName, remoteName, destinationBranch });
+        setDialog({ kind: "push-rejected", branchName, remoteName, destinationBranch, setUpstream: push.set_upstream });
       } else {
         setDialog({ kind: "remote-error", message: msg });
       }
@@ -1055,6 +1070,7 @@ export function RepoView() {
           remoteName={dialog.remoteName}
           branchName={dialog.branchName}
           destinationBranch={dialog.destinationBranch}
+          setUpstream={dialog.setUpstream}
           onClose={() => setDialog({ kind: "none" })}
           onSuccess={() => { setDialog({ kind: "none" }); refresh(); }}
         />

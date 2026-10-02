@@ -149,15 +149,20 @@ export function PullConflictsDialog({ repoId, onClose, onAbort }: PullConflictsP
 interface PushRejectedProps {
   repoId: string;
   remoteName: string;
-  /** Local branch being pushed; the backend resolves the same destination again for the force push. */
+  /** Local branch being pushed. */
   branchName: string;
-  /** Branch on the remote the push (and the force push) goes to; defaults to `branchName`. */
+  /**
+   * Branch on the remote the push (and the force push) goes to. When given, the
+   * force push uses it verbatim; otherwise the backend resolves a destination.
+   */
   destinationBranch?: string;
+  /** Whether the original push recorded an upstream (`--set-upstream`); repeated on the force push. */
+  setUpstream?: boolean;
   onClose: () => void;
   onSuccess: () => void;
 }
 
-export function PushRejectedDialog({ repoId, remoteName, branchName, destinationBranch, onClose, onSuccess }: PushRejectedProps) {
+export function PushRejectedDialog({ repoId, remoteName, branchName, destinationBranch, setUpstream, onClose, onSuccess }: PushRejectedProps) {
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
@@ -165,7 +170,8 @@ export function PushRejectedDialog({ repoId, remoteName, branchName, destination
     setLoading(true);
     setError(null);
     try {
-      await ipc.pushBranch(repoId, remoteName, branchName, true);
+      if (destinationBranch === undefined) await ipc.pushBranch(repoId, remoteName, branchName, true);
+      else await ipc.pushBranch(repoId, remoteName, branchName, true, { branch: destinationBranch, set_upstream: setUpstream ?? false });
       onSuccess();
     } catch (e) {
       setError(String(e));
