@@ -729,7 +729,7 @@ mod tests {
         // Two separate, non-adjacent edits — two hunks.
         let workdir = repo.workdir().unwrap().to_path_buf();
         std::fs::write(
-            &workdir.join("file.txt"),
+            workdir.join("file.txt"),
             "ONE\ntwo\nthree\nfour\nfive\nsix\nseven\nEIGHT\nnine\nTEN\n",
         )
         .unwrap();
@@ -757,7 +757,7 @@ mod tests {
         // Stage both edits fully (simulate "stage all").
         let workdir = repo.workdir().unwrap().to_path_buf();
         std::fs::write(
-            &workdir.join("file.txt"),
+            workdir.join("file.txt"),
             "ONE\ntwo\nthree\nfour\nfive\nsix\nseven\nEIGHT\nnine\nTEN\n",
         )
         .unwrap();

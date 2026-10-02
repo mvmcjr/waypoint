@@ -241,12 +241,12 @@ fn ensure_in_path(dir: &Path) -> Result<bool, String> {
     #[cfg(target_os = "windows")]
     {
         let dir_str = dir.to_str().ok_or("Invalid shim directory")?;
-        return path_add(dir_str);
+        path_add(dir_str)
     }
     #[cfg(not(target_os = "windows"))]
     {
         let _ = dir;
-        return path_add_unix();
+        path_add_unix()
     }
 }
 
@@ -254,14 +254,14 @@ fn remove_from_path(dir: &Path) -> Result<(), String> {
     #[cfg(target_os = "windows")]
     {
         let dir_str = dir.to_str().ok_or("Invalid shim directory")?;
-        return path_remove(dir_str);
+        path_remove(dir_str)
     }
     #[cfg(not(target_os = "windows"))]
     {
         // On Unix we intentionally leave shell configs alone — ~/.local/bin
         // may contain other tools the user relies on.
         let _ = dir;
-        return Ok(());
+        Ok(())
     }
 }
 

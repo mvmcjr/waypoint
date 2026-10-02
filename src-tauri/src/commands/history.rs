@@ -22,23 +22,21 @@ pub fn walk_commits(
     let mut ref_map: std::collections::HashMap<String, Vec<String>> = std::collections::HashMap::new();
     let mut local_branch_map: std::collections::HashMap<String, Vec<String>> = std::collections::HashMap::new();
     let mut remote_branch_map: std::collections::HashMap<String, Vec<String>> = std::collections::HashMap::new();
-    for reference in repo.references()? {
-        if let Ok(r) = reference {
-            let shorthand = r.shorthand().unwrap_or("").to_owned();
-            let target = match r.kind() {
-                Some(git2::ReferenceType::Direct) => r.target(),
-                Some(git2::ReferenceType::Symbolic) => r.resolve().ok().and_then(|res| res.target()),
-                None => None,
-            };
-            if let Some(oid) = target {
-                let _ = walk.push(oid);
-                let oid_s = oid.to_string();
-                ref_map.entry(oid_s.clone()).or_default().push(shorthand.clone());
-                if r.is_branch() {
-                    local_branch_map.entry(oid_s.clone()).or_default().push(shorthand);
-                } else if r.is_remote() {
-                    remote_branch_map.entry(oid_s).or_default().push(shorthand);
-                }
+    for r in repo.references()?.flatten() {
+        let shorthand = r.shorthand().unwrap_or("").to_owned();
+        let target = match r.kind() {
+            Some(git2::ReferenceType::Direct) => r.target(),
+            Some(git2::ReferenceType::Symbolic) => r.resolve().ok().and_then(|res| res.target()),
+            None => None,
+        };
+        if let Some(oid) = target {
+            let _ = walk.push(oid);
+            let oid_s = oid.to_string();
+            ref_map.entry(oid_s.clone()).or_default().push(shorthand.clone());
+            if r.is_branch() {
+                local_branch_map.entry(oid_s.clone()).or_default().push(shorthand);
+            } else if r.is_remote() {
+                remote_branch_map.entry(oid_s).or_default().push(shorthand);
             }
         }
     }
@@ -358,7 +356,7 @@ mod tests {
         // No commits yet — HEAD is unborn. Use a well-formed but nonexistent oid;
         // the unborn check short-circuits before it would ever be looked up.
         let result = commit_in_ref(&repo, "0000000000000000000000000000000000000000", None);
-        assert_eq!(result.unwrap(), false);
+        assert!(!result.unwrap());
         let _ = std::fs::remove_dir_all(dir);
     }
 
