@@ -188,7 +188,7 @@ fn list_refs_impl(repo: &git2::Repository) -> Result<Vec<RefInfo>> {
     let head_symbolic_target = repo
         .find_reference("HEAD")
         .ok()
-        .and_then(|h| h.symbolic_target().map(|t| t.to_owned()));
+        .and_then(|h| h.symbolic_target().ok().flatten().map(|t| t.to_owned()));
 
     // Single pass: build RefInfo structs AND seed the BFS from remote tips.
     // Remote tracking refs are always direct commit refs, so their target_oid

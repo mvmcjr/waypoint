@@ -363,7 +363,7 @@ fn discard_all_in(repo: &git2::Repository) -> Result<()> {
                     .statuses(Some(&mut opts))?
                     .iter()
                     .filter(|e| e.status().contains(git2::Status::WT_NEW))
-                    .filter_map(|e| e.path().map(|p| p.to_owned()))
+                    .filter_map(|e| e.path().ok().map(|p| p.to_owned()))
                     .collect();
 
                 // Nothing to reset to, so empty the index instead: staged files are
@@ -388,7 +388,7 @@ fn discard_all_in(repo: &git2::Repository) -> Result<()> {
             .map(|names| {
                 names
                     .iter()
-                    .flatten()
+                    .flatten().flatten()
                     .filter_map(|name| repo.find_worktree(name).ok())
                     .map(|wt| crate::repo::canonical_path(wt.path()))
                     .collect()
@@ -402,7 +402,7 @@ fn discard_all_in(repo: &git2::Repository) -> Result<()> {
         let statuses = repo.statuses(Some(&mut opts))?;
         for entry in statuses.iter() {
             if entry.status().contains(git2::Status::WT_NEW) {
-                if let Some(path) = entry.path() {
+                if let Ok(path) = entry.path() {
                     if deletable.as_ref().is_some_and(|set| !set.contains(path)) {
                         continue;
                     }

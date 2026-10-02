@@ -109,7 +109,7 @@ fn head_info(repo: &git2::Repository) -> Result<HeadInfo> {
             let branch = repo
                 .find_reference("HEAD")
                 .ok()
-                .and_then(|r| r.symbolic_target().map(|t| {
+                .and_then(|r| r.symbolic_target().ok().flatten().map(|t| {
                     t.strip_prefix("refs/heads/").unwrap_or(t).to_owned()
                 }));
             return Ok(HeadInfo { oid: None, branch });
@@ -124,7 +124,7 @@ fn head_info(repo: &git2::Repository) -> Result<HeadInfo> {
     );
 
     let branch = if head.is_branch() {
-        head.shorthand().map(|s| s.to_owned())
+        head.shorthand().ok().map(|s| s.to_owned())
     } else {
         None
     };
@@ -161,7 +161,7 @@ fn do_checkout(repo: &git2::Repository, refspec: &str, force: bool) -> Result<()
     // required in both cases.
     if let Some(gref) = &reference {
         if gref.is_branch() {
-            if let Some(refname) = gref.name() {
+            if let Ok(refname) = gref.name() {
                 if let Some(path) = crate::repo::checked_out_elsewhere(repo, refname) {
                     let short = gref.shorthand().unwrap_or(refname);
                     if !path.exists() {
@@ -412,10 +412,10 @@ pub fn get_squash_preview(repo_id: String, oids: Vec<String>, state: State<RepoS
     // every later commit's full message become the body.
     let mut oldest_first = range.chain.iter().rev();
     let oldest = oldest_first.next().expect("range is non-empty");
-    let default_subject = oldest.summary().unwrap_or("").trim().to_owned();
+    let default_subject = oldest.summary().ok().flatten().unwrap_or("").trim().to_owned();
 
     let mut body_parts: Vec<String> = Vec::new();
-    let oldest_body = oldest.body().unwrap_or("").trim();
+    let oldest_body = oldest.body().ok().flatten().unwrap_or("").trim();
     if !oldest_body.is_empty() {
         body_parts.push(oldest_body.to_owned());
     }
@@ -465,7 +465,7 @@ pub fn squash_commits(repo_id: String, oids: Vec<String>, message: String, state
 
     let branch_ref = head
         .name()
-        .ok_or_else(|| Error::InvalidArg("HEAD reference has no name".into()))?
+        .map_err(|_| Error::InvalidArg("HEAD reference has no name".into()))?
         .to_owned();
 
     // No descendants beyond the range — just point the branch at the squash.
@@ -602,7 +602,7 @@ pub fn reword_commit(repo_id: String, oid: String, message: String, state: State
 
     let branch_ref = head
         .name()
-        .ok_or_else(|| Error::InvalidArg("HEAD reference has no name".into()))?
+        .map_err(|_| Error::InvalidArg("HEAD reference has no name".into()))?
         .to_owned();
 
     // Target was HEAD — no descendants to replay, just move the branch tip.
@@ -776,7 +776,7 @@ pub fn delete_branch(repo_id: String, name: String, state: State<RepoState>) -> 
 
 fn delete_branch_impl(repo: &git2::Repository, name: &str) -> Result<()> {
     if let Ok(head) = repo.head() {
-        if head.is_branch() && head.shorthand() == Some(name) {
+        if head.is_branch() && head.shorthand().ok() == Some(name) {
             return Err(Error::InvalidArg(format!(
                 "Cannot delete '{}': it is the currently checked-out branch", name
             )));
@@ -1051,7 +1051,7 @@ mod tests {
 
         rename_branch_impl(&main_repo, "feat", "feat2").unwrap();
 
-        let head_target = wt_repo.find_reference("HEAD").unwrap().symbolic_target().unwrap().to_string();
+        let head_target = wt_repo.find_reference("HEAD").unwrap().symbolic_target().unwrap().unwrap().to_string();
         assert_eq!(head_target, "refs/heads/feat2");
 
         let _ = std::fs::remove_dir_all(&wt_dir);

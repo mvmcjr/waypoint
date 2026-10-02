@@ -81,7 +81,7 @@ fn consider_worktree_head(
 
     let Ok(head_ref) = candidate.find_reference("HEAD") else { return };
     // A detached HEAD has no symbolic target — nothing checked out to report.
-    let Some(target) = head_ref.symbolic_target() else { return };
+    let Ok(Some(target)) = head_ref.symbolic_target() else { return };
 
     // Bare repos (and worktrees whose workdir vanished) have no working-dir path
     // to report; git itself doesn't count a bare repo's HEAD as "checked out".
@@ -96,7 +96,7 @@ pub(crate) fn other_worktree_heads(repo: &git2::Repository) -> HashMap<String, P
     let repo_git_dir = std::fs::canonicalize(repo.path()).unwrap_or_else(|_| repo.path().to_path_buf());
 
     if let Ok(names) = repo.worktrees() {
-        for name in names.iter().flatten() {
+        for name in names.iter().flatten().flatten() {
             let Ok(wt) = repo.find_worktree(name) else { continue };
             if wt.validate().is_err() {
                 // Deleted-but-unpruned: the folder is gone (or otherwise invalid),

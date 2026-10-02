@@ -36,7 +36,7 @@ struct HeadState {
 fn head_state(r: &git2::Repository) -> HeadState {
     let oid = r.head().ok().and_then(|h| h.target());
     match r.find_reference("HEAD") {
-        Ok(h) => match h.symbolic_target() {
+        Ok(h) => match h.symbolic_target().ok().flatten() {
             Some(t) => HeadState {
                 branch: Some(t.strip_prefix("refs/heads/").unwrap_or(t).to_owned()),
                 oid,
@@ -95,7 +95,7 @@ pub(crate) fn list_worktrees_impl(repo: &git2::Repository) -> Result<Vec<Worktre
     }
 
     let mut linked: Vec<WorktreeInfo> = Vec::new();
-    for name in repo.worktrees()?.iter().flatten() {
+    for name in repo.worktrees()?.iter().flatten().flatten() {
         let Ok(wt) = repo.find_worktree(name) else { continue };
         let path = canonical_path(wt.path());
         let (is_locked, lock_reason) = match wt.is_locked() {
@@ -394,7 +394,7 @@ mod tests {
     fn locked_worktree_reports_reason() {
         let (main_dir, main) = make_repo_with_commit();
         let (wt_dir, _wt) = add_worktree(&main, "lck", "feat");
-        let name = main.worktrees().unwrap().iter().flatten().next().unwrap().to_owned();
+        let name = main.worktrees().unwrap().iter().flatten().flatten().next().unwrap().to_owned();
         main.find_worktree(&name).unwrap().lock(Some("agent running")).unwrap();
         let list = list_worktrees_impl(&main).unwrap();
         let w = by_name(&list, "lck");
@@ -531,7 +531,7 @@ mod tests {
     fn remove_refuses_locked_with_reason() {
         let (main_dir, main) = make_repo_with_commit();
         let (wt_dir, _wt) = add_worktree(&main, "rmlock", "feat");
-        let name = main.worktrees().unwrap().iter().flatten().next().unwrap().to_owned();
+        let name = main.worktrees().unwrap().iter().flatten().flatten().next().unwrap().to_owned();
         main.find_worktree(&name).unwrap().lock(Some("agent running")).unwrap();
         let st = state_with("m", main);
         let err = remove_worktree_blocking(&st, "m", &canonical_string(&wt_dir), true, false).unwrap_err();

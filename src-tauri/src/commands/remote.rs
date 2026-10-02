@@ -64,7 +64,7 @@ pub fn list_remotes(repo_id: String, state: State<'_, RepoState>) -> Result<Vec<
     let names = repo.remotes()?;
     let mut result = Vec::new();
     for name_opt in names.iter() {
-        if let Some(name) = name_opt {
+        if let Ok(Some(name)) = name_opt {
             // Skip a remote whose config can't be read rather than failing the whole
             // list — one broken entry shouldn't hide Fetch/Pull/Push for the others.
             let Ok(remote) = repo.find_remote(name) else { continue };
@@ -165,7 +165,7 @@ pub async fn pull_branch(
         }
         let branch_name = head
             .shorthand()
-            .ok_or_else(|| Error::InvalidArg("Cannot determine current branch name.".into()))?
+            .map_err(|_| Error::InvalidArg("Cannot determine current branch name.".into()))?
             .to_string();
         (branch_name, crate::repo::workdir(repo)?)
     }; // MutexGuard dropped here — safe to .await below
@@ -178,7 +178,7 @@ pub async fn pull_branch(
 
     // Guard against a concurrent checkout that happened while we were fetching.
     let current_head = repo.head()?;
-    if !current_head.is_branch() || current_head.shorthand() != Some(branch_name.as_str()) {
+    if !current_head.is_branch() || current_head.shorthand().ok() != Some(branch_name.as_str()) {
         return Err(Error::InvalidArg(
             "HEAD changed during fetch; checkout the intended branch and try again.".into(),
         ));

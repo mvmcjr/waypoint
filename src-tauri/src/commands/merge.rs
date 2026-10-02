@@ -492,7 +492,7 @@ fn revert_impl(repo: &git2::Repository, oid_str: &str) -> Result<CherryPickResul
     let mut index = repo.index()?;
     index.write()?;
 
-    let summary = commit.summary().unwrap_or("");
+    let summary = commit.summary().ok().flatten().unwrap_or("");
     let msg = format!("revert: {}\n\nThis reverts commit {}.", summary, oid_str);
 
     if index.has_conflicts() {

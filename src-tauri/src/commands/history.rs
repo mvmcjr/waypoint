@@ -107,7 +107,7 @@ pub fn walk_commits(
 
         let author = commit.author();
         let timestamp = commit.time().seconds();
-        let summary = commit.summary().unwrap_or("").to_owned();
+        let summary = commit.summary().ok().flatten().unwrap_or("").to_owned();
         // Body is intentionally omitted from the list payload (fetched lazily via
         // get_commit when a commit is selected) — keeps the walk light for big repos.
         let refs = ref_map.get(&oid_s).cloned().unwrap_or_default();
@@ -212,8 +212,8 @@ pub fn get_commit(repo_id: String, oid: String, state: State<RepoState>) -> Resu
     Ok(CommitNode {
         oid: git_oid.to_string(),
         parent_oids,
-        summary: commit.summary().unwrap_or("").to_owned(),
-        body: commit.body().unwrap_or("").trim().to_owned(),
+        summary: commit.summary().ok().flatten().unwrap_or("").to_owned(),
+        body: commit.body().ok().flatten().unwrap_or("").trim().to_owned(),
         author_name: author.name().unwrap_or("").to_owned(),
         author_email: author.email().unwrap_or("").to_owned(),
         timestamp: commit.time().seconds(),
