@@ -3,7 +3,9 @@ use serde::Serialize;
 use tauri::State;
 
 use crate::error::{Error, Result};
-use crate::repo::lock_retry::retry_on_locked;
+use std::time::Duration;
+
+use crate::repo::lock_retry::{reset_hard_for, write_index, write_index_for, MAX_WAIT};
 use crate::repo::RepoState;
 
 #[derive(Debug, Serialize)]
@@ -83,7 +85,7 @@ pub fn stage_file(repo_id: String, path: String, state: State<RepoState>) -> Res
         // File was deleted in the working tree — stage the deletion.
         index.remove_path(Path::new(&path))?;
     }
-    retry_on_locked(|| Ok(index.write()?))?;
+    write_index(&mut index)?;
     Ok(())
 }
 
@@ -131,7 +133,7 @@ pub fn unstage_file(repo_id: String, path: String, state: State<RepoState>) -> R
         }
     }
 
-    retry_on_locked(|| Ok(index.write()?))?;
+    write_index(&mut index)?;
     Ok(())
 }
 
@@ -145,7 +147,7 @@ pub fn stage_all(repo_id: String, state: State<RepoState>) -> Result<()> {
     // add_all handles new + modified files; update_all handles modifications + deletions.
     index.add_all(["*"].iter(), git2::IndexAddOption::DEFAULT, None)?;
     index.update_all(["*"].iter(), None)?;
-    retry_on_locked(|| Ok(index.write()?))?;
+    write_index(&mut index)?;
     Ok(())
 }
 
@@ -164,7 +166,7 @@ pub fn stage_paths(repo_id: String, paths: Vec<String>, state: State<RepoState>)
             index.remove_path(Path::new(path))?;
         }
     }
-    retry_on_locked(|| Ok(index.write()?))?;
+    write_index(&mut index)?;
     Ok(())
 }
 
@@ -211,7 +213,7 @@ pub fn unstage_paths(repo_id: String, paths: Vec<String>, state: State<RepoState
         }
     }
 
-    retry_on_locked(|| Ok(index.write()?))?;
+    write_index(&mut index)?;
     Ok(())
 }
 
@@ -247,7 +249,7 @@ pub fn discard_file(repo_id: String, path: String, state: State<RepoState>) -> R
             path: path.clone().into_bytes(),
         };
         index.add(&entry)?;
-        retry_on_locked(|| Ok(index.write()?))?;
+        write_index(&mut index)?;
 
         // Restore working-tree file from the now-updated index.
         let mut co = git2::build::CheckoutBuilder::new();
@@ -256,7 +258,7 @@ pub fn discard_file(repo_id: String, path: String, state: State<RepoState>) -> R
     } else {
         // New file with no HEAD version: delete from disk and remove from index.
         let _ = index.remove_path(Path::new(&path));
-        retry_on_locked(|| Ok(index.write()?))?;
+        write_index(&mut index)?;
         let full = workdir.join(&path);
         if full.exists() {
             std::fs::remove_file(&full)
@@ -311,7 +313,7 @@ pub fn discard_paths(repo_id: String, paths: Vec<String>, state: State<RepoState
         }
     }
 
-    retry_on_locked(|| Ok(index.write()?))?;
+    write_index(&mut index)?;
 
     if !tracked.is_empty() {
         let mut co = git2::build::CheckoutBuilder::new();
@@ -331,18 +333,35 @@ pub fn discard_paths(repo_id: String, paths: Vec<String>, state: State<RepoState
 /// on disk (unstaged) rather than being destroyed.
 #[tauri::command]
 pub fn discard_all(repo_id: String, state: State<RepoState>) -> Result<()> {
-    {
+    let result = {
         let repos = state.0.lock().unwrap();
         let repo = repos.get(&repo_id).ok_or_else(|| Error::RepoNotFound(repo_id.clone()))?;
-        discard_all_in(repo)?;
+        discard_all_in(repo)
+    };
+    reopen_cached(&state, repo_id, result)
+}
+
+/// Re-open with a fresh handle so libgit2's internal cache reflects the on-disk state.
+/// This also runs after a failed discard: a half-applied one may have left the cached
+/// handle's in-memory index differing from disk, and a later stage/commit would write
+/// that. The original error wins over a reopen failure.
+fn reopen_cached(state: &RepoState, repo_id: String, result: Result<()>) -> Result<()> {
+    match git2::Repository::open(&repo_id) {
+        Ok(fresh) => {
+            state.0.lock().unwrap().insert(repo_id, fresh);
+        }
+        Err(e) if result.is_ok() => return Err(e.into()),
+        Err(_) => {}
     }
-    // Re-open with a fresh handle so libgit2's internal cache reflects the reset state.
-    let fresh = git2::Repository::open(&repo_id)?;
-    state.0.lock().unwrap().insert(repo_id, fresh);
-    Ok(())
+    result
 }
 
 fn discard_all_in(repo: &git2::Repository) -> Result<()> {
+    discard_all_in_for(MAX_WAIT, repo)
+}
+
+/// [`discard_all_in`] with an explicit lock-retry budget (short in tests).
+fn discard_all_in_for(max_wait: Duration, repo: &git2::Repository) -> Result<()> {
     {
         // On an unborn HEAD the sweep below is restricted to the paths that were
         // already untracked before the index was emptied. Without that snapshot,
@@ -353,7 +372,7 @@ fn discard_all_in(repo: &git2::Repository) -> Result<()> {
             Ok(head) => {
                 let commit = head.peel_to_commit()?;
                 // Hard reset is idempotent, so it is safe to retry if index.lock is held.
-                retry_on_locked(|| Ok(repo.reset(commit.as_object(), git2::ResetType::Hard, None)?))?;
+                reset_hard_for(max_wait, repo, commit.as_object())?;
                 None
             }
             Err(e) if e.code() == git2::ErrorCode::UnbornBranch => {
@@ -374,7 +393,7 @@ fn discard_all_in(repo: &git2::Repository) -> Result<()> {
                 index.clear()?;
                 // Only the write is retried: the untracked snapshot above must not
                 // be retaken once the in-memory index has been cleared.
-                retry_on_locked(|| Ok(index.write()?))?;
+                write_index_for(max_wait, &mut index)?;
                 Some(untracked)
             }
             Err(e) => return Err(e.into()),
@@ -465,7 +484,7 @@ pub fn do_commit(repo_id: String, message: String, state: State<RepoState>) -> R
     };
     let parents: Vec<&git2::Commit> = parent_commits.iter().collect();
 
-    retry_on_locked(|| Ok(repo.commit(Some("HEAD"), &sig, &sig, &message, &tree, &parents)?))?;
+    repo.commit(Some("HEAD"), &sig, &sig, &message, &tree, &parents)?;
     Ok(())
 }
 
@@ -770,7 +789,7 @@ mod tests {
         let (dir, repo) = crate::repo::test_support::make_repo_with_commit();
         let lock = dir.join(".git").join("index.lock");
         std::fs::write(&lock, "").unwrap();
-        let err = discard_all_in(&repo).expect_err("must fail while locked");
+        let err = discard_all_in_for(Duration::from_millis(30), &repo).expect_err("must fail while locked");
         match err {
             Error::Git(e) => {
                 assert_eq!(e.code(), git2::ErrorCode::Locked);
@@ -785,19 +804,80 @@ mod tests {
     #[test]
     fn discard_all_succeeds_when_lock_released_shortly() {
         let (dir, repo) = crate::repo::test_support::make_repo_with_commit();
-        std::fs::write(dir.join("a.txt"), "dirty").unwrap();
+        // Different length from "hello", so the change is visible from stat data alone.
+        std::fs::write(dir.join("a.txt"), "dirty and longer").unwrap();
         std::fs::write(dir.join("junk.txt"), "x").unwrap();
         let lock = dir.join(".git").join("index.lock");
         std::fs::write(&lock, "").unwrap();
         let l2 = lock.clone();
         let h = std::thread::spawn(move || {
-            std::thread::sleep(std::time::Duration::from_millis(300));
+            std::thread::sleep(Duration::from_millis(30));
             std::fs::remove_file(l2).unwrap();
         });
-        discard_all_in(&repo).expect("should retry until the lock is released");
+        discard_all_in_for(Duration::from_millis(500), &repo).expect("should retry until the lock is released");
         h.join().unwrap();
         assert_eq!(std::fs::read_to_string(dir.join("a.txt")).unwrap(), "hello");
         assert!(!dir.join("junk.txt").exists());
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    fn staged_paths(repo: &Repository) -> Vec<String> {
+        let idx = repo.index().unwrap();
+        idx.iter().map(|e| String::from_utf8(e.path).unwrap()).collect()
+    }
+
+    /// A failed discard on an unborn HEAD clears the cached handle's in-memory index
+    /// before the write fails. That must not leak: disk and a later write keep the
+    /// staged files.
+    #[test]
+    fn failed_discard_on_unborn_head_does_not_poison_the_cached_index() {
+        let (dir, repo) = make_repo();
+        stage(&repo, "one.txt", "1");
+        stage(&repo, "two.txt", "2");
+        let lock = dir.join(".git").join("index.lock");
+        std::fs::write(&lock, "").unwrap();
+
+        discard_all_in_for(Duration::from_millis(30), &repo).expect_err("lock outlasts the budget");
+        std::fs::remove_file(&lock).unwrap();
+
+        // On disk, via a fresh handle.
+        let fresh = Repository::open(&dir).unwrap();
+        assert_eq!(staged_paths(&fresh), ["one.txt", "two.txt"]);
+        // In the cached handle, and a later stage of another path keeps them.
+        assert_eq!(staged_paths(&repo), ["one.txt", "two.txt"]);
+        std::fs::write(dir.join("three.txt"), "3").unwrap();
+        let mut index = repo.index().unwrap();
+        index.add_path(Path::new("three.txt")).unwrap();
+        write_index(&mut index).unwrap();
+        let fresh = Repository::open(&dir).unwrap();
+        assert_eq!(staged_paths(&fresh), ["one.txt", "three.txt", "two.txt"]);
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    /// `discard_all` swaps in a fresh handle even when the discard failed, and still
+    /// reports the discard's error.
+    #[test]
+    fn reopen_cached_replaces_the_handle_and_keeps_the_original_error() {
+        let (dir, repo) = make_repo();
+        stage(&repo, "one.txt", "1");
+        let id = dir.to_string_lossy().to_string();
+        let state = RepoState(std::sync::Mutex::new(std::collections::HashMap::new()));
+        state.0.lock().unwrap().insert(id.clone(), repo);
+
+        let failed: Result<()> = Err(Error::InvalidArg("discard failed".into()));
+        let r = reopen_cached(&state, id.clone(), failed);
+        assert!(matches!(r, Err(Error::InvalidArg(_))));
+        assert!(state.0.lock().unwrap().contains_key(&id));
+
+        // Reopen failure after a successful discard is surfaced...
+        assert!(reopen_cached(&state, dir.join("nope").to_string_lossy().to_string(), Ok(())).is_err());
+        // ...but never masks the discard's own error.
+        let r = reopen_cached(
+            &state,
+            dir.join("nope").to_string_lossy().to_string(),
+            Err(Error::InvalidArg("discard failed".into())),
+        );
+        assert!(matches!(r, Err(Error::InvalidArg(_))));
+        let _ = std::fs::remove_dir_all(dir);
     }
 }

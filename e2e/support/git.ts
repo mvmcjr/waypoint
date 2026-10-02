@@ -3,7 +3,9 @@ import { execFileSync } from 'node:child_process';
 /** Runs `git <args>` in `dir`; returns trimmed stdout, throws with stderr on failure. */
 export function git(dir: string, ...args: string[]): string {
   try {
-    return execFileSync('git', args, { cwd: dir, encoding: 'utf8' }).trim();
+    // --no-optional-locks: `git status` otherwise takes .git/index.lock to refresh the index,
+    // which would make the app's own index writes fail with ELOCKED while we poll.
+    return execFileSync('git', ['--no-optional-locks', ...args], { cwd: dir, encoding: 'utf8' }).trim();
   } catch (err) {
     const e = err as { stderr?: Buffer | string; message?: string };
     const stderr = e.stderr ? e.stderr.toString() : e.message ?? String(err);
