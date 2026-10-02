@@ -21,7 +21,8 @@ pub(crate) fn parse_stash_branch(message: &str) -> Option<String> {
     (!branch.is_empty() && branch != "(no branch)").then(|| branch.to_owned())
 }
 
-/// Mirror the git CLI's automatic stash message: "WIP on <branch>: <short-oid> <summary>".
+/// The git CLI's automatic stash message format, "WIP on <branch>: <short-oid> <summary>",
+/// except the summary is cut to 50 chars (git keeps it whole) to keep stash rows short.
 fn default_stash_message(repo: &git2::Repository) -> Result<String> {
     let head = repo.head()?;
     // Detached HEAD's shorthand is literally "HEAD"; git says "(no branch)",
