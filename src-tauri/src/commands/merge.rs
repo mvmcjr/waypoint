@@ -378,7 +378,7 @@ fn cherry_pick_impl(repo: &git2::Repository, oid_str: &str) -> Result<CherryPick
     let mut index = repo.index()?;
     index.write()?;
 
-    let msg = lossy(Some(commit.message_bytes()));
+    let msg = lossy(commit.message_bytes());
 
     if index.has_conflicts() {
         // libgit2 wrote CHERRY_PICK_HEAD but NOT CHERRY_PICK_MSG; write it so get_merge_status

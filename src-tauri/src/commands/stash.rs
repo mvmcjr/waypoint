@@ -27,7 +27,7 @@ fn default_stash_message(repo: &git2::Repository) -> Result<String> {
     // Detached HEAD's shorthand is literally "HEAD"; git says "(no branch)",
     // which is also what parse_stash_branch recognises as branchless.
     let branch = if head.is_branch() {
-        lossy(Some(head.shorthand_bytes()))
+        lossy(head.shorthand_bytes())
     } else {
         "(no branch)".to_owned()
     };

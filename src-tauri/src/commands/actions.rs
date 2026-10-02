@@ -422,7 +422,7 @@ pub fn get_squash_preview(repo_id: String, oids: Vec<String>, state: State<RepoS
         body_parts.push(oldest_body.to_owned());
     }
     for c in oldest_first {
-        let msg = lossy(Some(c.message_bytes()));
+        let msg = lossy(c.message_bytes());
         let msg = msg.trim();
         if !msg.is_empty() {
             body_parts.push(msg.to_owned());

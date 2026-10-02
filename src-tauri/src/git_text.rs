@@ -4,20 +4,21 @@
 /// `Signature::name`, …) fail on non-UTF-8 — e.g. commits made with
 /// `i18n.commitEncoding=ISO-8859-1` — which would blank the text entirely.
 /// Pair this with the `*_bytes()` accessors instead, so such text stays
-/// readable (invalid bytes become U+FFFD). `None` (no summary/body) is "".
-pub(crate) fn lossy(bytes: Option<&[u8]>) -> String {
-    bytes.map(|b| String::from_utf8_lossy(b).into_owned()).unwrap_or_default()
+/// readable (invalid bytes become U+FFFD). Takes `&[u8]` or `Option<&[u8]>`;
+/// `None` (no summary/body) is "".
+pub(crate) fn lossy<'a>(bytes: impl Into<Option<&'a [u8]>>) -> String {
+    bytes.into().map(|b| String::from_utf8_lossy(b).into_owned()).unwrap_or_default()
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::repo::test_support::make_temp_dir;
     use git2::{ObjectType, Repository};
     use std::path::PathBuf;
 
     fn make_repo() -> (PathBuf, Repository) {
-        let dir = std::env::temp_dir().join(format!("wpt_git_text_{}", uuid::Uuid::new_v4()));
-        std::fs::create_dir_all(&dir).unwrap();
+        let dir = make_temp_dir("git_text");
         let repo = Repository::init(&dir).unwrap();
         (dir, repo)
     }
@@ -44,18 +45,18 @@ mod tests {
 
         assert_eq!(lossy(commit.summary_bytes()), "Corrig\u{FFFD} le bug");
         assert_eq!(lossy(commit.body_bytes()), "D\u{FFFD}tails ici");
-        assert!(lossy(Some(commit.message_bytes())).starts_with("Corrig\u{FFFD} le bug"));
-        assert_eq!(lossy(Some(commit.author().name_bytes())), "Andr\u{FFFD}");
+        assert!(lossy(commit.message_bytes()).starts_with("Corrig\u{FFFD} le bug"));
+        assert_eq!(lossy(commit.author().name_bytes()), "Andr\u{FFFD}");
         let _ = std::fs::remove_dir_all(dir);
     }
 
     #[test]
     fn missing_text_is_empty() {
-        assert_eq!(lossy(None), "");
+        assert_eq!(lossy(None::<&[u8]>), "");
     }
 
     #[test]
     fn utf8_text_is_unchanged() {
-        assert_eq!(lossy(Some("Corrigé".as_bytes())), "Corrigé");
+        assert_eq!(lossy("Corrigé".as_bytes()), "Corrigé");
     }
 }
