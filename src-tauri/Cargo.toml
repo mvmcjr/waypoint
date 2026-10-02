@@ -30,5 +30,5 @@ chrono = { version = "0.4", features = ["serde"] }
 notify-debouncer-mini = "0.7"
 
 [target.'cfg(windows)'.dependencies]
-winreg = "0.52"
+winreg = "0.56"
 
