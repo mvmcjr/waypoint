@@ -107,6 +107,19 @@ describe("buildApiHandlers", () => {
     expect(ipc.listRefs).toHaveBeenCalledWith("repo1");
   });
 
+  it("push passes its explicit remote through to ipc.pushBranch", async () => {
+    vi.mocked(ipc.pushBranch).mockResolvedValue({ kind: "pushed", remote: "fork", branch: "main", detail: null });
+    const api = buildApiHandlers(ctx, extras);
+    await api.push("fork", "main", true);
+    expect(ipc.pushBranch).toHaveBeenCalledWith("repo1", "fork", "main", true);
+  });
+
+  it("push throws when the remote rejects it, as it did when rejection was an error", async () => {
+    vi.mocked(ipc.pushBranch).mockResolvedValue({ kind: "rejected", remote: "fork", branch: "main", detail: "! [rejected] (non-fast-forward)" });
+    const api = buildApiHandlers(ctx, extras);
+    await expect(api.push("fork", "main")).rejects.toThrow(/non-fast-forward/);
+  });
+
   it("routes prompt and notify to the provided extras", () => {
     const api = buildApiHandlers(ctx, extras);
     api.prompt([{ id: "x", type: "text" }]);

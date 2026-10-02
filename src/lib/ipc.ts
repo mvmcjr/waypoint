@@ -134,28 +134,21 @@ export interface SquashPreview {
   default_body: string;
 }
 
-/** The pull source; `branch` is null when the configured upstream can't be pulled (the pull reports why). */
-export interface SyncTarget {
-  remote: string;
-  branch: string | null;
-}
-
-/** Where a push goes; `branch` is the destination name on the remote. */
-export interface PushTarget {
-  remote: string;
-  branch: string;
-  set_upstream: boolean;
-}
-
-/** Backend-resolved pull/push targets for a branch (null: no remote to use). */
-export interface SyncTargets {
-  pull: SyncTarget | null;
-  push: PushTarget | null;
-}
-
 export interface PullResult {
   kind: "up_to_date" | "fast_forward" | "merged" | "conflicts";
   conflicted: string[];
+  /** The remote and branch the backend actually pulled. */
+  remote: string;
+  branch: string;
+}
+
+/** A rejected push (remote has commits we lack) is an outcome, not an error. */
+export interface PushOutcome {
+  kind: "pushed" | "rejected";
+  remote: string;
+  /** Destination branch name on `remote`. */
+  branch: string;
+  detail: string | null;
 }
 
 export interface OpenedRepo {
@@ -382,31 +375,20 @@ export const ipc = {
   fetchRemote: (repoId: string, remoteName: string) =>
     invoke<void>("fetch_remote", { repoId, remoteName }),
 
-  getSyncTargets: (repoId: string, branchName: string) =>
-    invoke<SyncTargets>("get_sync_targets", { repoId, branchName }),
+  /** Remotes a fetch should hit (default, pull and push remotes of `branchName`), resolved by the backend. */
+  getFetchRemotes: (repoId: string, branchName: string | null) =>
+    invoke<string[]>("get_fetch_remotes", { repoId, branchName }),
 
   /**
-   * `target`, when given, is the already-resolved destination (from
-   * `getSyncTargets`) and is pushed verbatim; without it the backend resolves one
-   * (for `remoteName` if given, else from pushRemote/pushDefault/upstream).
+   * Without `remoteName` the backend resolves the target (pushRemote /
+   * pushDefault / push.default / upstream) and reports it in the outcome. With
+   * one, it is a plain same-name push to that remote.
    */
-  pushBranch: (
-    repoId: string,
-    remoteName: string | undefined,
-    branchName: string,
-    force: boolean,
-    target?: { branch: string; set_upstream: boolean },
-  ) =>
-    invoke<void>("push_branch", {
-      repoId,
-      remoteName,
-      branchName,
-      force,
-      destination: target?.branch,
-      setUpstream: target?.set_upstream,
-    }),
+  pushBranch: (repoId: string, remoteName: string | undefined, branchName: string, force: boolean) =>
+    invoke<PushOutcome>("push_branch", { repoId, remoteName, branchName, force }),
 
-  pullBranch: (repoId: string, remoteName: string) =>
+  /** Without `remoteName` the backend chooses (upstream remote, origin, first) and reports it. */
+  pullBranch: (repoId: string, remoteName?: string) =>
     invoke<PullResult>("pull_branch", { repoId, remoteName }),
 
   createTag: (repoId: string, name: string, oid: string, message: string) =>

@@ -159,7 +159,7 @@ pub fn run() {
             commands::remote::list_remotes,
             commands::remote::fetch_remote,
             commands::remote::push_branch,
-            commands::remote::get_sync_targets,
+            commands::remote::get_fetch_remotes,
             commands::remote::pull_branch,
             commands::remote::push_tag,
             commands::remote::delete_remote_tag,

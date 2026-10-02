@@ -32,8 +32,10 @@ export function buildApiHandlers(
     checkoutBranch: (name: string, force = false) => ipc.checkoutBranch(repoId, name, force),
     checkoutCommit: (oid: string, force = false) => ipc.checkoutCommit(repoId, oid, force),
     commit: (message: string) => ipc.doCommit(repoId, message),
-    push: (remote: string, branch: string, force = false) =>
-      ipc.pushBranch(repoId, remote, branch, force),
+    push: async (remote: string, branch: string, force = false) => {
+      const outcome = await ipc.pushBranch(repoId, remote, branch, force);
+      if (outcome.kind === "rejected") throw new Error(outcome.detail ?? "push rejected");
+    },
     merge: (oid: string, label = "") => ipc.mergeCommit(repoId, oid, label),
     rebase: (ontoOid: string) => ipc.rebaseOnto(repoId, ontoOid),
     reset: (oid: string, kind: "soft" | "mixed" | "hard") => ipc.resetHead(repoId, oid, kind),

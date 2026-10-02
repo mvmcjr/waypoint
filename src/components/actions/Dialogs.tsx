@@ -148,22 +148,17 @@ export function PullConflictsDialog({ repoId, onClose, onAbort }: PullConflictsP
 
 interface PushRejectedProps {
   repoId: string;
-  /** Remote the push went to; absent when the backend resolved it. */
+  /** The remote argument of the original push (none for UI pushes); repeated on the force push so the backend resolves the same target. */
   remoteName?: string;
   /** Local branch being pushed. */
   branchName: string;
-  /**
-   * Branch on the remote the push (and the force push) goes to. When given, the
-   * force push uses it verbatim; otherwise the backend resolves a destination.
-   */
-  destinationBranch?: string;
-  /** Whether the original push recorded an upstream (`--set-upstream`); repeated on the force push. */
-  setUpstream?: boolean;
+  /** Where the rejected push went, as reported by the backend. */
+  target: { remote: string; branch: string };
   onClose: () => void;
   onSuccess: () => void;
 }
 
-export function PushRejectedDialog({ repoId, remoteName, branchName, destinationBranch, setUpstream, onClose, onSuccess }: PushRejectedProps) {
+export function PushRejectedDialog({ repoId, remoteName, branchName, target, onClose, onSuccess }: PushRejectedProps) {
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
@@ -171,9 +166,9 @@ export function PushRejectedDialog({ repoId, remoteName, branchName, destination
     setLoading(true);
     setError(null);
     try {
-      const target = destinationBranch === undefined ? undefined : { branch: destinationBranch, set_upstream: setUpstream ?? false };
-      await ipc.pushBranch(repoId, remoteName, branchName, true, target);
-      onSuccess();
+      const outcome = await ipc.pushBranch(repoId, remoteName, branchName, true);
+      if (outcome.kind === "rejected") setError(outcome.detail ?? "Push rejected");
+      else onSuccess();
     } catch (e) {
       setError(String(e));
     } finally {
@@ -187,7 +182,7 @@ export function PushRejectedDialog({ repoId, remoteName, branchName, destination
         <DialogHeader>
           <DialogTitle>Push rejected</DialogTitle>
           <DialogDescription>
-            {remoteName ? <code className="font-mono">{remoteName}/{destinationBranch ?? branchName}</code> : <>The remote branch</>} has diverged from your local branch. You can force push to overwrite it.
+            <code className="font-mono">{target.remote}/{target.branch}</code> has diverged from your local branch. You can force push to overwrite it.
           </DialogDescription>
         </DialogHeader>
         <RiskBanner level="danger">
