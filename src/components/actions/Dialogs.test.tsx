@@ -382,7 +382,7 @@ describe("Dialogs", () => {
   describe("PushRejectedDialog", () => {
     const pushed = { kind: "pushed", remote: "origin", branch: "main", detail: null } as const;
 
-    it("names the returned target and force pushes the same remote argument (none for UI pushes)", async () => {
+    it("names the returned target and force pushes exactly that target", async () => {
       vi.mocked(ipc.pushBranch).mockResolvedValue(pushed);
       render(
         <PushRejectedDialog
@@ -396,24 +396,24 @@ describe("Dialogs", () => {
       expect(screen.getByRole("heading", { name: "Push rejected" })).toBeInTheDocument();
       expect(screen.getByText("origin/main")).toBeInTheDocument();
       fireEvent.click(screen.getByRole("button", { name: "Force push" }));
-      expect(ipc.pushBranch).toHaveBeenCalledWith("repo1", undefined, "feature", true);
+      expect(ipc.pushBranch).toHaveBeenCalledWith("repo1", undefined, "feature", true, { remote: "origin", branch: "main" });
       await waitFor(() => expect(mockOnSuccess).toHaveBeenCalled());
     });
 
-    it("repeats an explicit remote argument on the force push", async () => {
+    it("sends the shown destination verbatim even when it differs from the local branch name", async () => {
       vi.mocked(ipc.pushBranch).mockResolvedValue(pushed);
       render(
         <PushRejectedDialog
           repoId="repo1"
-          remoteName="fork"
           branchName="main"
-          target={{ remote: "fork", branch: "main" }}
+          target={{ remote: "fork", branch: "release" }}
           onClose={mockOnClose}
           onSuccess={mockOnSuccess}
         />
       );
+      expect(screen.getByText("fork/release")).toBeInTheDocument();
       fireEvent.click(screen.getByRole("button", { name: "Force push" }));
-      expect(ipc.pushBranch).toHaveBeenCalledWith("repo1", "fork", "main", true);
+      expect(ipc.pushBranch).toHaveBeenCalledWith("repo1", undefined, "main", true, { remote: "fork", branch: "release" });
       await waitFor(() => expect(mockOnSuccess).toHaveBeenCalled());
     });
 

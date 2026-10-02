@@ -35,10 +35,9 @@ vi.mock("@tauri-apps/api/event", () => ({
 // Mock IPC (needed for fetch/pull/push tests)
 vi.mock("@/lib/ipc", () => ({
   ipc: {
-    fetchRemote: vi.fn(),
+    fetchAll: vi.fn(),
     pullBranch: vi.fn(),
     pushBranch: vi.fn(),
-    getFetchRemotes: vi.fn(),
   },
 }));
 
@@ -140,8 +139,8 @@ vi.mock("@/components/detail/StagingFileDiffPanel", () => ({
 // can assert on the `worktree` prop RepoView computes for it, without needing
 // the real dialog's ipc/query dependencies wired up in this test file.
 vi.mock("@/components/actions/Dialogs", () => ({
-  PushRejectedDialog: ({ remoteName, branchName, target }: { remoteName?: string; branchName: string; target: { remote: string; branch: string } }) => (
-    <div data-testid="push-rejected" data-arg-remote={remoteName} data-branch={branchName} data-remote={target.remote} data-destination={target.branch}>
+  PushRejectedDialog: ({ branchName, target }: { branchName: string; target: { remote: string; branch: string } }) => (
+    <div data-testid="push-rejected" data-branch={branchName} data-remote={target.remote} data-destination={target.branch}>
       PushRejectedDialog
     </div>
   ),
@@ -187,7 +186,7 @@ describe("RepoView", () => {
     vi.mocked(useFileStatus).mockReturnValue({ data: [] } as any);
     vi.mocked(useRefreshRepo).mockReturnValue(mockRefresh);
     vi.mocked(useOpenWorktree).mockReturnValue(vi.fn().mockResolvedValue(undefined));
-    vi.mocked(ipc.getFetchRemotes).mockRejectedValue(new Error("no lookup"));
+    vi.mocked(ipc.fetchAll).mockResolvedValue([{ remote: "origin", ok: true, error: null }]);
   });
 
   it("renders the sidebar and timeline by default", () => {
@@ -293,10 +292,10 @@ describe("RepoView", () => {
     vi.mocked(useRemotes).mockReturnValue({ data: ONE_REMOTE } as any);
     vi.mocked(useHeadInfo).mockReturnValue({ data: { oid: "abc", branch: "main" } } as any);
 
-    // fetchRemote never resolves — simulates a long-running fetch
+    // fetchAll never resolves — simulates a long-running fetch
     let resolveFetch!: () => void;
-    vi.mocked(ipc.fetchRemote).mockReturnValue(
-      new Promise<void>((res) => { resolveFetch = res; }) as any
+    vi.mocked(ipc.fetchAll).mockReturnValue(
+      new Promise<any>((res) => { resolveFetch = () => res([]); }) as any
     );
 
     const { rerender } = render(<RepoView />);
@@ -304,7 +303,7 @@ describe("RepoView", () => {
     // Start the fetch → button should be disabled/spinning
     const fetchBtn = screen.getByRole("button", { name: /fetch/i });
     fireEvent.click(fetchBtn);
-    await waitFor(() => expect(ipc.fetchRemote).toHaveBeenCalledTimes(1));
+    await waitFor(() => expect(ipc.fetchAll).toHaveBeenCalledTimes(1));
 
     // Switch to repo2 — the reset effect should clear isFetching
     mockStoreFor("repo2");
@@ -344,15 +343,24 @@ describe("RepoView", () => {
       expect(opts.success({ kind: "fast_forward", conflicted: [], remote: "fork", branch: "dev" })).toBe("Pulled fork/dev (fast-forward)");
       expect(opts.success({ kind: "up_to_date", conflicted: [], remote: "fork", branch: "dev" })).toBe("Already up to date with fork/dev");
       expect(opts.success({ kind: "merged", conflicted: [], remote: "fork", branch: "dev" })).toBe("Pulled fork/dev and merged");
-      expect(ipc.getFetchRemotes).not.toHaveBeenCalled();
     });
 
     it("pushes without naming a remote or destination and reports the target used", async () => {
+      vi.mocked(ipc.pushBranch).mockResolvedValue(pushed("fork", "dev") as any);
       render(<RepoView />);
       fireEvent.click(screen.getByRole("button", { name: /push/i }));
       await waitFor(() => expect(ipc.pushBranch).toHaveBeenCalledWith("repo1", undefined, "main", false));
-      const opts = vi.mocked(toast.promise).mock.lastCall![1] as any;
-      expect(opts.success(pushed("fork", "dev"))).toBe("Pushed main to fork/dev");
+      await waitFor(() => expect(toast.success).toHaveBeenCalledWith("Pushed main to fork/dev", { id: "toast-id" }));
+    });
+
+    it("a rejected push dismisses the loading toast without a success toast", async () => {
+      vi.mocked(toast.success).mockClear();
+      vi.mocked(ipc.pushBranch).mockResolvedValue(rejected("origin", "main") as any);
+      render(<RepoView />);
+      fireEvent.click(screen.getByRole("button", { name: /push/i }));
+      await screen.findByTestId("push-rejected");
+      expect(toast.success).not.toHaveBeenCalled();
+      expect(toast.dismiss).toHaveBeenCalledWith("toast-id");
     });
 
     it("opens the force-push dialog with the returned target when the push is rejected", async () => {
@@ -364,8 +372,6 @@ describe("RepoView", () => {
       expect(dlg).toHaveAttribute("data-remote", "origin");
       expect(dlg).toHaveAttribute("data-branch", "feature");
       expect(dlg).toHaveAttribute("data-destination", "main");
-      // The UI push named no remote, so the force push must not either.
-      expect(dlg).not.toHaveAttribute("data-arg-remote");
     });
 
     it("shows other push failures in the error dialog", async () => {
@@ -377,93 +383,81 @@ describe("RepoView", () => {
     });
   });
 
-  describe("fetch also fetches the branch's upstream remote", () => {
+  describe("fetch uses the backend's fetch_all", () => {
     const TWO_REMOTES = [
       { name: "origin", url: "https://github.com/x/y" },
       { name: "fork", url: "https://github.com/me/y" },
     ];
+    const ok = (remote: string) => ({ remote, ok: true, error: null });
+    const bad = (remote: string, error: string) => ({ remote, ok: false, error });
 
     beforeEach(() => {
       vi.mocked(useRemotes).mockReturnValue({ data: TWO_REMOTES } as any);
-      vi.mocked(ipc.fetchRemote).mockResolvedValue(undefined as any);
-      vi.mocked(toast.warning).mockClear();
-      vi.mocked(toast.error).mockClear();
-      vi.mocked(toast.success).mockClear();
+      for (const f of [toast.warning, toast.error, toast.success, toast.info, toast.dismiss]) vi.mocked(f).mockClear();
     });
 
-    it("fetches the default remote and a different upstream remote", async () => {
-      vi.mocked(ipc.getFetchRemotes).mockResolvedValue(["origin", "fork"]);
-      render(<RepoView />);
-      fireEvent.click(screen.getByRole("button", { name: /fetch/i }));
-      await waitFor(() => expect(ipc.fetchRemote).toHaveBeenCalledTimes(2));
-      expect(ipc.fetchRemote).toHaveBeenNthCalledWith(1, "repo1", "origin");
-      expect(ipc.fetchRemote).toHaveBeenNthCalledWith(2, "repo1", "fork");
-    });
-
-    it("fetches once when the upstream remote is the default", async () => {
-      vi.mocked(ipc.getFetchRemotes).mockResolvedValue(["origin"]);
-      render(<RepoView />);
-      fireEvent.click(screen.getByRole("button", { name: /fetch/i }));
-      await waitFor(() => expect(ipc.fetchRemote).toHaveBeenCalledTimes(1));
-      expect(ipc.fetchRemote).toHaveBeenCalledWith("repo1", "origin");
-    });
-
-    it("refreshes and reports per remote when one remote fails and the other succeeds", async () => {
-      vi.mocked(ipc.getFetchRemotes).mockResolvedValue(["origin", "fork"]);
-      vi.mocked(ipc.fetchRemote).mockImplementation((_id: string, name: string) =>
-        name === "fork" ? Promise.reject("fork unreachable") : Promise.resolve(undefined as any));
+    async function clickFetch() {
       const refreshCalls = mockRefresh.mock.calls.length;
       render(<RepoView />);
       fireEvent.click(screen.getByRole("button", { name: /fetch/i }));
-      await waitFor(() => expect(ipc.fetchRemote).toHaveBeenCalledTimes(2));
-      await waitFor(() => expect(mockRefresh.mock.calls.length).toBeGreaterThan(refreshCalls));
+      await waitFor(() => expect(ipc.fetchAll).toHaveBeenCalledTimes(1));
+      return refreshCalls;
+    }
+
+    it("makes one call with the current branch and reports success per remote", async () => {
+      vi.mocked(ipc.fetchAll).mockResolvedValue([ok("origin"), ok("fork")]);
+      const before = await clickFetch();
+      expect(ipc.fetchAll).toHaveBeenCalledWith("repo1", "main");
+      await waitFor(() => expect(toast.success).toHaveBeenCalledWith("Fetched from origin, fork", { id: "toast-id" }));
+      expect(mockRefresh.mock.calls.length).toBeGreaterThan(before);
+    });
+
+    it("passes a null branch on a detached HEAD", async () => {
+      vi.mocked(useHeadInfo).mockReturnValue({ data: { oid: "abcdef", branch: null } } as any);
+      await clickFetch();
+      expect(ipc.fetchAll).toHaveBeenCalledWith("repo1", null);
+    });
+
+    it("refreshes and warns per remote on a partial failure", async () => {
+      vi.mocked(ipc.fetchAll).mockResolvedValue([ok("origin"), bad("fork", "fork unreachable")]);
+      const before = await clickFetch();
       await waitFor(() => expect(toast.warning).toHaveBeenCalled());
       const msg = String(vi.mocked(toast.warning).mock.calls[0][0]);
-      expect(msg).toContain("fork");
-      expect(msg).toContain("fork unreachable");
       expect(msg).toContain("Fetched from origin");
+      expect(msg).toContain("fork (fork unreachable)");
+      expect(mockRefresh.mock.calls.length).toBeGreaterThan(before);
     });
 
-    it("reports an error but still refreshes when every remote fails (git may have updated some refs)", async () => {
-      vi.mocked(ipc.fetchRemote).mockRejectedValue("offline");
-      const refreshCalls = mockRefresh.mock.calls.length;
-      render(<RepoView />);
-      fireEvent.click(screen.getByRole("button", { name: /fetch/i }));
+    it("errors but still refreshes when every remote fails (git may have updated some refs)", async () => {
+      vi.mocked(ipc.fetchAll).mockResolvedValue([bad("origin", "offline")]);
+      const before = await clickFetch();
       await waitFor(() => expect(toast.error).toHaveBeenCalled());
-      expect(mockRefresh.mock.calls.length).toBeGreaterThan(refreshCalls);
+      expect(String(vi.mocked(toast.error).mock.calls[0][0])).toContain("origin (offline)");
+      expect(mockRefresh.mock.calls.length).toBeGreaterThan(before);
     });
 
-    it("auto-fetch also refreshes when every remote fails", async () => {
-      vi.mocked(ipc.fetchRemote).mockRejectedValue("offline");
+    it("shows a neutral message, not a success toast, when there is nothing to fetch, and still refreshes", async () => {
+      vi.mocked(ipc.fetchAll).mockResolvedValue([]);
+      const before = await clickFetch();
+      await waitFor(() => expect(toast.info).toHaveBeenCalledWith("No remotes to fetch", { id: "toast-id" }));
+      expect(toast.success).not.toHaveBeenCalled();
+      expect(mockRefresh.mock.calls.length).toBeGreaterThan(before);
+    });
+
+    it("reports a rejected command as a failed fetch", async () => {
+      vi.mocked(ipc.fetchAll).mockRejectedValue("boom");
+      await clickFetch();
+      await waitFor(() => expect(toast.error).toHaveBeenCalledWith("Fetch failed: boom", { id: "toast-id" }));
+    });
+
+    it("auto-fetch refreshes even when every remote fails", async () => {
+      vi.mocked(ipc.fetchAll).mockResolvedValue([bad("origin", "offline")]);
       const refreshCalls = mockRefresh.mock.calls.length;
       render(<RepoView />);
       // The auto-fetch fires 2s after the repo opens (real timers: no fake-timer/waitFor interplay).
-      await waitFor(() => expect(ipc.fetchRemote).toHaveBeenCalled(), { timeout: 4000 });
+      await waitFor(() => expect(ipc.fetchAll).toHaveBeenCalled(), { timeout: 4000 });
       await waitFor(() => expect(mockRefresh.mock.calls.length).toBeGreaterThan(refreshCalls));
-    });
-
-    it("fetches the push remote too when it differs from the default and pull remotes", async () => {
-      vi.mocked(ipc.getFetchRemotes).mockResolvedValue(["origin", "fork"]);
-      render(<RepoView />);
-      fireEvent.click(screen.getByRole("button", { name: /fetch/i }));
-      await waitFor(() => expect(ipc.fetchRemote).toHaveBeenCalledTimes(2));
-      expect(ipc.fetchRemote).toHaveBeenNthCalledWith(2, "repo1", "fork");
-    });
-
-    it("fetches only the default remote on a detached HEAD", async () => {
-      vi.mocked(useHeadInfo).mockReturnValue({ data: { oid: "abcdef", branch: null } } as any);
-      render(<RepoView />);
-      fireEvent.click(screen.getByRole("button", { name: /fetch/i }));
-      await waitFor(() => expect(ipc.fetchRemote).toHaveBeenCalledTimes(1));
-      expect(ipc.getFetchRemotes).toHaveBeenCalledWith("repo1", null);
-    });
-
-    it("falls back to the default remote when the remote lookup fails", async () => {
-      vi.mocked(ipc.getFetchRemotes).mockRejectedValue(new Error("boom"));
-      render(<RepoView />);
-      fireEvent.click(screen.getByRole("button", { name: /fetch/i }));
-      await waitFor(() => expect(ipc.fetchRemote).toHaveBeenCalledTimes(1));
-      expect(ipc.fetchRemote).toHaveBeenCalledWith("repo1", "origin");
+      expect(toast.error).not.toHaveBeenCalled();
     });
   });
 
@@ -617,17 +611,17 @@ describe("RepoView", () => {
     // keyed on [fileStatus, focusedStagingFile]) immediately clears it again.
     vi.mocked(useFileStatus).mockReturnValue({ data: [{ path: "src/foo.ts", staged: null, unstaged: "modified" }] } as any);
 
-    // fetchRemote never resolves on its own — simulates a fetch still in flight.
+    // fetchAll never resolves on its own — simulates a fetch still in flight.
     let resolveFetch!: () => void;
-    vi.mocked(ipc.fetchRemote).mockReturnValue(
-      new Promise<void>((res) => { resolveFetch = res; }) as any
+    vi.mocked(ipc.fetchAll).mockReturnValue(
+      new Promise<any>((res) => { resolveFetch = () => res([]); }) as any
     );
 
     const { rerender } = render(<RepoView />);
 
     // Start a fetch — the busy state flips on.
     fireEvent.click(screen.getByRole("button", { name: /fetch/i }));
-    await waitFor(() => expect(ipc.fetchRemote).toHaveBeenCalledTimes(1));
+    await waitFor(() => expect(ipc.fetchAll).toHaveBeenCalledTimes(1));
     expect(screen.getByRole("button", { name: /fetch/i })).toBeDisabled();
 
     // Select the WIP row, then open a staging file's diff.

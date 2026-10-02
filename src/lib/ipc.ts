@@ -143,6 +143,12 @@ export interface PullResult {
 }
 
 /** A rejected push (remote has commits we lack) is an outcome, not an error. */
+export interface FetchResult {
+  remote: string;
+  ok: boolean;
+  error: string | null;
+}
+
 export interface PushOutcome {
   kind: "pushed" | "rejected";
   remote: string;
@@ -372,20 +378,28 @@ export const ipc = {
   listRemotes: (repoId: string) =>
     invoke<RemoteInfo[]>("list_remotes", { repoId }),
 
-  fetchRemote: (repoId: string, remoteName: string) =>
-    invoke<void>("fetch_remote", { repoId, remoteName }),
-
-  /** Remotes a fetch should hit (default, pull and push remotes of `branchName`), resolved by the backend. */
-  getFetchRemotes: (repoId: string, branchName: string | null) =>
-    invoke<string[]>("get_fetch_remotes", { repoId, branchName }),
+  /**
+   * Fetches the default, pull and push remotes of `branchName` (resolved by the
+   * backend), one after another, and reports each remote's result. Empty when
+   * the repo has no remotes.
+   */
+  fetchAll: (repoId: string, branchName: string | null) =>
+    invoke<FetchResult[]>("fetch_all", { repoId, branchName }),
 
   /**
    * Without `remoteName` the backend resolves the target (pushRemote /
    * pushDefault / push.default / upstream) and reports it in the outcome. With
-   * one, it is a plain same-name push to that remote.
+   * one, it is a plain same-name push to that remote. With `target` it pushes
+   * exactly `refs/heads/<branchName>:refs/heads/<target.branch>` to
+   * `target.remote`, ignoring config (used to force-push what a rejection showed).
    */
-  pushBranch: (repoId: string, remoteName: string | undefined, branchName: string, force: boolean) =>
-    invoke<PushOutcome>("push_branch", { repoId, remoteName, branchName, force }),
+  pushBranch: (
+    repoId: string,
+    remoteName: string | undefined,
+    branchName: string,
+    force: boolean,
+    target?: { remote: string; branch: string },
+  ) => invoke<PushOutcome>("push_branch", { repoId, remoteName, branchName, force, target }),
 
   /** Without `remoteName` the backend chooses (upstream remote, origin, first) and reports it. */
   pullBranch: (repoId: string, remoteName?: string) =>

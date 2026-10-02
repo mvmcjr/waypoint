@@ -1,4 +1,4 @@
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use tauri::State;
 
 use crate::error::{Error, Result};
@@ -94,15 +94,6 @@ pub fn list_remotes(repo_id: String, state: State<'_, RepoState>) -> Result<Vec<
     Ok(result)
 }
 
-#[tauri::command]
-pub async fn fetch_remote(
-    repo_id: String,
-    remote_name: String,
-    state: State<'_, RepoState>,
-) -> Result<()> {
-    run_git(&get_workdir(&state, &repo_id)?, &["fetch", &remote_name]).await
-}
-
 /// A branch's configured upstream: the remote and the branch name on it.
 struct Upstream {
     remote: String,
@@ -131,8 +122,9 @@ fn remote_names(repo: &git2::Repository) -> Vec<String> {
 struct BranchCtx {
     remotes: Vec<String>,
     upstream: Option<Upstream>,
-    /// Whether the branch has any upstream configured at all (even one that
-    /// isn't a `refs/heads/*` branch, which `upstream` reads as `None`).
+    /// Whether the branch has an upstream configured on an existing remote (even
+    /// one that isn't a `refs/heads/*` branch, which `upstream` reads as `None`).
+    /// An upstream naming a removed remote counts as none, so a push re-binds it.
     tracks_something: bool,
     /// `branch.<name>.pushRemote`, if set to an existing remote.
     push_remote: Option<String>,
@@ -151,7 +143,11 @@ impl BranchCtx {
         let local_ref = format!("refs/heads/{}", branch_name);
         BranchCtx {
             upstream: branch_upstream(repo, branch_name),
-            tracks_something: repo.branch_upstream_remote(&local_ref).is_ok(),
+            tracks_something: repo
+                .branch_upstream_remote(&local_ref)
+                .ok()
+                .and_then(|r| r.as_str().ok().map(str::to_owned))
+                .is_some_and(|r| remotes.contains(&r)),
             push_remote: existing(format!("branch.{}.pushRemote", branch_name)),
             push_default_remote: existing("remote.pushDefault".to_owned()),
             push_follows_upstream: get("push.default".to_owned())
@@ -232,15 +228,45 @@ fn fetch_remote_names(repo: &git2::Repository, branch_name: Option<&str>) -> Vec
     names
 }
 
+/// Outcome of fetching one remote in `fetch_all`.
+#[derive(Debug, Serialize)]
+pub struct FetchResult {
+    pub remote: String,
+    pub ok: bool,
+    pub error: Option<String>,
+}
+
+/// Fetches each remote independently, one after another: a failing remote (say
+/// an unreachable fork) must not stop the others or hide that they succeeded.
+/// Sequential on purpose: concurrent `git fetch`es in one repo contend on
+/// FETCH_HEAD and ref locks.
+async fn fetch_remotes(workdir: &std::path::Path, names: &[String]) -> Vec<FetchResult> {
+    let mut results = Vec::with_capacity(names.len());
+    for name in names {
+        let outcome = run_git(workdir, &["fetch", name]).await;
+        results.push(match outcome {
+            Ok(()) => FetchResult { remote: name.clone(), ok: true, error: None },
+            Err(e) => FetchResult { remote: name.clone(), ok: false, error: Some(e.to_string()) },
+        });
+    }
+    results
+}
+
+/// Fetch the default, pull and push remotes of `branch_name` (see
+/// `fetch_remote_names`) and report each remote's result. Empty when the repo
+/// has no remotes.
 #[tauri::command]
-pub fn get_fetch_remotes(
+pub async fn fetch_all(
     repo_id: String,
     branch_name: Option<String>,
     state: State<'_, RepoState>,
-) -> Result<Vec<String>> {
-    let repos = state.0.lock().unwrap();
-    let repo = repos.get(&repo_id).ok_or_else(|| Error::RepoNotFound(repo_id.clone()))?;
-    Ok(fetch_remote_names(repo, branch_name.as_deref()))
+) -> Result<Vec<FetchResult>> {
+    let (names, workdir) = {
+        let repos = state.0.lock().unwrap();
+        let repo = repos.get(&repo_id).ok_or_else(|| Error::RepoNotFound(repo_id.clone()))?;
+        (fetch_remote_names(repo, branch_name.as_deref()), crate::repo::workdir(repo)?)
+    };
+    Ok(fetch_remotes(&workdir, &names).await)
 }
 
 /// Arguments for `git push` of `branch_name` to `target`. Full ref names on both
@@ -267,7 +293,33 @@ fn is_push_rejection(msg: &str) -> bool {
         || msg.contains("Updates were rejected")
 }
 
-/// Push `branch_name`. With no `remote_name` the target is resolved here
+/// An exact push destination, as shown to the user by the push-rejected dialog.
+#[derive(Debug, Deserialize)]
+pub struct PushDest {
+    pub remote: String,
+    pub branch: String,
+}
+
+/// The target of a push: an exact `dest` verbatim (no config, no upstream
+/// change) wins, then an explicit `remote_name`, else the resolved one.
+fn plan_push(
+    repo: &git2::Repository,
+    remote_name: Option<&str>,
+    dest: Option<&PushDest>,
+    branch_name: &str,
+) -> Result<PushTarget> {
+    if let Some(d) = dest {
+        return Ok(PushTarget { remote: d.remote.clone(), branch: d.branch.clone(), set_upstream: false });
+    }
+    match remote_name {
+        Some(remote) => Ok(explicit_push_target(remote, branch_name)),
+        None => resolve_push_target(&BranchCtx::load(repo, branch_name), branch_name)
+            .ok_or_else(|| Error::InvalidArg("no remote to push to".into())),
+    }
+}
+
+/// Push `branch_name`. With an exact `target` it goes there verbatim (used to
+/// force-push precisely what a rejection reported). With no `remote_name` the target is resolved here
 /// (pushRemote / pushDefault / push.default / upstream) and reported in the
 /// outcome; an explicit remote is a plain same-name push to it.
 #[tauri::command]
@@ -276,17 +328,14 @@ pub async fn push_branch(
     remote_name: Option<String>,
     branch_name: String,
     force: bool,
+    target: Option<PushDest>,
     state: State<'_, RepoState>,
 ) -> Result<PushOutcome> {
     // Compute args and release the lock before the async network call.
     let (target, args, workdir) = {
         let repos = state.0.lock().unwrap();
         let repo = repos.get(&repo_id).ok_or_else(|| Error::RepoNotFound(repo_id.clone()))?;
-        let target = match &remote_name {
-            Some(remote) => explicit_push_target(remote, &branch_name),
-            None => resolve_push_target(&BranchCtx::load(repo, &branch_name), &branch_name)
-                .ok_or_else(|| Error::InvalidArg("no remote to push to".into()))?,
-        };
+        let target = plan_push(repo, remote_name.as_deref(), target.as_ref(), &branch_name)?;
         let args = push_args(&target, &branch_name, force);
         (target, args, crate::repo::workdir(repo)?)
     };
@@ -743,6 +792,57 @@ mod tests {
         assert_eq!((t.remote.as_str(), t.branch.as_str(), t.set_upstream), ("fork", "feature", false));
         assert_eq!(push_args(&t, "feature", false), args(&["push", "fork", "refs/heads/feature:refs/heads/feature"]));
         let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn explicit_target_is_pushed_verbatim_ignoring_config() {
+        let (dir, repo) = two_remote_repo();
+        // Config that would redirect a resolved push elsewhere.
+        set_upstream(&repo, "feature", "origin", "refs/heads/other");
+        set_push_default(&repo, "upstream");
+        set_cfg(&repo, "branch.feature.pushRemote", "origin");
+        let dest = PushDest { remote: "fork".into(), branch: "release".into() };
+        let t = plan_push(&repo, None, Some(&dest), "feature").unwrap();
+        assert_eq!((t.remote.as_str(), t.branch.as_str(), t.set_upstream), ("fork", "release", false));
+        assert_eq!(
+            push_args(&t, "feature", true),
+            args(&["push", "--force", "fork", "refs/heads/feature:refs/heads/release"])
+        );
+        // Without a target the same config resolves differently.
+        let resolved = plan_push(&repo, None, None, "feature").unwrap();
+        assert_eq!(resolved.remote, "origin");
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn upstream_on_a_missing_remote_counts_as_tracking_nothing() {
+        let (dir, repo) = two_remote_repo();
+        set_upstream(&repo, "feature", "gone", "refs/heads/feature");
+        let t = resolve_push_target(&BranchCtx::load(&repo, "feature"), "feature").unwrap();
+        assert_eq!((t.remote.as_str(), t.set_upstream), ("origin", true));
+        // A live upstream still suppresses set-upstream.
+        set_upstream(&repo, "feature2", "origin", "refs/heads/feature2");
+        assert!(!resolve_push_target(&BranchCtx::load(&repo, "feature2"), "feature2").unwrap().set_upstream);
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn fetch_all_aggregates_per_remote_results() {
+        let dir = make_temp_dir("remote");
+        let repo = Repository::init(&dir).unwrap();
+        let good = make_temp_dir("remote-good");
+        Repository::init_bare(&good).unwrap();
+        repo.remote("origin", good.to_str().unwrap()).unwrap();
+        repo.remote("broken", dir.join("does-not-exist").to_str().unwrap()).unwrap();
+        let names = vec!["origin".to_owned(), "broken".to_owned()];
+        let results = tauri::async_runtime::block_on(fetch_remotes(&dir, &names));
+        assert_eq!(results.len(), 2);
+        assert_eq!((results[0].remote.as_str(), results[0].ok), ("origin", true));
+        assert!(results[0].error.is_none());
+        assert_eq!((results[1].remote.as_str(), results[1].ok), ("broken", false));
+        assert!(results[1].error.as_deref().is_some_and(|e| !e.is_empty()));
+        let _ = std::fs::remove_dir_all(dir);
+        let _ = std::fs::remove_dir_all(good);
     }
 
     #[test]

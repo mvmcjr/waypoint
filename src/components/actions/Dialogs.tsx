@@ -148,17 +148,15 @@ export function PullConflictsDialog({ repoId, onClose, onAbort }: PullConflictsP
 
 interface PushRejectedProps {
   repoId: string;
-  /** The remote argument of the original push (none for UI pushes); repeated on the force push so the backend resolves the same target. */
-  remoteName?: string;
   /** Local branch being pushed. */
   branchName: string;
-  /** Where the rejected push went, as reported by the backend. */
+  /** Where the rejected push went, as reported by the backend; the force push hits exactly this. */
   target: { remote: string; branch: string };
   onClose: () => void;
   onSuccess: () => void;
 }
 
-export function PushRejectedDialog({ repoId, remoteName, branchName, target, onClose, onSuccess }: PushRejectedProps) {
+export function PushRejectedDialog({ repoId, branchName, target, onClose, onSuccess }: PushRejectedProps) {
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
@@ -166,7 +164,7 @@ export function PushRejectedDialog({ repoId, remoteName, branchName, target, onC
     setLoading(true);
     setError(null);
     try {
-      const outcome = await ipc.pushBranch(repoId, remoteName, branchName, true);
+      const outcome = await ipc.pushBranch(repoId, undefined, branchName, true, target);
       if (outcome.kind === "rejected") setError(outcome.detail ?? "Push rejected");
       else onSuccess();
     } catch (e) {

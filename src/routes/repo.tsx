@@ -38,51 +38,19 @@ import {
 import { RemoveWorktreeDialog } from "@/components/actions/RemoveWorktreeDialog";
 import type { CommitAction } from "@/components/timeline/CommitContextMenu";
 import type { RefAction } from "@/components/sidebar/RefTree";
-import { ipc, type RefInfo, type RemoteInfo, type WorktreeInfo } from "@/lib/ipc";
+import { ipc, type RefInfo, type WorktreeInfo } from "@/lib/ipc";
 import { RefreshCw, ArrowDown, ArrowUp, Puzzle } from "lucide-react";
 import { usePluginRegistry, commandsForSurface } from "@/lib/plugins/registry";
 import { usePluginRunner } from "@/components/plugins/PluginRunnerProvider";
 import { useOpenWorktree, isRepoGoneError } from "@/lib/useOpenRepo";
 import { worktreeName } from "@/lib/utils";
 import { trackingBranchWebUrl } from "@/lib/remoteUrl";
-import { getDefaultRemote } from "@/lib/remoteChoice";
 import { toast } from "sonner";
 import { Button } from "@/components/ui/button";
 
 const AUTO_FETCH_INTERVAL_MS = 5 * 60 * 1000;
 const FOCUS_FETCH_COOLDOWN_MS = 60 * 1000;
 
-/**
- * Remotes a fetch hits: default, pull and push remotes of the branch, resolved by
- * the backend. Falls back to the default remote alone if the lookup fails.
- */
-async function remotesToFetchFor(repoId: string, remotes: RemoteInfo[], branchName: string | null | undefined): Promise<string[]> {
-  return ipc.getFetchRemotes(repoId, branchName ?? null).catch(() => [getDefaultRemote(remotes)]);
-}
-
-interface FetchOutcome {
-  fetched: string[];
-  failed: { remote: string; error: string }[];
-}
-
-/**
- * Fetches each remote independently, one after another: a failing remote (say
- * an unreachable fork) must not stop the others or hide that they succeeded.
- * Sequential on purpose: concurrent `git fetch`es in one repo contend on
- * FETCH_HEAD and ref locks.
- */
-async function fetchAll(repoId: string, remoteNames: string[]): Promise<FetchOutcome> {
-  const outcome: FetchOutcome = { fetched: [], failed: [] };
-  for (const name of remoteNames) {
-    try {
-      await ipc.fetchRemote(repoId, name);
-      outcome.fetched.push(name);
-    } catch (e) {
-      outcome.failed.push({ remote: name, error: String(e) });
-    }
-  }
-  return outcome;
-}
 
 // ─── Dialog state ──────────────────────────────────────────────────────────
 
@@ -103,7 +71,7 @@ type DialogState =
   | { kind: "revert"; oid: string; summary: string }
   | { kind: "check-in-branch"; oid: string; summary: string }
   | { kind: "pull-conflicts" }
-  | { kind: "push-rejected"; branchName: string; remoteName?: string; target: { remote: string; branch: string } }
+  | { kind: "push-rejected"; branchName: string; target: { remote: string; branch: string } }
   | { kind: "remote-error"; message: string }
   | { kind: "create-tag"; oid: string }
   | { kind: "delete-tag"; tagName: string }
@@ -183,13 +151,14 @@ export function RepoView() {
   const lastAutoFetchRef = useRef<number>(0);
   const autoFetchInFlightRef = useRef(false);
 
-  async function silentFetch(forRepoId: string, rs: RemoteInfo[]) {
+  async function silentFetch(forRepoId: string) {
     if (autoFetchInFlightRef.current || isFetchingRef.current) return;
     autoFetchInFlightRef.current = true;
     lastAutoFetchRef.current = Date.now();
     try {
-      // Failures are swallowed per remote (fetchAll); the user can fetch manually.
-      await fetchAll(forRepoId, await remotesToFetchFor(forRepoId, rs, headBranchRef.current));
+      // The backend reports failures per remote; auto-fetch swallows them (the
+      // user can fetch manually) and a rejected command is treated the same.
+      await ipc.fetchAll(forRepoId, headBranchRef.current ?? null).catch(() => []);
       if (repoIdRef.current !== forRepoId) return;
       // Refresh even if every remote "failed": git can exit non-zero after updating most refs.
       refreshRef.current();
@@ -202,25 +171,25 @@ export function RepoView() {
     const r = remotesRef.current;
     const id = repoIdRef.current;
     if (!id || !r || r.length === 0) return;
-    if (!getDefaultRemote(r)) return;
-    void silentFetch(id, r);
+    void silentFetch(id);
   }
 
   async function handleFetch() {
     if (!remotes || remotes.length === 0 || !repoId) return;
     if (autoFetchInFlightRef.current) return;
-    if (!getDefaultRemote(remotes)) return;
     const myRepoId = repoId;
 
     setIsFetching(true);
     const toastId = toast.loading("Fetching…");
     try {
-      const names = await remotesToFetchFor(myRepoId, remotes, head?.branch);
-      const { fetched, failed } = await fetchAll(myRepoId, names);
+      const results = await ipc.fetchAll(myRepoId, head?.branch ?? null);
       // Refresh even if every remote "failed": git can exit non-zero after updating most refs.
       if (repoIdRef.current === myRepoId) refresh();
+      const fetched = results.filter((r) => r.ok).map((r) => r.remote);
+      const failed = results.filter((r) => !r.ok);
       const failures = failed.map((f) => `${f.remote} (${f.error})`).join("; ");
-      if (failed.length === 0) toast.success(`Fetched from ${fetched.join(", ")}`, { id: toastId });
+      if (results.length === 0) toast.info("No remotes to fetch", { id: toastId });
+      else if (failed.length === 0) toast.success(`Fetched from ${fetched.join(", ")}`, { id: toastId });
       else if (fetched.length > 0) toast.warning(`Fetched from ${fetched.join(", ")}; failed: ${failures}`, { id: toastId });
       else toast.error(`Fetch failed: ${failures}`, { id: toastId });
     } catch (e) {
@@ -272,14 +241,15 @@ export function RepoView() {
     const myRepoId = repoId;
     setIsPushing(true);
     // No remote named: the backend resolves the target and reports it in the outcome.
-    const p = ipc.pushBranch(repoId, undefined, branchName, false);
-    toast.promise(p, {
-      loading: `Pushing ${branchName}…`,
-      success: (o) => (o.kind === "pushed" ? `Pushed ${branchName} to ${o.remote}/${o.branch}` : `Push of ${branchName} rejected`),
-      error: () => null, // handled below with dialog
-    });
+    const toastId = toast.loading(`Pushing ${branchName}…`);
     try {
-      const outcome = await p;
+      const outcome = await ipc.pushBranch(repoId, undefined, branchName, false);
+      if (outcome.kind === "rejected") {
+        // The danger dialog is the feedback for a rejection: no success toast.
+        toast.dismiss(toastId);
+      } else {
+        toast.success(`Pushed ${branchName} to ${outcome.remote}/${outcome.branch}`, { id: toastId });
+      }
       if (repoIdRef.current !== myRepoId) return; // user switched repos mid-flight
       if (outcome.kind === "rejected") {
         setDialog({ kind: "push-rejected", branchName, target: { remote: outcome.remote, branch: outcome.branch } });
@@ -287,6 +257,7 @@ export function RepoView() {
         refresh();
       }
     } catch (e) {
+      toast.dismiss(toastId);
       if (repoIdRef.current !== myRepoId) return;
       setDialog({ kind: "remote-error", message: String(e) });
     } finally {
@@ -1047,7 +1018,6 @@ export function RepoView() {
       {repoId && dialog.kind === "push-rejected" && (
         <PushRejectedDialog
           repoId={repoId}
-          remoteName={dialog.remoteName}
           branchName={dialog.branchName}
           target={dialog.target}
           onClose={() => setDialog({ kind: "none" })}
