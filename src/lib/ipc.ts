@@ -387,11 +387,12 @@ export const ipc = {
 
   /**
    * `target`, when given, is the already-resolved destination (from
-   * `getSyncTargets`) and is pushed verbatim; without it the backend resolves one.
+   * `getSyncTargets`) and is pushed verbatim; without it the backend resolves one
+   * (for `remoteName` if given, else from pushRemote/pushDefault/upstream).
    */
   pushBranch: (
     repoId: string,
-    remoteName: string,
+    remoteName: string | undefined,
     branchName: string,
     force: boolean,
     target?: { branch: string; set_upstream: boolean },

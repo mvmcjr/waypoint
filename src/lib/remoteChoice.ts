@@ -6,10 +6,15 @@ export function getDefaultRemote(remotes: RemoteInfo[]): string {
 }
 
 /**
- * Remotes a fetch should hit: the default remote plus the branch's upstream
- * remote when it differs (the backend resolves that remote as `targets.pull`).
+ * Remotes a fetch should hit: the default remote, the branch's pull remote and
+ * its push remote (pushRemote/pushDefault), deduplicated in that order. The push
+ * remote matters in a triangular workflow: a stale `refs/remotes/<fork>/*` hides
+ * what a push would overwrite.
  */
 export function remotesToFetch(defaultRemote: string, targets: SyncTargets | null | undefined): string[] {
-  const upstream = targets?.pull?.remote;
-  return upstream && upstream !== defaultRemote ? [defaultRemote, upstream] : [defaultRemote];
+  const names = [defaultRemote];
+  for (const r of [targets?.pull?.remote, targets?.push?.remote]) {
+    if (r && !names.includes(r)) names.push(r);
+  }
+  return names;
 }

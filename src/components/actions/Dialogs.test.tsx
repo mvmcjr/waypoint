@@ -396,7 +396,7 @@ describe("Dialogs", () => {
       expect(screen.getByRole("heading", { name: "Push rejected" })).toBeInTheDocument();
 
       fireEvent.click(screen.getByRole("button", { name: "Force push" }));
-      expect(ipc.pushBranch).toHaveBeenCalledWith("repo1", "origin", "main", true);
+      expect(ipc.pushBranch).toHaveBeenCalledWith("repo1", "origin", "main", true, undefined);
 
       await waitFor(() => {
         expect(mockOnSuccess).toHaveBeenCalled();
