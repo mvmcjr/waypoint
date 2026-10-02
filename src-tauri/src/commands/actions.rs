@@ -50,6 +50,14 @@ fn replay_onto(
         if commit.parent_count() > 1 {
             continue;
         }
+        // Already sitting on the current base: git's sequencer fast-forwards
+        // over it (same oid, signature and encoding intact) instead of
+        // replaying. Once a commit has been rewritten `last` differs from every
+        // original parent, so the rest is replayed.
+        if commit.parent_ids().next() == Some(last.id()) {
+            last = commit;
+            continue;
+        }
         let mut index = repo.cherrypick_commit(&commit, &last, 0, None)?;
         if index.has_conflicts() {
             return Err(Error::RebaseConflict(conflict_msg.into()));
@@ -75,6 +83,9 @@ fn replay_onto(
     // Working tree and index first (relative to the still-current HEAD), then
     // the ref: if the checkout refuses, nothing has moved.
     repo.checkout_tree(last.as_object(), Some(git2::build::CheckoutBuilder::new().safe()))?;
+    // git (and libgit2's rebase) record the pre-rewrite tip for `git reset
+    // ORIG_HEAD`. Best effort: a failure to write it must not block the rewrite.
+    let _ = repo.reference("ORIG_HEAD", old_tip, true, "rebase: updating ORIG_HEAD");
     let reflog = format!("rebase (finish): {branch_ref} onto {onto}");
     if let Err(e) = repo.reference_matching(branch_ref, new_tip, true, old_tip, &reflog) {
         // Put the working tree back where the untouched branch expects it.
@@ -90,15 +101,47 @@ fn replay_onto(
 /// Refuse to rewrite history under uncommitted tracked changes (what
 /// `git rebase` and libgit2's rebase both do): the replay ends by checking out
 /// the new tip.
+///
+/// Untracked files inside a submodule don't count (git rebase and libgit2's
+/// `rebase_ensure_not_dirty` use `ignore=untracked` for submodules). git2's
+/// `DiffOptions` only exposes an all-or-nothing `ignore_submodules`, so
+/// submodules are skipped in the diffs and checked one by one with
+/// [`submodule_is_dirty`].
 fn ensure_clean_for_rewrite(repo: &git2::Repository) -> Result<()> {
     let head_tree = repo.head()?.peel_to_tree()?;
-    if repo.diff_tree_to_index(Some(&head_tree), None, None)?.deltas().len() > 0 {
+    let mut opts = git2::DiffOptions::new();
+    opts.ignore_submodules(true);
+    if repo.diff_tree_to_index(Some(&head_tree), None, Some(&mut opts))?.deltas().len() > 0 {
         return Err(Error::Git(git2::Error::from_str("uncommitted changes exist in index")));
     }
-    if repo.diff_index_to_workdir(None, None)?.deltas().len() > 0 {
+    if repo.diff_index_to_workdir(None, Some(&mut opts))?.deltas().len() > 0 {
         return Err(Error::Git(git2::Error::from_str("unstaged changes exist in workdir")));
     }
+    for sm in repo.submodules()? {
+        if submodule_is_dirty(repo, &sm)? {
+            return Err(Error::Git(git2::Error::from_str("uncommitted changes exist in submodule")));
+        }
+    }
     Ok(())
+}
+
+/// Whether a submodule has anything but untracked files to commit: a new HEAD
+/// or staged/unstaged change inside it, or a gitlink that differs from the
+/// index/HEAD.
+fn submodule_is_dirty(repo: &git2::Repository, sm: &git2::Submodule) -> Result<bool> {
+    use git2::SubmoduleStatus as S;
+    let Ok(name) = sm.name() else { return Ok(false) };
+    let status = repo.submodule_status(name, git2::SubmoduleIgnore::Untracked)?;
+    Ok(status.intersects(
+        S::INDEX_ADDED
+            | S::INDEX_DELETED
+            | S::INDEX_MODIFIED
+            | S::WD_ADDED
+            | S::WD_DELETED
+            | S::WD_MODIFIED
+            | S::WD_INDEX_MODIFIED
+            | S::WD_WD_MODIFIED,
+    ))
 }
 
 #[derive(Debug, Serialize)]
@@ -326,8 +369,6 @@ pub fn rebase_onto(repo_id: String, onto_oid: String, state: State<RepoState>) -
 }
 
 fn rebase_onto_impl(repo: &git2::Repository, onto_oid: &str) -> Result<()> {
-    let onto_oid = onto_oid.to_owned();
-
     // Must be on a branch (not detached HEAD) to rebase.
     let head = repo.head()?;
     if !head.is_branch() {
@@ -336,8 +377,8 @@ fn rebase_onto_impl(repo: &git2::Repository, onto_oid: &str) -> Result<()> {
         ));
     }
 
-    let oid = git2::Oid::from_str(&onto_oid).map_err(|_| Error::CommitNotFound(onto_oid.clone()))?;
-    repo.find_commit(oid).map_err(|_| Error::CommitNotFound(onto_oid.clone()))?;
+    let oid = git2::Oid::from_str(onto_oid).map_err(|_| Error::CommitNotFound(onto_oid.to_owned()))?;
+    repo.find_commit(oid).map_err(|_| Error::CommitNotFound(onto_oid.to_owned()))?;
     let head_oid = head
         .target()
         .ok_or_else(|| Error::InvalidArg("HEAD has no target".into()))?;
@@ -517,7 +558,10 @@ pub fn get_squash_preview(repo_id: String, oids: Vec<String>, state: State<RepoS
 pub fn squash_commits(repo_id: String, oids: Vec<String>, message: String, state: State<RepoState>) -> Result<()> {
     let repos = state.0.lock().unwrap();
     let repo = repos.get(&repo_id).ok_or_else(|| Error::RepoNotFound(repo_id.clone()))?;
+    squash_in(repo, &oids, &message)
+}
 
+fn squash_in(repo: &git2::Repository, oids: &[String], message: &str) -> Result<()> {
     let head = repo.head()?;
     if !head.is_branch() {
         return Err(Error::InvalidArg(
@@ -535,7 +579,7 @@ pub fn squash_commits(repo_id: String, oids: Vec<String>, message: String, state
         return Err(Error::InvalidArg("Commit message cannot be empty.".into()));
     }
 
-    let range = resolve_squash_range(repo, head_oid, &oids)?;
+    let range = resolve_squash_range(repo, head_oid, oids)?;
     let tip = range.chain.first().expect("range is non-empty");
     let tip_oid = tip.id();
 
@@ -548,6 +592,7 @@ pub fn squash_commits(repo_id: String, oids: Vec<String>, message: String, state
     // No descendants beyond the range — just point the branch at the squash.
     // Working dir/index already match (squash tree == old HEAD tree == tip tree).
     if tip_oid == head_oid {
+        let _ = repo.reference("ORIG_HEAD", head_oid, true, "squash: updating ORIG_HEAD");
         repo.reference_matching(&branch_ref, squashed_oid, true, head_oid, "squash commits")?;
         repo.set_head(&branch_ref)?;
         return Ok(());
@@ -633,8 +678,6 @@ pub fn reword_commit(repo_id: String, oid: String, message: String, state: State
 }
 
 fn reword_in(repo: &git2::Repository, oid: &str, message: &str) -> Result<()> {
-    let oid = oid.to_owned();
-
     let head = repo.head()?;
     if !head.is_branch() {
         return Err(Error::InvalidArg(
@@ -652,8 +695,8 @@ fn reword_in(repo: &git2::Repository, oid: &str, message: &str) -> Result<()> {
         return Err(Error::InvalidArg("Commit message cannot be empty.".into()));
     }
 
-    let target_oid = git2::Oid::from_str(&oid).map_err(|_| Error::CommitNotFound(oid.clone()))?;
-    let target = repo.find_commit(target_oid).map_err(|_| Error::CommitNotFound(oid.clone()))?;
+    let target_oid = git2::Oid::from_str(oid).map_err(|_| Error::CommitNotFound(oid.to_owned()))?;
+    let target = repo.find_commit(target_oid).map_err(|_| Error::CommitNotFound(oid.to_owned()))?;
 
     if target_oid != head_oid && !repo.graph_descendant_of(head_oid, target_oid)? {
         return Err(Error::InvalidArg("Commit is not on the current branch.".into()));
@@ -938,7 +981,7 @@ mod tests {
     }
 
     #[test]
-    fn reword_head_commit_keeps_author_raw() {
+    fn reword_head_commit_transcodes_author_to_utf8() {
         let (dir, repo) = crate::repo::test_support::make_repo_with_commit();
         let target = crate::repo::test_support::push_latin1_commit(&repo);
         reword_in(&repo, &target.to_string(), "Fixé le bug").unwrap();
@@ -949,19 +992,12 @@ mod tests {
     }
 
     #[test]
-    fn reword_interior_commit_keeps_author_raw_through_replay() {
+    fn reword_interior_commit_transcodes_author_through_replay() {
         let (dir, repo) = crate::repo::test_support::make_repo_with_commit();
         let target = crate::repo::test_support::push_latin1_commit(&repo);
         // A child commit on top so the reworded one is replayed under.
-        let parent = repo.find_commit(target).unwrap();
-        let mut tb = repo.treebuilder(Some(&parent.tree().unwrap())).unwrap();
-        tb.insert("b.txt", repo.blob(b"b").unwrap(), 0o100644).unwrap();
-        let tree = repo.find_tree(tb.write().unwrap()).unwrap();
-        let sig = repo.signature().unwrap();
-        let tip = repo.commit(None, &sig, &sig, "child", &tree, &[&parent]).unwrap();
-        let head_name = repo.head().unwrap().name().unwrap().to_owned();
-        repo.reference(&head_name, tip, true, "test").unwrap();
-        repo.checkout_head(Some(git2::build::CheckoutBuilder::new().force())).unwrap();
+        crate::repo::test_support::push_raw_commit(&repo, "b.txt", T, T, b"", b"child
+");
         reword_in(&repo, &target.to_string(), "Fixé le bug").unwrap();
         let child = repo.head().unwrap().peel_to_commit().unwrap();
         assert_eq!(child.summary(), Ok(Some("child")));
@@ -1115,6 +1151,186 @@ mod tests {
         assert_eq!(c.committer().name(), Ok("Test User"));
         assert_eq!(c.message_bytes(), "Corrigé le bug\n".as_bytes());
         let _ = std::fs::remove_dir_all(dir);
+    }
+
+    fn orig_head(repo: &Repository) -> Option<git2::Oid> {
+        repo.refname_to_id("ORIG_HEAD").ok()
+    }
+
+    const T: &[u8] = b"T <t@example.com> 1600000000 +0000";
+
+    /// git's sequencer fast-forwards over commits whose parent is already the
+    /// current base: rebasing onto a commit the branch already sits on must not
+    /// rewrite anything (no new committer/timestamps, no transcoding).
+    #[test]
+    fn rebase_onto_current_base_leaves_the_branch_untouched() {
+        use crate::repo::test_support::*;
+        let (dir, repo) = make_repo_with_commit();
+        let base = repo.head().unwrap().peel_to_commit().unwrap().id();
+        let l = b"Andr\xe9 <a@example.com> 1000000000 +0000";
+        push_raw_commit(&repo, "b.txt", l, l, b"encoding ISO-8859-1\n", b"Corrig\xe9\n");
+        let tip = push_raw_commit(&repo, "c.txt", l, l, b"encoding ISO-8859-1\n", b"Autre\xe9\n");
+        rebase_onto_impl(&repo, &base.to_string()).unwrap();
+        assert_eq!(repo.head().unwrap().peel_to_commit().unwrap().id(), tip);
+        assert_eq!(orig_head(&repo), None);
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    /// Reuse stops at the first commit that has to change; everything above it
+    /// is rewritten.
+    #[test]
+    fn rebase_onto_reuses_leading_commits_then_rewrites_the_rest() {
+        use crate::repo::test_support::*;
+        let (dir, repo) = make_repo_with_commit();
+        let base = repo.head().unwrap().peel_to_commit().unwrap().id();
+        let first = push_raw_commit(&repo, "b.txt", T, T, b"", b"first\n");
+        let second = push_raw_commit(&repo, "c.txt", T, T, b"", b"second\n");
+        // Rebase onto `first`: only `second` is in range and already sits on it.
+        rebase_onto_impl(&repo, &first.to_string()).unwrap();
+        assert_eq!(repo.head().unwrap().peel_to_commit().unwrap().id(), second);
+        // A diverged base rewrites every replayed commit.
+        move_branch(&repo, base);
+        let theirs = commit_file(&repo, "t.txt", "t", "theirs");
+        move_branch(&repo, second);
+        rebase_onto_impl(&repo, &theirs.to_string()).unwrap();
+        let tip = repo.head().unwrap().peel_to_commit().unwrap();
+        assert_ne!(tip.id(), second);
+        assert_eq!(tip.summary(), Ok(Some("second")));
+        let mid = tip.parent(0).unwrap();
+        assert_ne!(mid.id(), first);
+        assert_eq!(mid.summary(), Ok(Some("first")));
+        assert_eq!(mid.parent_id(0).unwrap(), theirs);
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn interior_reword_keeps_commits_below_and_rewrites_descendants() {
+        use crate::repo::test_support::*;
+        let (dir, repo) = make_repo_with_commit();
+        let below = push_raw_commit(&repo, "b.txt", T, T, b"", b"below\n");
+        let target = push_raw_commit(&repo, "c.txt", T, T, b"", b"target\n");
+        let desc = push_raw_commit(&repo, "d.txt", T, T, b"", b"desc\n");
+        reword_in(&repo, &target.to_string(), "reworded").unwrap();
+        let tip = repo.head().unwrap().peel_to_commit().unwrap();
+        assert_ne!(tip.id(), desc);
+        let mid = tip.parent(0).unwrap();
+        assert_eq!(mid.summary(), Ok(Some("reworded")));
+        assert_eq!(mid.parent_id(0).unwrap(), below);
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn interior_reword_records_orig_head() {
+        use crate::repo::test_support::*;
+        let (dir, repo) = make_repo_with_commit();
+        let target = push_raw_commit(&repo, "b.txt", T, T, b"", b"target\n");
+        let tip = push_raw_commit(&repo, "c.txt", T, T, b"", b"tip\n");
+        reword_in(&repo, &target.to_string(), "reworded").unwrap();
+        assert_eq!(orig_head(&repo), Some(tip));
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn rebase_onto_records_orig_head() {
+        let (dir, repo) = crate::repo::test_support::make_repo_with_commit();
+        let base = repo.head().unwrap().peel_to_commit().unwrap().id();
+        let mine = commit_file(&repo, "m.txt", "m", "mine");
+        move_branch(&repo, base);
+        let theirs = commit_file(&repo, "t.txt", "t", "theirs");
+        move_branch(&repo, mine);
+        rebase_onto_impl(&repo, &theirs.to_string()).unwrap();
+        assert_eq!(orig_head(&repo), Some(mine));
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn squash_records_orig_head() {
+        use crate::repo::test_support::*;
+        let (dir, repo) = make_repo_with_commit();
+        let a = push_raw_commit(&repo, "b.txt", T, T, b"", b"a\n");
+        let b = push_raw_commit(&repo, "c.txt", T, T, b"", b"b\n");
+        // Squash at the tip.
+        squash_in(&repo, &[a.to_string(), b.to_string()], "ab").unwrap();
+        assert_eq!(orig_head(&repo), Some(b));
+        // Interior squash (replays a descendant).
+        let c = push_raw_commit(&repo, "d.txt", T, T, b"", b"c\n");
+        let d = push_raw_commit(&repo, "e.txt", T, T, b"", b"d\n");
+        let e = push_raw_commit(&repo, "f.txt", T, T, b"", b"e\n");
+        squash_in(&repo, &[c.to_string(), d.to_string()], "cd").unwrap();
+        assert_eq!(orig_head(&repo), Some(e));
+        assert_eq!(repo.head().unwrap().peel_to_commit().unwrap().summary(), Ok(Some("e")));
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    /// `git commit --amend` leaves ORIG_HEAD alone, so rewording HEAD must too.
+    #[test]
+    fn reword_of_head_does_not_touch_orig_head() {
+        use crate::repo::test_support::*;
+        let (dir, repo) = make_repo_with_commit();
+        let tip = push_raw_commit(&repo, "b.txt", T, T, b"", b"tip\n");
+        reword_in(&repo, &tip.to_string(), "reworded").unwrap();
+        assert_eq!(orig_head(&repo), None);
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    /// Repo with a submodule `sub` committed on the default branch.
+    fn repo_with_submodule() -> (PathBuf, Repository, PathBuf) {
+        use crate::repo::test_support::*;
+        let (sub_dir, _sub) = make_repo_with_commit();
+        let (dir, repo) = make_repo_with_commit();
+        let out = std::process::Command::new("git")
+            .args(["-c", "protocol.file.allow=always", "submodule", "add"])
+            .arg(sub_dir.to_str().unwrap().replace('\\', "/"))
+            .arg("sub")
+            .current_dir(&dir)
+            .output()
+            .unwrap();
+        assert!(out.status.success(), "{}", String::from_utf8_lossy(&out.stderr));
+        {
+            let mut index = repo.index().unwrap();
+            index.read(true).unwrap();
+            index.add_path(Path::new(".gitmodules")).unwrap();
+            index.write().unwrap();
+            let tree = repo.find_tree(index.write_tree().unwrap()).unwrap();
+            let sig = repo.signature().unwrap();
+            let head = repo.head().unwrap().peel_to_commit().unwrap();
+            repo.commit(Some("HEAD"), &sig, &sig, "add sub", &tree, &[&head]).unwrap();
+        }
+        (dir, repo, sub_dir)
+    }
+
+    #[test]
+    fn rewrite_ignores_untracked_files_inside_a_submodule() {
+        use crate::repo::test_support::*;
+        let (dir, repo, sub_dir) = repo_with_submodule();
+        let target = push_raw_commit(&repo, "b.txt", T, T, b"", b"target\n");
+        push_raw_commit(&repo, "c.txt", T, T, b"", b"tip\n");
+        std::fs::write(dir.join("sub").join("untracked.txt"), "scratch").unwrap();
+        reword_in(&repo, &target.to_string(), "reworded").unwrap();
+        let tip = repo.head().unwrap().peel_to_commit().unwrap();
+        assert_eq!(tip.summary(), Ok(Some("tip")));
+        assert_eq!(tip.parent(0).unwrap().summary(), Ok(Some("reworded")));
+        assert!(dir.join("sub").join("untracked.txt").exists());
+        let _ = std::fs::remove_dir_all(dir);
+        let _ = std::fs::remove_dir_all(sub_dir);
+    }
+
+    #[test]
+    fn rewrite_still_refuses_tracked_changes_in_or_around_a_submodule() {
+        use crate::repo::test_support::*;
+        let (dir, repo, sub_dir) = repo_with_submodule();
+        let target = push_raw_commit(&repo, "b.txt", T, T, b"", b"target\n");
+        let tip = push_raw_commit(&repo, "c.txt", T, T, b"", b"tip\n");
+        // A tracked file edited inside the submodule's own working tree.
+        std::fs::write(dir.join("sub").join("a.txt"), "changed").unwrap();
+        assert!(reword_in(&repo, &target.to_string(), "reworded").is_err());
+        assert_eq!(repo.head().unwrap().peel_to_commit().unwrap().id(), tip);
+        std::fs::write(dir.join("sub").join("a.txt"), "hello").unwrap();
+        // A tracked change in the main repo.
+        std::fs::write(dir.join("a.txt"), "dirty").unwrap();
+        assert!(reword_in(&repo, &target.to_string(), "reworded").is_err());
+        let _ = std::fs::remove_dir_all(dir);
+        let _ = std::fs::remove_dir_all(sub_dir);
     }
 
     fn make_temp_dir() -> PathBuf {

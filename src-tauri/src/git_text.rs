@@ -27,11 +27,9 @@ impl CommitDecoder {
 
     /// Decode `bytes` (`None` is "").
     pub(crate) fn text<'a>(&self, bytes: impl Into<Option<&'a [u8]>>) -> String {
-        let Some(bytes) = bytes.into() else { return String::new() };
-        match self.0 {
-            Declared::Latin1 => latin1_to_string(bytes),
-            Declared::Other(enc) => enc.decode_without_bom_handling(bytes).0.into_owned(),
-            Declared::None => lossy(bytes),
+        match bytes.into() {
+            Some(bytes) => self.0.decode(bytes),
+            None => String::new(),
         }
     }
 }
@@ -39,37 +37,84 @@ impl CommitDecoder {
 /// The text encoding a commit declares in its `encoding` header.
 #[derive(Clone, Copy)]
 enum Declared {
-    /// No header, UTF-8, or anything unusable: bytes are taken as-is.
+    /// No header, UTF-8, US-ASCII, or anything unusable: bytes are taken as-is.
+    /// (For US-ASCII that is also what git ends up with: valid ASCII is already
+    /// UTF-8 and iconv rejects anything else, leaving the raw bytes.)
     None,
-    /// True ISO-8859-1: every byte is the code point of the same value.
-    /// encoding_rs maps these labels to windows-1252 (WHATWG), which turns
-    /// 0x80–0x9F into cp1252 glyphs — unlike iconv, which git uses.
-    Latin1,
+    /// An `ISO-8859-N` family label that the WHATWG standard (encoding_rs)
+    /// maps to a `windows-125x`/`874` superset: ISO-8859-1 -> windows-1252,
+    /// ISO-8859-9 -> windows-1254, ISO-8859-11 -> windows-874. The supersets
+    /// only differ from the ISO charsets in 0x80-0x9F, where the ISO charset
+    /// (and so iconv, which git uses) has the C1 controls U+0080-U+009F. Those
+    /// bytes are decoded byte-for-byte; the rest goes through the mapped codec.
+    IsoOverWindows(&'static encoding_rs::Encoding),
     Other(&'static encoding_rs::Encoding),
 }
 
-/// Labels iconv resolves to ISO-8859-1.
-const LATIN1_LABELS: &[&str] = &[
-    "iso-8859-1", "iso8859-1", "iso_8859-1", "iso_8859-1:1987", "iso-ir-100", "latin1", "latin-1",
-    "l1", "cp819", "ibm819", "csisolatin1",
+/// Labels iconv resolves to ISO-8859-1 that WHATWG doesn't know.
+const LATIN1_EXTRA_LABELS: &[&str] = &["latin-1", "iso_8859-1:1987"];
+
+/// Labels iconv resolves to US-ASCII.
+const ASCII_LABELS: &[&str] = &[
+    "us-ascii", "ascii", "ansi_x3.4-1968", "ansi_x3.4-1986", "iso646-us", "iso_646.irv:1991",
+    "iso-ir-6", "us", "cp367", "ibm367", "csascii", "646",
 ];
+
+/// iconv aliases encoding_rs (WHATWG) lacks, with the encoding they denote.
+fn iconv_alias(label: &str) -> Option<&'static encoding_rs::Encoding> {
+    Some(match label {
+        "cp932" => encoding_rs::SHIFT_JIS,
+        "cp936" | "ms936" => encoding_rs::GBK,
+        "cp949" | "uhc" => encoding_rs::EUC_KR,
+        "cp950" => encoding_rs::BIG5,
+        "cp874" => encoding_rs::WINDOWS_874,
+        "eucjp" | "ujis" => encoding_rs::EUC_JP,
+        "euckr" => encoding_rs::EUC_KR,
+        _ => return None,
+    })
+}
 
 impl Declared {
     fn of(commit: &git2::Commit) -> Self {
         let Some(label) = commit.message_encoding().ok().flatten() else { return Self::None };
-        let label = label.trim();
-        if LATIN1_LABELS.iter().any(|l| l.eq_ignore_ascii_case(label)) {
-            return Self::Latin1;
+        Self::from_label(label.trim())
+    }
+
+    fn from_label(label: &str) -> Self {
+        let lower = label.to_ascii_lowercase();
+        if ASCII_LABELS.contains(&lower.as_str()) {
+            return Self::None;
         }
-        match encoding_rs::Encoding::for_label_no_replacement(label.as_bytes()) {
-            Some(enc)
-                if enc != encoding_rs::UTF_8
-                    && enc != encoding_rs::UTF_16LE
-                    && enc != encoding_rs::UTF_16BE =>
-            {
-                Self::Other(enc)
-            }
-            _ => Self::None,
+        if LATIN1_EXTRA_LABELS.contains(&lower.as_str()) {
+            return Self::IsoOverWindows(encoding_rs::WINDOWS_1252);
+        }
+        let enc = iconv_alias(&lower)
+            .or_else(|| encoding_rs::Encoding::for_label_no_replacement(lower.as_bytes()));
+        let Some(enc) = enc else { return Self::None };
+        if enc == encoding_rs::UTF_8 || enc == encoding_rs::UTF_16LE || enc == encoding_rs::UTF_16BE {
+            return Self::None;
+        }
+        let windows_superset = enc == encoding_rs::WINDOWS_1252
+            || enc == encoding_rs::WINDOWS_1254
+            || enc == encoding_rs::WINDOWS_874;
+        // Only the ISO spellings are remapped; `windows-1252` & co. really do
+        // mean the windows charset (cp1252 glyphs in 0x80-0x9F).
+        let genuinely_windows = ["windows-", "x-cp", "cp12", "cp874", "dos-874"]
+            .iter()
+            .any(|p| lower.starts_with(p));
+        if windows_superset && !genuinely_windows {
+            Self::IsoOverWindows(enc)
+        } else {
+            Self::Other(enc)
+        }
+    }
+
+    /// Lossy decoding for display.
+    fn decode(self, bytes: &[u8]) -> String {
+        match self {
+            Self::None => lossy(bytes),
+            Self::IsoOverWindows(enc) => decode_iso_over_windows(enc, bytes, false).unwrap_or_default(),
+            Self::Other(enc) => enc.decode_without_bom_handling(bytes).0.into_owned(),
         }
     }
 
@@ -79,7 +124,7 @@ impl Declared {
     fn to_utf8(self, bytes: &[u8]) -> Option<Vec<u8>> {
         match self {
             Self::None => None,
-            Self::Latin1 => Some(latin1_to_string(bytes).into_bytes()),
+            Self::IsoOverWindows(enc) => decode_iso_over_windows(enc, bytes, true).map(String::into_bytes),
             Self::Other(enc) => enc
                 .decode_without_bom_handling_and_without_replacement(bytes)
                 .map(|s| s.into_owned().into_bytes()),
@@ -87,8 +132,29 @@ impl Declared {
     }
 }
 
-fn latin1_to_string(bytes: &[u8]) -> String {
-    bytes.iter().map(|&b| b as char).collect()
+/// Decode single-byte `bytes` with `enc` except 0x80-0x9F, which become the C1
+/// controls U+0080-U+009F. `strict` fails on bytes `enc` can't map; otherwise
+/// they become U+FFFD.
+fn decode_iso_over_windows(enc: &'static encoding_rs::Encoding, bytes: &[u8], strict: bool) -> Option<String> {
+    let mut out = String::with_capacity(bytes.len());
+    let mut rest = bytes;
+    while !rest.is_empty() {
+        let c1 = rest.iter().position(|b| (0x80..=0x9F).contains(b));
+        let (run, tail) = rest.split_at(c1.unwrap_or(rest.len()));
+        if strict {
+            out.push_str(&enc.decode_without_bom_handling_and_without_replacement(run)?);
+        } else {
+            out.push_str(&enc.decode_without_bom_handling(run).0);
+        }
+        match tail.split_first() {
+            Some((&b, after)) => {
+                out.push(b as char);
+                rest = after;
+            }
+            None => break,
+        }
+    }
+    Some(out)
 }
 
 /// The author line value and message of a commit, as UTF-8 bytes ready to go
@@ -162,14 +228,11 @@ pub(crate) fn write_commit(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::repo::test_support::make_temp_dir;
     use git2::{ObjectType, Repository};
     use std::path::PathBuf;
 
     fn make_repo() -> (PathBuf, Repository) {
-        let dir = make_temp_dir("git_text");
-        let repo = Repository::init(&dir).unwrap();
-        (dir, repo)
+        crate::repo::test_support::make_repo_with_commit()
     }
 
     /// A commit written by a legacy tool with `i18n.commitEncoding=ISO-8859-1`:
@@ -203,19 +266,12 @@ mod tests {
         CommitDecoder::new(c)
     }
 
+    /// A commit on top of HEAD whose author and committer are `name` and whose
+    /// extra header block and message are the given raw bytes.
     fn raw_commit(repo: &Repository, header: &[u8], name: &[u8], msg: &[u8]) -> git2::Oid {
-        let tree = repo.treebuilder(None).unwrap().write().unwrap();
-        let mut raw = format!("tree {tree}\n").into_bytes();
-        for who in ["author", "committer"] {
-            raw.extend_from_slice(who.as_bytes());
-            raw.extend_from_slice(b" ");
-            raw.extend_from_slice(name);
-            raw.extend_from_slice(b" <a@example.com> 0 +0000\n");
-        }
-        raw.extend_from_slice(header);
-        raw.extend_from_slice(b"\n");
-        raw.extend_from_slice(msg);
-        repo.odb().unwrap().write(ObjectType::Commit, &raw).unwrap()
+        let mut who = name.to_vec();
+        who.extend_from_slice(b" <a@example.com> 0 +0000");
+        crate::repo::test_support::push_raw_commit(repo, "b.txt", &who, &who, header, msg)
     }
 
     #[test]
@@ -316,6 +372,87 @@ Details
             // 0x80..0x9F are C1 controls in Latin-1, not cp1252 glyphs.
             assert_eq!(dec(&c).text(c.author().name_bytes()), "A\u{80}\u{9f}", "{label}");
             assert_eq!(dec(&c).text(c.summary_bytes()), "x\u{80}", "{label}");
+        }
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn iso_8859_n_labels_mapped_to_windows_by_whatwg_keep_c1_controls() {
+        let (dir, repo) = make_repo();
+        // (label, byte, expected for 0x80, expected for the high byte)
+        for (label, hi, want_hi) in [
+            ("ISO-8859-9", 0xD0u8, 'Ğ'),
+            ("latin5", 0xD0, 'Ğ'),
+            ("iso_8859-9", 0xFD, 'ı'),
+            ("ISO-8859-11", 0xA1, 'ก'),
+            ("tis-620", 0xA1, 'ก'),
+        ] {
+            let header = format!("encoding {label}\n");
+            let oid = raw_commit(&repo, header.as_bytes(), b"A\x80\x9e", &[b'x', 0x80, hi, b'\n']);
+            let c = repo.find_commit(oid).unwrap();
+            assert_eq!(dec(&c).text(c.author().name_bytes()), "A\u{80}\u{9e}", "{label}");
+            assert_eq!(dec(&c).text(c.summary_bytes()), format!("x\u{80}{want_hi}"), "{label}");
+            let t = transcode_for_rewrite(&c);
+            assert_eq!(t.message, format!("x\u{80}{want_hi}\n").into_bytes(), "{label}");
+        }
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn real_windows_labels_still_use_their_glyphs() {
+        let (dir, repo) = make_repo();
+        for (label, want) in [("windows-1252", '€'), ("cp1252", '€')] {
+            let header = format!("encoding {label}\n");
+            let c = repo.find_commit(raw_commit(&repo, header.as_bytes(), b"A", b"\x80\n")).unwrap();
+            assert_eq!(dec(&c).text(c.summary_bytes()), want.to_string(), "{label}");
+        }
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn us_ascii_is_not_windows_1252() {
+        let (dir, repo) = make_repo();
+        for label in ["US-ASCII", "ascii", "ANSI_X3.4-1968"] {
+            let header = format!("encoding {label}\n");
+            // A byte >= 0x80 is invalid ASCII: iconv fails, git keeps the raw
+            // bytes; display falls back to the lossy decoding, not cp1252.
+            let c = repo.find_commit(raw_commit(&repo, header.as_bytes(), b"A\xe9", b"\x80ok\n")).unwrap();
+            assert_eq!(dec(&c).text(c.summary_bytes()), "\u{FFFD}ok", "{label}");
+            assert_eq!(dec(&c).text(c.author().name_bytes()), "A\u{FFFD}", "{label}");
+            let t = transcode_for_rewrite(&c);
+            assert_eq!(t.message, b"\x80ok\n", "{label}");
+            assert_eq!(t.author, b"A\xe9 <a@example.com> 0 +0000", "{label}");
+            // Pure ASCII is unaffected.
+            let ok = repo.find_commit(raw_commit(&repo, header.as_bytes(), b"A", b"plain\n")).unwrap();
+            assert_eq!(dec(&ok).text(ok.summary_bytes()), "plain", "{label}");
+        }
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn iconv_codepage_aliases_decode_like_their_encodings() {
+        let (dir, repo) = make_repo();
+        let sjis = |t: &str| encoding_rs::SHIFT_JIS.encode(t).0.into_owned();
+        let gbk = |t: &str| encoding_rs::GBK.encode(t).0.into_owned();
+        let euckr = |t: &str| encoding_rs::EUC_KR.encode(t).0.into_owned();
+        let big5 = |t: &str| encoding_rs::BIG5.encode(t).0.into_owned();
+        let cases: [(&str, Vec<u8>, &str); 8] = [
+            ("CP932", sjis("日本語"), "日本語"),
+            ("MS932", sjis("日本語"), "日本語"),
+            ("Windows-31J", sjis("日本語"), "日本語"),
+            ("CP936", gbk("中文"), "中文"),
+            ("CP949", euckr("한국어"), "한국어"),
+            ("CP950", big5("中文"), "中文"),
+            ("eucJP", encoding_rs::EUC_JP.encode("日本語").0.into_owned(), "日本語"),
+            ("CP874", vec![0xA1], "ก"),
+        ];
+        for (label, bytes, want) in cases {
+            let header = format!("encoding {label}\n");
+            let mut msg = bytes.clone();
+            msg.push(b'\n');
+            let c = repo.find_commit(raw_commit(&repo, header.as_bytes(), b"A", &msg)).unwrap();
+            assert_eq!(dec(&c).text(c.summary_bytes()), want, "{label}");
+            assert_eq!(transcode_for_rewrite(&c).message, format!("{want}\n").into_bytes(), "{label}");
         }
         let _ = std::fs::remove_dir_all(dir);
     }
