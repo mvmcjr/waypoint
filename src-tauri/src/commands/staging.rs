@@ -474,16 +474,19 @@ pub fn amend_commit(repo_id: String, message: String, state: State<RepoState>) -
     amend_in(repo, &message)
 }
 
-/// Core of `amend_commit`. The amended commit is always UTF-8. When the
-/// original declares another encoding, the kept author is re-encoded and the
-/// message written with an explicit UTF-8 `encoding`, so it can't leave
-/// Latin-1 header bytes next to a UTF-8 message. Otherwise the original author
-/// is kept byte-for-byte and no `encoding` header is written (as git does).
+/// Core of `amend_commit`. The amended message is always UTF-8. When the
+/// original has an `encoding` header (usable or not), the amended commit gets
+/// an explicit UTF-8 `encoding` header instead of inheriting the original, and
+/// the kept author is re-encoded when the declared encoding is usable (and
+/// kept byte-for-byte when it can't be). A commit without an `encoding` header
+/// stays header-less, as git writes it.
 fn amend_in(repo: &git2::Repository, message: &str) -> Result<()> {
     let head_commit = repo.head()?.peel_to_commit()?;
     let dec = CommitDecoder::new(&head_commit);
-    let author = dec.utf8_signature(&head_commit.author())?;
-    let encoding = dec.is_declared().then_some("UTF-8");
+    let author = dec.utf8_signature(&head_commit.author());
+    // Any `encoding` header on the original (usable or not, e.g. UTF-16 or an
+    // unknown label) would be copied next to our UTF-8 message, so override it.
+    let encoding = head_commit.message_encoding().ok().flatten().is_some().then_some("UTF-8");
 
     let mut index = repo.index()?;
     let tree_oid = index.write_tree()?;
@@ -495,7 +498,7 @@ fn amend_in(repo: &git2::Repository, message: &str) -> Result<()> {
         Some("HEAD"),
         author.as_ref(), // None keeps the original author as-is
         Some(&sig),      // update committer to current user
-        encoding,        // only override a declared (non-UTF-8) encoding header
+        encoding,        // overrides any inherited `encoding` header
         Some(message),
         Some(&tree),
     )?;
@@ -546,6 +549,20 @@ mod tests {
         let c = repo.head().unwrap().peel_to_commit().unwrap();
         let raw = String::from_utf8(raw_object(&repo, c.id())).unwrap();
         assert!(!raw.contains("\nencoding "), "{raw}");
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn amend_replaces_an_unusable_encoding_header() {
+        use crate::repo::test_support::*;
+        let (dir, repo) = make_repo_with_commit();
+        let a = b"A <a@example.com> 1600000000 +0000";
+        push_raw_commit(&repo, "b.txt", a, a, b"encoding x-bogus\n", b"msg\n");
+        amend_in(&repo, "new msg").unwrap();
+        let c = repo.head().unwrap().peel_to_commit().unwrap();
+        let raw = String::from_utf8(raw_object(&repo, c.id())).unwrap();
+        assert!(!raw.contains("x-bogus"), "{raw}");
+        assert_eq!(c.message(), Ok("new msg"));
         let _ = std::fs::remove_dir_all(dir);
     }
 

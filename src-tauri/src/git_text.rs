@@ -1,7 +1,5 @@
 //! Text that git stores as raw bytes (commit messages, author names).
 
-use crate::error::Result;
-
 /// Decode git text lossily. git2's `&str` accessors (`Commit::summary`,
 /// `Signature::name`, …) fail on non-UTF-8 — e.g. commits made with
 /// `i18n.commitEncoding=ISO-8859-1` — which would blank the text entirely.
@@ -58,14 +56,17 @@ impl CommitDecoder {
     /// commit declares no encoding and `sig` should be kept untouched.
     /// Rebuilding is deliberately limited to the declared case:
     /// `git2::Signature::new` rejects empty names/emails (legal in git, common
-    /// in svn/cvs imports) and angle brackets, and would lossily rewrite bytes.
-    pub(crate) fn utf8_signature(&self, sig: &git2::Signature) -> Result<Option<git2::Signature<'static>>> {
+    /// in svn/cvs imports, even with an encoding header) and angle brackets,
+    /// and would lossily rewrite bytes. When it rejects the decoded signature
+    /// this also returns `None`: the original is kept (raw bytes) rather than
+    /// failing the whole history rewrite, so this never errors.
+    pub(crate) fn utf8_signature(&self, sig: &git2::Signature) -> Option<git2::Signature<'static>> {
         if !self.is_declared() {
-            return Ok(None);
+            return None;
         }
         let name = self.text(sig.name_bytes());
         let email = self.text(sig.email_bytes());
-        Ok(Some(git2::Signature::new(&name, &email, &sig.when())?))
+        git2::Signature::new(&name, &email, &sig.when()).ok()
     }
 }
 
@@ -220,10 +221,20 @@ Details
     fn decoder_signature_is_utf8_and_keeps_time() {
         let (dir, repo) = make_repo();
         let c = repo.find_commit(latin1_commit(&repo)).unwrap();
-        let sig = dec(&c).utf8_signature(&c.author()).unwrap().unwrap();
+        let sig = dec(&c).utf8_signature(&c.author()).unwrap();
         assert_eq!(sig.name(), Ok("André"));
         assert_eq!(sig.email(), Ok("a@example.com"));
         assert_eq!(sig.when(), c.author().when());
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn declared_signature_that_cannot_be_rebuilt_is_kept() {
+        let (dir, repo) = make_repo();
+        let oid = raw_commit(&repo, b"encoding ISO-8859-1\n", b"", b"msg\n");
+        let c = repo.find_commit(oid).unwrap();
+        assert!(dec(&c).is_declared());
+        assert!(dec(&c).utf8_signature(&c.author()).is_none());
         let _ = std::fs::remove_dir_all(dir);
     }
 
@@ -233,7 +244,7 @@ Details
         let oid = raw_commit(&repo, b"", b"Andr\xe9", b"msg\n");
         let c = repo.find_commit(oid).unwrap();
         assert!(!dec(&c).is_declared());
-        assert!(dec(&c).utf8_signature(&c.author()).unwrap().is_none());
+        assert!(dec(&c).utf8_signature(&c.author()).is_none());
         let _ = std::fs::remove_dir_all(dir);
     }
 

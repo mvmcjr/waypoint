@@ -11,38 +11,75 @@ use crate::repo::RepoState;
 /// (plain rebase, squash, reword) so they abort/report identically.
 fn run_rebase_to_completion(
     repo: &git2::Repository,
-    mut rebase: git2::Rebase,
+    rebase: git2::Rebase,
     sig: &git2::Signature,
     conflict_msg: &str,
 ) -> Result<()> {
+    run_rebase_with(repo, rebase, conflict_msg, |rebase, op_id| replay_operation(repo, rebase, op_id, sig))
+}
+
+/// Commit the operation `op_id` that `rebase` just applied. A commit that
+/// declares an encoding would otherwise be replayed by libgit2 with its
+/// original `encoding` header and message bytes next to our UTF-8 committer —
+/// a mixed object — so those are replayed as UTF-8 (the author is re-encoded
+/// when possible, see `CommitDecoder::utf8_signature`).
+fn replay_operation(
+    repo: &git2::Repository,
+    rebase: &mut git2::Rebase,
+    op_id: git2::Oid,
+    sig: &git2::Signature,
+) -> Result<()> {
+    let original = repo.find_commit(op_id)?;
+    let dec = CommitDecoder::new(&original);
+    if dec.is_declared() {
+        let author = dec.utf8_signature(&original.author());
+        let message = dec.text(original.message_bytes());
+        rebase.commit(author.as_ref(), sig, Some(&message))?;
+    } else {
+        rebase.commit(None, sig, None)?;
+    }
+    Ok(())
+}
+
+/// The replay loop. `step` commits one applied operation; ANY error from it,
+/// from libgit2, or a conflict aborts the rebase before returning, so a
+/// failure never leaves `.git/rebase-merge`, a detached HEAD and an unmoved
+/// branch behind.
+fn run_rebase_with(
+    repo: &git2::Repository,
+    mut rebase: git2::Rebase,
+    conflict_msg: &str,
+    mut step: impl FnMut(&mut git2::Rebase, git2::Oid) -> Result<()>,
+) -> Result<()> {
     loop {
-        match rebase.next() {
+        let op_id = match rebase.next() {
             None => break,
             Some(Err(e)) => {
                 let _ = rebase.abort();
                 return Err(Error::Git(e));
             }
-            Some(Ok(op)) => {
-                if repo.index()?.has_conflicts() {
-                    let _ = rebase.abort();
-                    return Err(Error::RebaseConflict(conflict_msg.into()));
-                }
-                // libgit2 would replay a declared-encoding commit with its
-                // original `encoding` header and message bytes next to our
-                // UTF-8 committer — a mixed object. Replay those as UTF-8.
-                let original = repo.find_commit(op.id())?;
-                let dec = CommitDecoder::new(&original);
-                if dec.is_declared() {
-                    let author = dec.utf8_signature(&original.author())?;
-                    let message = dec.text(original.message_bytes());
-                    rebase.commit(author.as_ref(), sig, Some(&message))?;
-                } else {
-                    rebase.commit(None, sig, None)?;
-                }
+            Some(Ok(op)) => op.id(),
+        };
+        let has_conflicts = match repo.index() {
+            Ok(index) => index.has_conflicts(),
+            Err(e) => {
+                let _ = rebase.abort();
+                return Err(Error::Git(e));
             }
+        };
+        if has_conflicts {
+            let _ = rebase.abort();
+            return Err(Error::RebaseConflict(conflict_msg.into()));
+        }
+        if let Err(e) = step(&mut rebase, op_id) {
+            let _ = rebase.abort();
+            return Err(e);
         }
     }
-    rebase.finish(None)?;
+    if let Err(e) = rebase.finish(None) {
+        let _ = rebase.abort();
+        return Err(Error::Git(e));
+    }
     Ok(())
 }
 
@@ -620,7 +657,7 @@ fn reword_in(repo: &git2::Repository, oid: &str, message: &str) -> Result<()> {
     // The rebuilt commit has no `encoding` header (UTF-8), so a kept author
     // from a declared-encoding commit must be re-encoded; otherwise keep it as is.
     let orig_author = target.author();
-    let author = CommitDecoder::new(&target).utf8_signature(&orig_author)?;
+    let author = CommitDecoder::new(&target).utf8_signature(&orig_author);
     let new_oid = repo.commit(None, author.as_ref().unwrap_or(&orig_author), &sig, msg, &tree, &parent_refs)?;
 
     // Target was HEAD — no descendants to replay, just move the branch tip.
@@ -902,6 +939,49 @@ mod tests {
         let c = repo.head().unwrap().peel_to_commit().unwrap();
         let raw = String::from_utf8(raw_object(&repo, c.id())).unwrap();
         assert!(raw.contains("\nauthor  <> 1600000000 +0000\n"), "{raw}");
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    fn assert_clean_on_branch(repo: &git2::Repository, branch_ref: &str) {
+        assert_eq!(repo.state(), git2::RepositoryState::Clean);
+        assert!(!repo.path().join("rebase-merge").exists());
+        assert_eq!(repo.head().unwrap().name(), Ok(branch_ref));
+    }
+
+    #[test]
+    fn interior_reword_over_declared_encoding_with_empty_signature_succeeds() {
+        use crate::repo::test_support::*;
+        let (dir, repo) = make_repo_with_commit();
+        let t = b"T <t@example.com> 1600000000 +0000";
+        let target = push_raw_commit(&repo, "b.txt", t, t, b"", b"target\n");
+        let e = b" <> 1000000000 +0000";
+        let desc = push_raw_commit(&repo, "c.txt", e, e, b"encoding ISO-8859-1\n", b"Corrig\xe9\n");
+        let branch_ref = repo.head().unwrap().name().unwrap().to_owned();
+        reword_in(&repo, &target.to_string(), "reworded").unwrap();
+        assert_clean_on_branch(&repo, &branch_ref);
+        let c = repo.head().unwrap().peel_to_commit().unwrap();
+        assert_ne!(c.id(), desc);
+        assert_eq!(c.message().unwrap().trim(), "Corrigé");
+        let raw = String::from_utf8_lossy(&raw_object(&repo, c.id())).into_owned();
+        assert!(raw.contains("\nauthor  <> 1000000000 +0000\n"), "{raw}");
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn failed_replay_step_aborts_the_rebase() {
+        use crate::repo::test_support::*;
+        let (dir, repo) = make_repo_with_commit();
+        let t = b"T <t@example.com> 1600000000 +0000";
+        let target = push_raw_commit(&repo, "b.txt", t, t, b"", b"target\n");
+        let tip = push_raw_commit(&repo, "c.txt", t, t, b"", b"tip\n");
+        let branch_ref = repo.head().unwrap().name().unwrap().to_owned();
+        let head = repo.reference_to_annotated_commit(&repo.head().unwrap()).unwrap();
+        let upstream = repo.find_annotated_commit(target).unwrap();
+        let rebase = repo.rebase(Some(&head), Some(&upstream), None, None).unwrap();
+        let err = run_rebase_with(&repo, rebase, "conflict", |_, _| Err(Error::InvalidArg("boom".into())));
+        assert!(matches!(err, Err(Error::InvalidArg(_))));
+        assert_clean_on_branch(&repo, &branch_ref);
+        assert_eq!(repo.head().unwrap().peel_to_commit().unwrap().id(), tip);
         let _ = std::fs::remove_dir_all(dir);
     }
 
