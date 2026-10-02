@@ -1,5 +1,6 @@
 mod commands;
 mod error;
+mod git_text;
 mod graph;
 mod repo;
 

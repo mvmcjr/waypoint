@@ -1,4 +1,5 @@
 use serde::Serialize;
+use crate::git_text::lossy;
 use tauri::State;
 
 use crate::error::{Error, Result};
@@ -412,15 +413,17 @@ pub fn get_squash_preview(repo_id: String, oids: Vec<String>, state: State<RepoS
     // every later commit's full message become the body.
     let mut oldest_first = range.chain.iter().rev();
     let oldest = oldest_first.next().expect("range is non-empty");
-    let default_subject = oldest.summary().ok().flatten().unwrap_or("").trim().to_owned();
+    let default_subject = lossy(oldest.summary_bytes()).trim().to_owned();
 
     let mut body_parts: Vec<String> = Vec::new();
-    let oldest_body = oldest.body().ok().flatten().unwrap_or("").trim();
+    let oldest_body = lossy(oldest.body_bytes());
+    let oldest_body = oldest_body.trim();
     if !oldest_body.is_empty() {
         body_parts.push(oldest_body.to_owned());
     }
     for c in oldest_first {
-        let msg = c.message().unwrap_or("").trim();
+        let msg = lossy(Some(c.message_bytes()));
+        let msg = msg.trim();
         if !msg.is_empty() {
             body_parts.push(msg.to_owned());
         }

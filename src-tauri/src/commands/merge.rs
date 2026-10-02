@@ -1,4 +1,5 @@
 use std::path::Path;
+use crate::git_text::lossy;
 use serde::Serialize;
 use tauri::State;
 
@@ -377,7 +378,7 @@ fn cherry_pick_impl(repo: &git2::Repository, oid_str: &str) -> Result<CherryPick
     let mut index = repo.index()?;
     index.write()?;
 
-    let msg = commit.message().unwrap_or("").to_string();
+    let msg = lossy(Some(commit.message_bytes()));
 
     if index.has_conflicts() {
         // libgit2 wrote CHERRY_PICK_HEAD but NOT CHERRY_PICK_MSG; write it so get_merge_status
@@ -492,7 +493,7 @@ fn revert_impl(repo: &git2::Repository, oid_str: &str) -> Result<CherryPickResul
     let mut index = repo.index()?;
     index.write()?;
 
-    let summary = commit.summary().ok().flatten().unwrap_or("");
+    let summary = lossy(commit.summary_bytes());
     let msg = format!("revert: {}\n\nThis reverts commit {}.", summary, oid_str);
 
     if index.has_conflicts() {

@@ -1,4 +1,5 @@
 use serde::Serialize;
+use crate::git_text::lossy;
 use tauri::State;
 
 use crate::error::{Error, Result};
@@ -35,7 +36,7 @@ pub fn stash_push(repo_id: String, message: String, state: State<RepoState>) -> 
         let branch = head.shorthand().unwrap_or("HEAD").to_string();
         let commit = head.peel_to_commit()?;
         let short = &commit.id().to_string()[..7];
-        let summary = commit.summary().ok().flatten().unwrap_or("").chars().take(50).collect::<String>();
+        let summary = lossy(commit.summary_bytes()).chars().take(50).collect::<String>();
         format!("WIP on {}: {} {}", branch, short, summary)
     } else {
         message

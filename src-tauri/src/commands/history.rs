@@ -1,4 +1,5 @@
 use tauri::State;
+use crate::git_text::lossy;
 
 use crate::error::{Error, Result};
 use crate::graph::lanes::{assign_lanes, CommitNode};
@@ -105,7 +106,7 @@ pub fn walk_commits(
 
         let author = commit.author();
         let timestamp = commit.time().seconds();
-        let summary = commit.summary().ok().flatten().unwrap_or("").to_owned();
+        let summary = lossy(commit.summary_bytes());
         // Body is intentionally omitted from the list payload (fetched lazily via
         // get_commit when a commit is selected) — keeps the walk light for big repos.
         let refs = ref_map.get(&oid_s).cloned().unwrap_or_default();
@@ -117,8 +118,8 @@ pub fn walk_commits(
             parent_oids,
             summary,
             body: String::new(),
-            author_name: author.name().unwrap_or("").to_owned(),
-            author_email: author.email().unwrap_or("").to_owned(),
+            author_name: lossy(Some(author.name_bytes())),
+            author_email: lossy(Some(author.email_bytes())),
             timestamp,
             refs,
             local_branches,
@@ -210,10 +211,10 @@ pub fn get_commit(repo_id: String, oid: String, state: State<RepoState>) -> Resu
     Ok(CommitNode {
         oid: git_oid.to_string(),
         parent_oids,
-        summary: commit.summary().ok().flatten().unwrap_or("").to_owned(),
-        body: commit.body().ok().flatten().unwrap_or("").trim().to_owned(),
-        author_name: author.name().unwrap_or("").to_owned(),
-        author_email: author.email().unwrap_or("").to_owned(),
+        summary: lossy(commit.summary_bytes()),
+        body: lossy(commit.body_bytes()).trim().to_owned(),
+        author_name: lossy(Some(author.name_bytes())),
+        author_email: lossy(Some(author.email_bytes())),
         timestamp: commit.time().seconds(),
         refs: Vec::new(),
         local_branches: Vec::new(),
