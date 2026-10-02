@@ -27,7 +27,7 @@ Before starting, read:
 2. Follow the brief's migration steps. Prefer the library's documented replacement API over workarounds. If the brief is wrong or incomplete, consult the sources it lists (or find better ones) and note the discrepancy in your result.
 3. Keep the diff to what the upgrade requires. No drive-by refactors, no formatting churn — the user reviews every line.
 4. Never hand-edit `src/components/ui/` (shadcn-generated); see `lockstep-groups.md` for when regeneration is acceptable.
-5. Run the partial gate from `gate.md` that matches what you changed. Iterate until green.
+5. Run the partial gate from `gate.md` that matches what you changed. Iterate until green. If your prompt lists pre-existing gate failures, treat "only those, nothing new" as green. Don't fix them; the warnings lane owns them, and fixing them here causes conflicts. Use any environment variables your prompt gives you (e.g. native-tool overrides for C build scripts) for every build command.
 
 For a warnings-cleanup lane: fix each warning at its cause in your assigned area (Rust lane: `src-tauri/`; TS lane: `src/`, `e2e/`, config files). Don't touch the other lane's files — the other lane is running in parallel.
 

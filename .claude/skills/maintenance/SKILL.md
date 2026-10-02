@@ -71,9 +71,11 @@ Research is the slowest part (lots of web reads) and doesn't touch the tree, so 
 - No upstream fix → record id, severity, path, and whether our code reaches the vulnerable API (grep).
 - Re-run the audits, full gate, commit `fix(deps): resolve security advisories` (body: each advisory id → fixed version).
 
-**Then in-range updates:** `pnpm update`, `cd src-tauri && cargo update`. Full gate. If something breaks, bisect (update halves) to find the culprit, pin it back, record it. Commit `chore(deps): update dependencies within semver ranges`.
+**Then in-range updates**, as two separate commits, npm first: `pnpm update` → frontend gate → `chore(deps): update npm dependencies within semver ranges`. Then `cd src-tauri && cargo update` → cargo gate → `chore(deps): update Rust dependencies within semver ranges`. If something breaks, bisect (update halves) to find the culprit, pin it back, and record it. Note that `pnpm update` also raises the `^` floors in `package.json`; that's expected.
 
-Committing these before migrations start matters: migrators branch from the current HEAD, so they should start from an already-patched, in-range-updated tree.
+Commit the npm side as soon as it's green, so npm migrators can start from it. Don't hold it for the Rust side: the cargo baseline and gate take far longer than the frontend's. Npm in-range updates usually clear most npm advisories, so run `pnpm update` first and re-audit before writing any overrides. The security commit may then shrink to just the leftovers, or vanish.
+
+If the Rust baseline is still compiling when the cargo briefs arrive, don't wait for it to run `cargo update`. Dispatch cargo migrators from the current HEAD, run `cargo update` once the baseline finishes, and let integration regenerate `Cargo.lock` (Phase 4, step 2). In practice this lockfile conflict is cheap to resolve, while waiting costs real time.
 
 ## Phase 3 — Migrations (parallel worktrees)
 
@@ -87,7 +89,16 @@ Dispatch `deps-migrator` agents with `isolation: "worktree"` and `model: "sonnet
 - cargo-touching migrators (including Tauri groups): at most 2 at once. They share one Rust target dir (see `gate.md`), so more would just queue on cargo's lock while burning disk and CPU.
 - Security-driven majors and lockstep groups that other bumps depend on (React, Vite, Tauri) go in the first wave.
 
-Each migrator prompt contains: the package(s) and exact versions, the full research brief, the absolute path of the main checkout (for `CARGO_TARGET_DIR`), which partial gate applies, and the **base SHA** (`git rev-parse HEAD` of the maintenance branch). The worktree may be created from a different commit than your HEAD; the migrator uses the base SHA to start from the right place.
+Each migrator prompt contains:
+- the package(s) and exact versions
+- the full research brief
+- the absolute path of the main checkout (for `CARGO_TARGET_DIR`)
+- which partial gate applies
+- the **base SHA** (`git rev-parse HEAD` of the maintenance branch)
+- the list of pre-existing gate failures, so the migrator can ignore them (see `gate.md`)
+- any environment variables the build needed, such as native-tool overrides (see `gate.md`)
+
+The base SHA is not optional. Worktrees are created from a stale commit, not from your HEAD; in practice every worktree started from an old `master` commit. The migrator resets to the base SHA before doing anything.
 
 ## Phase 4 — Integration (sequential, on the maintenance branch)
 
@@ -104,11 +115,13 @@ After the last integration, remove worktrees and branches belonging to **green**
 
 ## Phase 5 — Warnings and Actions
 
-Dispatch two `deps-migrator` agents in parallel (worktrees, Sonnet), branched from the integrated HEAD:
+Two lanes, each with disjoint files:
 - **Rust lane**: rustc + clippy warnings and deprecations under `src-tauri/`.
 - **TS lane**: tsc, vite, and vitest warnings/deprecations under `src/`, `e2e/`, config files. Vite chunk-size warnings: only fix if an obvious split point exists; otherwise report.
 
-Give each the baseline warning list, the current gate output, the main checkout path, and the base SHA. Integrate as in Phase 4; commit message `chore: fix build warnings` (body lists each fix).
+A lane can start as soon as its ecosystem's migrations are integrated. Don't wait for the other ecosystem: the TS lane can run while cargo migrators are still compiling. Don't start the Rust lane before the cargo majors land, though. Majors like git2 rewrite the same files the lints point at.
+
+Use a worktree migrator (Sonnet) for a lane when it has real work, or when it can overlap with other running work. If a lane is a handful of mechanical fixes (e.g. a few clippy lints) and nothing else is running, do it yourself on the branch. A worktree agent would spend longer on setup and a cold build than on the fixes. Either way, give the lane the baseline warning list and current gate output. Integrate as in Phase 4. Commit message: `chore: fix build warnings` (body lists each fix).
 
 GitHub Actions: apply the Actions brief yourself — replace each SHA, update the `# vX.Y.Z` comment, adjust inputs if a major changed them. Keep SHA pins; never switch to a tag ref. Workflows can't run locally, so read the YAML diff carefully. Commit `ci: bump pinned GitHub Actions`.
 
@@ -116,5 +129,5 @@ GitHub Actions: apply the Actions brief yourself — replace each SHA, update th
 
 1. `pnpm notices` to regenerate `THIRD_PARTY_NOTICES.md` (once, now, rather than per bump to avoid conflicts). Commit `chore: regenerate third-party notices` if it changed.
 2. `pnpm e2e` once (Windows; slow). If its preflight complains about drivers, run `pnpm e2e:setup` and retry. On failure, decide whether a bump caused it: check out `master` into a temporary worktree and run the failing spec there. Bump-caused and clear → fix, gate, commit. Otherwise record it under "Needs your decision". Don't revert green commits on an e2e failure alone.
-3. Write `docs/maintenance/YYYY-MM-DD.md` per `references/report-template.md`; commit `docs: maintenance report YYYY-MM-DD`.
+3. Write `docs/maintenance/YYYY-MM-DD.md` per `references/report-template.md`; commit `docs: maintenance report YYYY-MM-DD`. Take every commit SHA in it from `git log --oneline master..HEAD`, never from memory. Cherry-picks and lockfile regeneration give commits new SHAs, so the migrators' reported SHAs are not the ones on the branch.
 4. Tell the user: branch name, `git log --oneline master..HEAD`, the report's Summary and "Needs your decision", blocked worktree branches, and that the branch is unpushed and should get `/code-review high` before merging.
