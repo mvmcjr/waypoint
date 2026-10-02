@@ -150,22 +150,27 @@ pub async fn rename_remote_branch(
 /// `remote_name`, and the remote-tracking ref to merge afterwards. Honours the
 /// branch's configured upstream (e.g. local `main` tracking `origin/master`);
 /// without one — or when pulling from a different remote — falls back to the
-/// same-named branch on `remote_name`.
-fn resolve_pull_source(repo: &git2::Repository, remote_name: &str, branch_name: &str) -> (String, String) {
-    configured_upstream(repo, remote_name, branch_name).unwrap_or_else(|| {
-        (branch_name.to_owned(), format!("refs/remotes/{}/{}", remote_name, branch_name))
-    })
-}
-
-fn configured_upstream(repo: &git2::Repository, remote_name: &str, branch_name: &str) -> Option<(String, String)> {
+/// same-named branch on `remote_name`. An upstream on `remote_name` that can't
+/// be resolved is an error rather than a fallback, which would silently merge
+/// a different branch than the one configured.
+fn resolve_pull_source(repo: &git2::Repository, remote_name: &str, branch_name: &str) -> Result<(String, String)> {
     let local_ref = format!("refs/heads/{}", branch_name);
-    if repo.branch_upstream_remote(&local_ref).ok()?.as_str().ok()? != remote_name {
-        return None;
+    let upstream_remote = repo.branch_upstream_remote(&local_ref).ok();
+    if upstream_remote.as_ref().and_then(|r| r.as_str().ok()) != Some(remote_name) {
+        return Ok((branch_name.to_owned(), format!("refs/remotes/{}/{}", remote_name, branch_name)));
     }
-    let merge = repo.branch_upstream_merge(&local_ref).ok()?;
-    let remote_branch = merge.as_str().ok()?.strip_prefix("refs/heads/")?.to_owned();
-    let tracking_ref = repo.branch_upstream_name(&local_ref).ok()?.as_str().ok()?.to_owned();
-    Some((remote_branch, tracking_ref))
+    let merge = repo.branch_upstream_merge(&local_ref)?;
+    let merge = merge.as_str()?;
+    let remote_branch = merge.strip_prefix("refs/heads/").ok_or_else(|| {
+        Error::InvalidArg(format!("'{}' tracks '{}', which is not a branch on {}.", branch_name, merge, remote_name))
+    })?;
+    let tracking_ref = repo.branch_upstream_name(&local_ref).map_err(|_| {
+        Error::InvalidArg(format!(
+            "'{}' tracks {}/{}, but no fetch refspec maps it to a remote-tracking branch.",
+            branch_name, remote_name, remote_branch
+        ))
+    })?;
+    Ok((remote_branch.to_owned(), tracking_ref.as_str()?.to_owned()))
 }
 
 #[tauri::command]
@@ -186,11 +191,13 @@ pub async fn pull_branch(
             ));
         }
         let branch_name = head.shorthand()?.to_string();
-        let (remote_branch, tracking_ref_name) = resolve_pull_source(repo, &remote_name, &branch_name);
+        let (remote_branch, tracking_ref_name) = resolve_pull_source(repo, &remote_name, &branch_name)?;
         (branch_name, remote_branch, tracking_ref_name, crate::repo::workdir(repo)?)
     }; // MutexGuard dropped here — safe to .await below
 
-    run_git(&workdir, &["fetch", &remote_name, &remote_branch]).await?;
+    // Full ref name: a bare branch name lets git DWIM it to a same-named tag.
+    let fetch_ref = format!("refs/heads/{}", remote_branch);
+    run_git(&workdir, &["fetch", &remote_name, &fetch_ref]).await?;
 
     // Re-acquire the lock for the merge logic (no more .await points after this).
     let repos = state.0.lock().unwrap();
@@ -280,12 +287,12 @@ pub async fn pull_branch(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::repo::test_support::make_temp_dir;
     use git2::Repository;
     use std::path::PathBuf;
 
     fn make_repo() -> (PathBuf, Repository) {
-        let dir = std::env::temp_dir().join(format!("wpt_remote_{}", uuid::Uuid::new_v4()));
-        std::fs::create_dir_all(&dir).unwrap();
+        let dir = make_temp_dir("remote");
         let repo = Repository::init(&dir).unwrap();
         // Default fetch refspec: +refs/heads/*:refs/remotes/origin/*
         repo.remote("origin", "https://example.invalid/repo.git").unwrap();
@@ -298,14 +305,18 @@ mod tests {
         cfg.set_str(&format!("branch.{branch}.merge"), merge).unwrap();
     }
 
+    fn src(branch: &str, tracking: &str) -> (String, String) {
+        (branch.to_owned(), tracking.to_owned())
+    }
+
     /// Local `main` tracking `origin/master`: pull must fetch `master` and
     /// merge `refs/remotes/origin/master`, not look for an `origin/main`.
     #[test]
     fn pull_uses_the_configured_upstream_when_names_differ() {
         let (dir, repo) = make_repo();
         set_upstream(&repo, "main", "origin", "refs/heads/master");
-        let src = resolve_pull_source(&repo, "origin", "main");
-        assert_eq!(src, ("master".to_owned(), "refs/remotes/origin/master".to_owned()));
+        let got = resolve_pull_source(&repo, "origin", "main").unwrap();
+        assert_eq!(got, src("master", "refs/remotes/origin/master"));
         let _ = std::fs::remove_dir_all(dir);
     }
 
@@ -313,16 +324,16 @@ mod tests {
     fn pull_keeps_nested_upstream_branch_names() {
         let (dir, repo) = make_repo();
         set_upstream(&repo, "feat", "origin", "refs/heads/feature/x");
-        let src = resolve_pull_source(&repo, "origin", "feat");
-        assert_eq!(src, ("feature/x".to_owned(), "refs/remotes/origin/feature/x".to_owned()));
+        let got = resolve_pull_source(&repo, "origin", "feat").unwrap();
+        assert_eq!(got, src("feature/x", "refs/remotes/origin/feature/x"));
         let _ = std::fs::remove_dir_all(dir);
     }
 
     #[test]
     fn pull_falls_back_to_same_name_without_upstream() {
         let (dir, repo) = make_repo();
-        let src = resolve_pull_source(&repo, "origin", "main");
-        assert_eq!(src, ("main".to_owned(), "refs/remotes/origin/main".to_owned()));
+        let got = resolve_pull_source(&repo, "origin", "main").unwrap();
+        assert_eq!(got, src("main", "refs/remotes/origin/main"));
         let _ = std::fs::remove_dir_all(dir);
     }
 
@@ -333,8 +344,27 @@ mod tests {
         let (dir, repo) = make_repo();
         repo.remote("fork", "https://example.invalid/fork.git").unwrap();
         set_upstream(&repo, "main", "origin", "refs/heads/master");
-        let src = resolve_pull_source(&repo, "fork", "main");
-        assert_eq!(src, ("main".to_owned(), "refs/remotes/fork/main".to_owned()));
+        let got = resolve_pull_source(&repo, "fork", "main").unwrap();
+        assert_eq!(got, src("main", "refs/remotes/fork/main"));
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    /// An upstream on this remote that no fetch refspec maps to a tracking ref
+    /// (single-branch clone tracking another branch) must be an error — falling
+    /// back to the same-named branch would merge the wrong branch silently.
+    #[test]
+    fn pull_errors_when_the_configured_upstream_has_no_tracking_ref() {
+        let dir = make_temp_dir("remote");
+        let repo = Repository::init(&dir).unwrap();
+        repo.remote_with_fetch(
+            "origin",
+            "https://example.invalid/repo.git",
+            "+refs/heads/main:refs/remotes/origin/main",
+        )
+        .unwrap();
+        set_upstream(&repo, "main", "origin", "refs/heads/release");
+        let err = resolve_pull_source(&repo, "origin", "main").unwrap_err();
+        assert!(err.to_string().contains("origin/release"), "{err}");
         let _ = std::fs::remove_dir_all(dir);
     }
 }
