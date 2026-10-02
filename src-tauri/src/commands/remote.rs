@@ -163,10 +163,7 @@ pub async fn pull_branch(
                 "Cannot pull: HEAD is detached. Checkout a branch first.".into(),
             ));
         }
-        let branch_name = head
-            .shorthand()
-            .map_err(|_| Error::InvalidArg("Cannot determine current branch name.".into()))?
-            .to_string();
+        let branch_name = head.shorthand()?.to_string();
         (branch_name, crate::repo::workdir(repo)?)
     }; // MutexGuard dropped here — safe to .await below
 

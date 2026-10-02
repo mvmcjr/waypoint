@@ -463,10 +463,7 @@ pub fn squash_commits(repo_id: String, oids: Vec<String>, message: String, state
     let tree = tip.tree()?;
     let squashed_oid = repo.commit(None, &sig, &sig, msg, &tree, &[&range.new_parent])?;
 
-    let branch_ref = head
-        .name()
-        .map_err(|_| Error::InvalidArg("HEAD reference has no name".into()))?
-        .to_owned();
+    let branch_ref = head.name()?.to_owned();
 
     // No descendants beyond the range — just point the branch at the squash.
     // Working dir/index already match (squash tree == old HEAD tree == tip tree).
@@ -600,10 +597,7 @@ pub fn reword_commit(repo_id: String, oid: String, message: String, state: State
     let parent_refs: Vec<&git2::Commit> = parents.iter().collect();
     let new_oid = repo.commit(None, &target.author(), &sig, msg, &tree, &parent_refs)?;
 
-    let branch_ref = head
-        .name()
-        .map_err(|_| Error::InvalidArg("HEAD reference has no name".into()))?
-        .to_owned();
+    let branch_ref = head.name()?.to_owned();
 
     // Target was HEAD — no descendants to replay, just move the branch tip.
     if target_oid == head_oid {
