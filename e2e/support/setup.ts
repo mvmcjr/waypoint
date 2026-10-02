@@ -1,4 +1,4 @@
-import { setOptions } from 'expect-webdriverio';
+import { setDefaultOptions } from 'expect-webdriverio';
 
 /**
  * `expect-webdriverio` waits only 2s by default in standalone mode (see
@@ -10,8 +10,8 @@ import { setOptions } from 'expect-webdriverio';
  *
  * Loaded via Mocha's `--require` (see scripts/e2e/run.mjs), after `tsx` so
  * this `.ts` file itself gets transformed, and before any spec file imports
- * `expect-webdriverio` — `setOptions` mutates that module's shared defaults
+ * `expect-webdriverio` — `setDefaultOptions` mutates that module's shared defaults
  * object, so as long as this runs first in the same process, every spec
  * picks up the new default.
  */
-setOptions({ wait: 10_000, interval: 100 });
+setDefaultOptions({ wait: 10_000, interval: 100 });
