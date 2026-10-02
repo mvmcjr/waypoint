@@ -59,34 +59,41 @@ pub fn stash_push(repo_id: String, message: String, state: State<RepoState>) -> 
 /// Return all stash entries, newest first (index 0 = most recent).
 #[tauri::command]
 pub fn list_stashes(repo_id: String, state: State<RepoState>) -> Result<Vec<StashEntry>> {
-    let mut repos = state.0.lock().unwrap();
-    let repo = repos.get_mut(&repo_id).ok_or_else(|| Error::RepoNotFound(repo_id.clone()))?;
+    let repos = state.0.lock().unwrap();
+    let repo = repos.get(&repo_id).ok_or_else(|| Error::RepoNotFound(repo_id.clone()))?;
+    stash_entries(repo)
+}
 
-    let mut stashes: Vec<StashEntry> = Vec::new();
-    repo.stash_foreach(|index, message, oid| {
-        stashes.push(StashEntry {
-            index,
-            message: message.to_string(),
-            oid: oid.to_string(),
-            branch: parse_stash_branch(message),
-        });
-        true
-    })?;
+/// All stash entries, newest first (index 0 = stash@{0}). Reads the
+/// `refs/stash` reflog directly — the same data `git2::Repository::stash_foreach`
+/// walks — because stash_foreach unwraps each message as UTF-8 and panics on
+/// stashes `git stash` made on non-UTF-8 (e.g. Latin-1) commits.
+fn stash_entries(repo: &git2::Repository) -> Result<Vec<StashEntry>> {
+    if repo.find_reference("refs/stash").is_err() {
+        return Ok(Vec::new());
+    }
+    let stashes = repo
+        .reflog("refs/stash")?
+        .iter()
+        .enumerate()
+        .map(|(index, entry)| {
+            let message = lossy(entry.message_bytes());
+            StashEntry {
+                index,
+                branch: parse_stash_branch(&message),
+                message,
+                oid: entry.id_new().to_string(),
+            }
+        })
+        .collect();
     Ok(stashes)
 }
 
 /// Find the current stash-list index of the stash with the given OID, if it's
-/// still there. `stash_foreach` walks newest-first, same as `pop_stash`/`list_stashes`.
-pub(crate) fn find_stash_index_by_oid(repo: &mut git2::Repository, oid: git2::Oid) -> Option<usize> {
-    let mut found = None;
-    let _ = repo.stash_foreach(|index, _message, &stash_oid| {
-        if stash_oid == oid {
-            found = Some(index);
-            return false; // stop iterating
-        }
-        true
-    });
-    found
+/// still there. Indices are newest-first, same as `pop_stash`/`list_stashes`.
+pub(crate) fn find_stash_index_by_oid(repo: &git2::Repository, oid: git2::Oid) -> Option<usize> {
+    let oid = oid.to_string();
+    stash_entries(repo).ok()?.into_iter().find(|s| s.oid == oid).map(|s| s.index)
 }
 
 /// Resolve the stash list index to act on. `oid` (when given) is authoritative:
@@ -249,6 +256,39 @@ mod tests {
         let msg = default_stash_message(&repo).unwrap();
         assert!(msg.starts_with("WIP on (no branch): "), "{msg}");
         assert_eq!(parse_stash_branch(&msg), None);
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    /// `git stash` on a Latin-1 commit writes a non-UTF-8 reflog message.
+    /// git2's `stash_foreach` unwraps `to_str()` on it and panics — inside a
+    /// command holding the RepoState lock, poisoning it for every repo.
+    #[test]
+    fn lists_stashes_with_non_utf8_messages() {
+        let (dir, mut repo) = make_repo();
+        std::fs::write(dir.join("a.txt"), "changed\n").unwrap();
+        let sig = repo.signature().unwrap();
+        let oid = repo.stash_save(&sig, "PLACEHOLDER", None).unwrap();
+        let log = repo.path().join("logs").join("refs").join("stash");
+        let raw = std::fs::read(&log).unwrap();
+        let at = raw.windows(11).position(|w| w == b"PLACEHOLDER").unwrap();
+        let mut patched = raw[..at].to_vec();
+        patched.extend_from_slice(b"Corrig\xe9");
+        patched.extend_from_slice(&raw[at + 11..]);
+        std::fs::write(&log, patched).unwrap();
+
+        let stashes = stash_entries(&repo).unwrap();
+        assert_eq!(stashes.len(), 1);
+        assert_eq!(stashes[0].index, 0);
+        assert_eq!(stashes[0].oid, oid.to_string());
+        assert!(stashes[0].message.ends_with(": Corrig\u{FFFD}"), "{}", stashes[0].message);
+        assert_eq!(find_stash_index_by_oid(&repo, oid), Some(0));
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn no_stashes_lists_empty() {
+        let (dir, repo) = make_repo();
+        assert!(stash_entries(&repo).unwrap().is_empty());
         let _ = std::fs::remove_dir_all(dir);
     }
 
