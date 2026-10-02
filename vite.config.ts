@@ -31,8 +31,14 @@ export default defineConfig(async () => ({
         }
       : undefined,
     watch: {
-      // 3. tell Vite to ignore watching `src-tauri`
-      ignored: ["**/src-tauri/**"],
+      // 3. tell Vite to ignore watching `src-tauri`, and `.claude/` (Claude Code
+      //    agent worktrees — full checkouts of this repo)
+      ignored: ["**/src-tauri/**", "**/.claude/**"],
     },
+  },
+  // The dep scanner otherwise crawls every *.html under the root, including
+  // agent worktrees and downloaded e2e driver notes. The app has one entry.
+  optimizeDeps: {
+    entries: ["index.html"],
   },
 }));
