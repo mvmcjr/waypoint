@@ -28,15 +28,10 @@ fn is_locked(e: &Error) -> bool {
             || (g.class() == git2::ErrorClass::Os && g.message().contains("rename lockfile")))
 }
 
-/// Run `op`, retrying with short backoff (up to ~1 s total) while it fails with a
-/// git lock error. Other errors, and the last lock error, are returned unchanged.
-/// `op` must be safe to run again after a failed attempt.
-#[allow(dead_code)] // general-purpose entry point; callers currently use the helpers below
-pub(crate) fn retry_on_locked<T>(op: impl FnMut() -> Result<T>) -> Result<T> {
-    retry_on_locked_for(MAX_WAIT, op)
-}
-
-/// [`retry_on_locked`] with an explicit time budget (short budgets keep tests fast).
+/// Run `op`, retrying with short backoff for up to `max_wait` (callers pass
+/// [`MAX_WAIT`]; tests use short budgets) while it fails with a git lock error.
+/// Other errors, and the last lock error, are returned unchanged. `op` must be
+/// safe to run again after a failed attempt.
 pub(crate) fn retry_on_locked_for<T>(
     max_wait: Duration,
     mut op: impl FnMut() -> Result<T>,
@@ -104,7 +99,7 @@ mod tests {
     #[test]
     fn retries_lock_errors_then_succeeds() {
         let mut n = 0;
-        let r = retry_on_locked(|| {
+        let r = retry_on_locked_for(MAX_WAIT, || {
             n += 1;
             if n < 3 { Err(locked()) } else { Ok(n) }
         });
@@ -114,7 +109,7 @@ mod tests {
     #[test]
     fn does_not_retry_other_errors() {
         let mut n = 0;
-        let r: Result<()> = retry_on_locked(|| {
+        let r: Result<()> = retry_on_locked_for(MAX_WAIT, || {
             n += 1;
             Err(Error::InvalidArg("nope".into()))
         });
