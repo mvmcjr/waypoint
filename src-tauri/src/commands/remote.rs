@@ -32,6 +32,9 @@ pub struct PushOutcome {
     pub branch: String,
     /// git's message for a rejected push.
     pub detail: Option<String>,
+    /// The push asked git to record an upstream (`--set-upstream`); a force push
+    /// retrying a rejected one must keep doing so.
+    pub set_upstream: bool,
 }
 
 /// Shell out to the system `git` binary so that GCM / credential helpers work
@@ -40,9 +43,26 @@ pub struct PushOutcome {
 /// Uses `tokio::process::Command` so the wait is non-blocking: the Tauri async
 /// runtime can keep the UI responsive while git is running over the network.
 async fn run_git(workdir: &std::path::Path, args: &[&str]) -> Result<()> {
+    run_git_env(workdir, args, &[]).await
+}
+
+/// Environment that keeps a background git from ever prompting (terminal or
+/// Git Credential Manager) — it fails instead. Empty for interactive commands.
+fn git_env(background: bool) -> Vec<(&'static str, &'static str)> {
+    if background {
+        vec![("GIT_TERMINAL_PROMPT", "0"), ("GCM_INTERACTIVE", "Never")]
+    } else {
+        Vec::new()
+    }
+}
+
+async fn git_output(
+    workdir: &std::path::Path,
+    args: &[&str],
+    env: &[(&str, &str)],
+) -> Result<std::process::Output> {
     let mut cmd = tokio::process::Command::new("git");
-    cmd.current_dir(workdir)
-        .args(args);
+    cmd.current_dir(workdir).args(args).envs(env.iter().copied());
 
     #[cfg(target_os = "windows")]
     {
@@ -50,10 +70,11 @@ async fn run_git(workdir: &std::path::Path, args: &[&str]) -> Result<()> {
         cmd.creation_flags(CREATE_NO_WINDOW);
     }
 
-    let output = cmd.output()
-        .await
-        .map_err(|e| Error::InvalidArg(format!("failed to run git: {}", e)))?;
+    cmd.output().await.map_err(|e| Error::InvalidArg(format!("failed to run git: {}", e)))
+}
 
+async fn run_git_env(workdir: &std::path::Path, args: &[&str], env: &[(&str, &str)]) -> Result<()> {
+    let output = git_output(workdir, args, env).await?;
     if output.status.success() {
         return Ok(());
     }
@@ -105,9 +126,14 @@ struct Upstream {
 fn branch_upstream(repo: &git2::Repository, branch_name: &str) -> Option<Upstream> {
     let local_ref = format!("refs/heads/{}", branch_name);
     let remote = repo.branch_upstream_remote(&local_ref).ok()?;
-    let merge = repo.branch_upstream_merge(&local_ref).ok()?;
+    upstream_on(repo, &local_ref, remote.as_str().ok()?)
+}
+
+/// `local_ref`'s upstream branch given its already-read upstream `remote`.
+fn upstream_on(repo: &git2::Repository, local_ref: &str, remote: &str) -> Option<Upstream> {
+    let merge = repo.branch_upstream_merge(local_ref).ok()?;
     let branch = merge.as_str().ok()?.strip_prefix("refs/heads/")?;
-    Some(Upstream { remote: remote.as_str().ok()?.to_owned(), branch: branch.to_owned() })
+    Some(Upstream { remote: remote.to_owned(), branch: branch.to_owned() })
 }
 
 fn remote_names(repo: &git2::Repository) -> Vec<String> {
@@ -141,13 +167,13 @@ impl BranchCtx {
         let get = |key: String| cfg.as_ref().and_then(|c| c.get_string(&key).ok()).map(|v| v.trim().to_owned());
         let existing = |key: String| get(key).filter(|v| remotes.contains(v));
         let local_ref = format!("refs/heads/{}", branch_name);
+        let upstream_remote = repo
+            .branch_upstream_remote(&local_ref)
+            .ok()
+            .and_then(|r| r.as_str().ok().map(str::to_owned));
         BranchCtx {
-            upstream: branch_upstream(repo, branch_name),
-            tracks_something: repo
-                .branch_upstream_remote(&local_ref)
-                .ok()
-                .and_then(|r| r.as_str().ok().map(str::to_owned))
-                .is_some_and(|r| remotes.contains(&r)),
+            upstream: upstream_remote.as_deref().and_then(|r| upstream_on(repo, &local_ref, r)),
+            tracks_something: upstream_remote.as_ref().is_some_and(|r| remotes.contains(r)),
             push_remote: existing(format!("branch.{}.pushRemote", branch_name)),
             push_default_remote: existing("remote.pushDefault".to_owned()),
             push_follows_upstream: get("push.default".to_owned())
@@ -165,10 +191,12 @@ fn choose_remote(ctx: &BranchCtx) -> Option<String> {
             return Some(up.remote.clone());
         }
     }
-    if ctx.remotes.iter().any(|n| n == "origin") {
-        return Some("origin".to_owned());
-    }
-    ctx.remotes.first().cloned()
+    default_remote(&ctx.remotes)
+}
+
+/// "origin" if present, else the first remote.
+fn default_remote(remotes: &[String]) -> Option<String> {
+    remotes.iter().find(|n| *n == "origin").or(remotes.first()).cloned()
 }
 
 /// The remote a push uses, following git: `branch.<name>.pushRemote`, else
@@ -184,6 +212,9 @@ struct PushTarget {
     branch: String,
     /// First push of a branch with no upstream: record one (`--set-upstream`).
     set_upstream: bool,
+    /// Plugin API: the caller's argument goes to git exactly as given (`HEAD`,
+    /// `a:b`, a tag...) instead of a `refs/heads/` refspec built from the branch.
+    passthrough: bool,
 }
 
 /// Mirrors git's `push.default`: with `upstream`/`tracking` and the upstream on
@@ -201,24 +232,24 @@ fn resolve_push_target(ctx: &BranchCtx, branch_name: &str) -> Option<PushTarget>
         _ => branch_name.to_owned(),
     };
     let set_upstream = !ctx.tracks_something && choose_remote(ctx).as_deref() == Some(remote.as_str());
-    Some(PushTarget { remote, branch, set_upstream })
+    Some(PushTarget { remote, branch, set_upstream, passthrough: false })
 }
 
 /// An explicitly requested remote (plugin API): exactly `git push <remote>
-/// refs/heads/<b>:refs/heads/<b>` — no push.default mapping, no upstream change.
-fn explicit_push_target(remote: &str, branch_name: &str) -> PushTarget {
-    PushTarget { remote: remote.to_owned(), branch: branch_name.to_owned(), set_upstream: false }
+/// <arg>` — the argument is passed as-is, no push.default mapping, no upstream change.
+fn explicit_push_target(remote: &str, arg: &str) -> PushTarget {
+    PushTarget { remote: remote.to_owned(), branch: arg.to_owned(), set_upstream: false, passthrough: true }
 }
 
 /// Remotes a fetch should hit: the default remote (origin / first), the branch's
 /// pull remote and its push remote, deduplicated in that order. The push remote
 /// matters in a triangular workflow: a stale `refs/remotes/<fork>/*` hides what
-/// a push would overwrite. Without a branch (detached HEAD) just the default.
-fn fetch_remote_names(repo: &git2::Repository, branch_name: Option<&str>) -> Vec<String> {
+/// a push would overwrite. Without a branch (detached HEAD) or for a background
+/// fetch (which must not wake credential prompts for forks) just the default.
+fn fetch_remote_names(repo: &git2::Repository, branch_name: Option<&str>, background: bool) -> Vec<String> {
     let ctx = BranchCtx::load(repo, branch_name.unwrap_or(""));
-    let default = ctx.remotes.iter().find(|n| *n == "origin").or(ctx.remotes.first());
-    let mut names: Vec<String> = default.cloned().into_iter().collect();
-    if branch_name.is_some() {
+    let mut names: Vec<String> = default_remote(&ctx.remotes).into_iter().collect();
+    if branch_name.is_some() && !background {
         for r in [choose_remote(&ctx), choose_push_remote(&ctx)].into_iter().flatten() {
             if !names.contains(&r) {
                 names.push(r);
@@ -240,10 +271,11 @@ pub struct FetchResult {
 /// an unreachable fork) must not stop the others or hide that they succeeded.
 /// Sequential on purpose: concurrent `git fetch`es in one repo contend on
 /// FETCH_HEAD and ref locks.
-async fn fetch_remotes(workdir: &std::path::Path, names: &[String]) -> Vec<FetchResult> {
+async fn fetch_remotes(workdir: &std::path::Path, names: &[String], background: bool) -> Vec<FetchResult> {
+    let env = git_env(background);
     let mut results = Vec::with_capacity(names.len());
     for name in names {
-        let outcome = run_git(workdir, &["fetch", name]).await;
+        let outcome = run_git_env(workdir, &["fetch", name], &env).await;
         results.push(match outcome {
             Ok(()) => FetchResult { remote: name.clone(), ok: true, error: None },
             Err(e) => FetchResult { remote: name.clone(), ok: false, error: Some(e.to_string()) },
@@ -254,25 +286,29 @@ async fn fetch_remotes(workdir: &std::path::Path, names: &[String]) -> Vec<Fetch
 
 /// Fetch the default, pull and push remotes of `branch_name` (see
 /// `fetch_remote_names`) and report each remote's result. Empty when the repo
-/// has no remotes.
+/// has no remotes. `background` (auto-fetch) hits only the default remote and
+/// never prompts for credentials.
 #[tauri::command]
 pub async fn fetch_all(
     repo_id: String,
     branch_name: Option<String>,
+    background: Option<bool>,
     state: State<'_, RepoState>,
 ) -> Result<Vec<FetchResult>> {
+    let background = background.unwrap_or(false);
     let (names, workdir) = {
         let repos = state.0.lock().unwrap();
         let repo = repos.get(&repo_id).ok_or_else(|| Error::RepoNotFound(repo_id.clone()))?;
-        (fetch_remote_names(repo, branch_name.as_deref()), crate::repo::workdir(repo)?)
+        (fetch_remote_names(repo, branch_name.as_deref(), background), crate::repo::workdir(repo)?)
     };
-    Ok(fetch_remotes(&workdir, &names).await)
+    Ok(fetch_remotes(&workdir, &names, background).await)
 }
 
 /// Arguments for `git push` of `branch_name` to `target`. Full ref names on both
 /// sides: a bare name could resolve to a same-named tag.
 fn push_args(target: &PushTarget, branch_name: &str, force: bool) -> Vec<String> {
-    let mut args = vec!["push".to_owned()];
+    // --porcelain: stable per-ref status lines on stdout (see `classify_push`).
+    let mut args = vec!["push".to_owned(), "--porcelain".to_owned()];
     if force {
         args.push("--force".into());
     }
@@ -280,17 +316,42 @@ fn push_args(target: &PushTarget, branch_name: &str, force: bool) -> Vec<String>
         args.push("--set-upstream".into());
     }
     args.push(target.remote.clone());
-    args.push(format!("refs/heads/{}:refs/heads/{}", branch_name, target.branch));
+    if target.passthrough {
+        args.push(branch_name.to_owned());
+    } else {
+        args.push(format!("refs/heads/{}:refs/heads/{}", branch_name, target.branch));
+    }
     args
 }
 
-/// Whether git's failure output says the push was refused because the remote
-/// has work we lack (as opposed to auth/network/hook failures).
-fn is_push_rejection(msg: &str) -> bool {
-    msg.contains("[rejected]")
-        || msg.contains("non-fast-forward")
-        || msg.contains("fetch first")
-        || msg.contains("Updates were rejected")
+/// Classifies a finished `git push --porcelain`. `Ok(None)` is success;
+/// `Ok(Some(detail))` is a rejection the user can override with a force push
+/// (the remote has work we lack: `[rejected]` with `non-fast-forward` / `fetch
+/// first`); anything else — auth/network failures, `[remote rejected]` (server
+/// policy or hooks, which a force push can't fix) — is an error carrying git's
+/// message. Porcelain lines are `<flag>\t<from>:<to>\t<summary> (<reason>)`.
+fn classify_push(success: bool, stdout: &str, stderr: &str) -> Result<Option<String>> {
+    if success {
+        return Ok(None);
+    }
+    let failed: Vec<&str> = stdout
+        .lines()
+        .filter(|l| l.starts_with('!') && l.split('\t').count() >= 3)
+        .collect();
+    let message = |fallback: &str| {
+        let e = stderr.trim();
+        if e.is_empty() { fallback.trim().to_owned() } else { e.to_owned() }
+    };
+    let overridable = |line: &str| {
+        let summary = line.split('\t').nth(2).unwrap_or("");
+        summary.starts_with("[rejected]") && (summary.contains("(non-fast-forward)") || summary.contains("(fetch first)"))
+    };
+    if !failed.is_empty() && failed.iter().all(|l| overridable(l)) {
+        return Ok(Some(message(&failed.join("\n"))));
+    }
+    // Keep the per-ref status in the message: stderr alone may be empty or vague.
+    let detail = if failed.is_empty() { message("push failed") } else { format!("{}\n{}", message(""), failed.join("\n")).trim().to_owned() };
+    Err(Error::InvalidArg(detail))
 }
 
 /// An exact push destination, as shown to the user by the push-rejected dialog.
@@ -298,6 +359,9 @@ fn is_push_rejection(msg: &str) -> bool {
 pub struct PushDest {
     pub remote: String,
     pub branch: String,
+    /// Keep `--set-upstream` (the rejected push was a first push).
+    #[serde(default)]
+    pub set_upstream: bool,
 }
 
 /// The target of a push: an exact `dest` verbatim (no config, no upstream
@@ -309,7 +373,7 @@ fn plan_push(
     branch_name: &str,
 ) -> Result<PushTarget> {
     if let Some(d) = dest {
-        return Ok(PushTarget { remote: d.remote.clone(), branch: d.branch.clone(), set_upstream: false });
+        return Ok(PushTarget { remote: d.remote.clone(), branch: d.branch.clone(), set_upstream: d.set_upstream, passthrough: false });
     }
     match remote_name {
         Some(remote) => Ok(explicit_push_target(remote, branch_name)),
@@ -321,7 +385,7 @@ fn plan_push(
 /// Push `branch_name`. With an exact `target` it goes there verbatim (used to
 /// force-push precisely what a rejection reported). With no `remote_name` the target is resolved here
 /// (pushRemote / pushDefault / push.default / upstream) and reported in the
-/// outcome; an explicit remote is a plain same-name push to it.
+/// outcome; an explicit remote (plugin API) gets `branch_name` passed to git as-is.
 #[tauri::command]
 pub async fn push_branch(
     repo_id: String,
@@ -340,12 +404,20 @@ pub async fn push_branch(
         (target, args, crate::repo::workdir(repo)?)
     };
     let args: Vec<&str> = args.iter().map(String::as_str).collect();
-    let (kind, detail) = match run_git(&workdir, &args).await {
-        Ok(()) => ("pushed", None),
-        Err(Error::InvalidArg(msg)) if is_push_rejection(&msg) => ("rejected", Some(msg)),
-        Err(e) => return Err(e),
-    };
-    Ok(PushOutcome { kind: kind.into(), remote: target.remote, branch: target.branch, detail })
+    let output = git_output(&workdir, &args, &[]).await?;
+    let detail = classify_push(
+        output.status.success(),
+        &String::from_utf8_lossy(&output.stdout),
+        &String::from_utf8_lossy(&output.stderr),
+    )?;
+    let kind = if detail.is_some() { "rejected" } else { "pushed" };
+    Ok(PushOutcome {
+        kind: kind.into(),
+        remote: target.remote,
+        branch: target.branch,
+        detail,
+        set_upstream: target.set_upstream,
+    })
 }
 
 /// Push a local tag to a remote.
@@ -669,7 +741,7 @@ mod tests {
         assert_eq!(t.branch, "feature");
         assert_eq!(t.remote, "origin");
         assert!(!t.set_upstream);
-        assert_eq!(a, args(&["push", "origin", "refs/heads/feature:refs/heads/feature"]));
+        assert_eq!(a, args(&["push", "--porcelain", "origin", "refs/heads/feature:refs/heads/feature"]));
         let _ = std::fs::remove_dir_all(dir);
     }
 
@@ -680,7 +752,7 @@ mod tests {
         set_push_default(&repo, "upstream");
         let (t, a) = push(&repo, "feature", false);
         assert_eq!(t.branch, "main");
-        assert_eq!(a, args(&["push", "origin", "refs/heads/feature:refs/heads/main"]));
+        assert_eq!(a, args(&["push", "--porcelain", "origin", "refs/heads/feature:refs/heads/main"]));
         let _ = std::fs::remove_dir_all(dir);
     }
 
@@ -700,7 +772,7 @@ mod tests {
         let (dir, repo) = make_repo();
         let (t, a) = push(&repo, "main", false);
         assert!(t.set_upstream);
-        assert_eq!(a, args(&["push", "--set-upstream", "origin", "refs/heads/main:refs/heads/main"]));
+        assert_eq!(a, args(&["push", "--porcelain", "--set-upstream", "origin", "refs/heads/main:refs/heads/main"]));
         let _ = std::fs::remove_dir_all(dir);
     }
 
@@ -709,7 +781,7 @@ mod tests {
         let (dir, repo) = make_repo();
         set_upstream(&repo, "main", "origin", "refs/heads/main");
         let (_, a) = push(&repo, "main", true);
-        assert_eq!(a, args(&["push", "--force", "origin", "refs/heads/main:refs/heads/main"]));
+        assert_eq!(a, args(&["push", "--porcelain", "--force", "origin", "refs/heads/main:refs/heads/main"]));
         let _ = std::fs::remove_dir_all(dir);
     }
 
@@ -790,7 +862,103 @@ mod tests {
         set_cfg(&repo, "branch.feature.pushRemote", "origin");
         let t = explicit_push_target("fork", "feature");
         assert_eq!((t.remote.as_str(), t.branch.as_str(), t.set_upstream), ("fork", "feature", false));
-        assert_eq!(push_args(&t, "feature", false), args(&["push", "fork", "refs/heads/feature:refs/heads/feature"]));
+        assert_eq!(push_args(&t, "feature", false), args(&["push", "--porcelain", "fork", "feature"]));
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    /// Plugin API: whatever the plugin passed reaches git unchanged.
+    #[test]
+    fn explicit_remote_passes_non_branch_arguments_through() {
+        let (dir, repo) = two_remote_repo();
+        for arg in ["HEAD", "a:b", "v1.0", "refs/heads/x:refs/heads/y"] {
+            let t = plan_push(&repo, Some("fork"), None, arg).unwrap();
+            assert_eq!(push_args(&t, arg, true), args(&["push", "--porcelain", "--force", "fork", arg]));
+        }
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    /// A rejected first push keeps its --set-upstream for the dialog's force push.
+    #[test]
+    fn explicit_target_can_carry_set_upstream() {
+        let (dir, repo) = two_remote_repo();
+        let dest = PushDest { remote: "origin".into(), branch: "feature".into(), set_upstream: true };
+        let t = plan_push(&repo, None, Some(&dest), "feature").unwrap();
+        assert!(t.set_upstream);
+        assert_eq!(
+            push_args(&t, "feature", true),
+            args(&["push", "--porcelain", "--force", "--set-upstream", "origin", "refs/heads/feature:refs/heads/feature"])
+        );
+        // And the dest is deserialised with set_upstream defaulting to false.
+        let d: PushDest = serde_json::from_str(r#"{"remote":"a","branch":"b"}"#).unwrap();
+        assert!(!d.set_upstream);
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    fn outcome_of(success: bool, stdout: &str, stderr: &str) -> Result<Option<String>> {
+        classify_push(success, stdout, stderr)
+    }
+
+    const NON_FF: &str = "To https://example.invalid/r.git\n!\trefs/heads/main:refs/heads/main\t[rejected] (non-fast-forward)\nDone\n";
+    const FETCH_FIRST: &str = "To https://example.invalid/r.git\n!\trefs/heads/main:refs/heads/main\t[rejected] (fetch first)\nDone\n";
+    const HOOK: &str = "To https://example.invalid/r.git\n!\trefs/heads/main:refs/heads/main\t[remote rejected] (pre-receive hook declined: fetch first, non-fast-forward)\nDone\n";
+    const DENY_NFF: &str = "To https://example.invalid/r.git\n!\trefs/heads/main:refs/heads/main\t[remote rejected] (non-fast-forward)\nDone\n";
+
+    #[test]
+    fn porcelain_non_fast_forward_and_fetch_first_are_force_pushable() {
+        for out in [NON_FF, FETCH_FIRST] {
+            let got = outcome_of(false, out, "error: failed to push some refs\nhint: Updates were rejected").unwrap();
+            assert!(got.is_some_and(|d| d.contains("Updates were rejected")));
+        }
+        // Falls back to the status line when stderr is empty.
+        assert!(outcome_of(false, NON_FF, "").unwrap().is_some_and(|d| d.contains("non-fast-forward")));
+    }
+
+    #[test]
+    fn porcelain_remote_rejected_is_an_error_not_force_pushable() {
+        for out in [HOOK, DENY_NFF] {
+            let err = outcome_of(false, out, " ! [remote rejected] main -> main (hook)").unwrap_err();
+            assert!(err.to_string().contains("remote rejected"), "{err}");
+        }
+    }
+
+    #[test]
+    fn porcelain_success_flags_are_pushed() {
+        for flag in [" ", "*", "+", "=", "-"] {
+            let out = format!("To u\n{flag}\trefs/heads/main:refs/heads/main\t[new branch]\nDone\n");
+            assert_eq!(outcome_of(true, &out, "").unwrap(), None, "flag {flag:?}");
+        }
+        assert_eq!(outcome_of(true, "To u\n=\trefs/heads/main:refs/heads/main\t[up to date]\nDone\n", "").unwrap(), None);
+    }
+
+    #[test]
+    fn push_failure_without_a_status_line_is_an_error() {
+        let err = outcome_of(false, "", "fatal: Authentication failed for 'https://example.invalid/'").unwrap_err();
+        assert!(err.to_string().contains("Authentication failed"));
+        // A bare "non-fast-forward" in stderr alone no longer means rejection.
+        assert!(outcome_of(false, "", "remote: hook said non-fast-forward, fetch first").is_err());
+    }
+
+    #[test]
+    fn other_rejected_reasons_are_errors() {
+        let out = "To u\n!\trefs/tags/v1:refs/tags/v1\t[rejected] (already exists)\nDone\n";
+        assert!(outcome_of(false, out, "error: failed to push").is_err());
+    }
+
+    #[test]
+    fn background_git_never_prompts() {
+        let env = git_env(true);
+        assert!(env.contains(&("GIT_TERMINAL_PROMPT", "0")));
+        assert!(env.contains(&("GCM_INTERACTIVE", "Never")));
+        assert!(git_env(false).is_empty());
+    }
+
+    #[test]
+    fn background_fetch_targets_only_the_default_remote() {
+        let (dir, repo) = two_remote_repo();
+        set_upstream(&repo, "main", "fork", "refs/heads/main");
+        set_cfg(&repo, "branch.main.pushRemote", "fork");
+        assert_eq!(fetch_remote_names(&repo, Some("main"), true), vec!["origin"]);
+        assert_eq!(fetch_remote_names(&repo, Some("main"), false), vec!["origin", "fork"]);
         let _ = std::fs::remove_dir_all(dir);
     }
 
@@ -801,12 +969,12 @@ mod tests {
         set_upstream(&repo, "feature", "origin", "refs/heads/other");
         set_push_default(&repo, "upstream");
         set_cfg(&repo, "branch.feature.pushRemote", "origin");
-        let dest = PushDest { remote: "fork".into(), branch: "release".into() };
+        let dest = PushDest { remote: "fork".into(), branch: "release".into(), set_upstream: false };
         let t = plan_push(&repo, None, Some(&dest), "feature").unwrap();
         assert_eq!((t.remote.as_str(), t.branch.as_str(), t.set_upstream), ("fork", "release", false));
         assert_eq!(
             push_args(&t, "feature", true),
-            args(&["push", "--force", "fork", "refs/heads/feature:refs/heads/release"])
+            args(&["push", "--porcelain", "--force", "fork", "refs/heads/feature:refs/heads/release"])
         );
         // Without a target the same config resolves differently.
         let resolved = plan_push(&repo, None, None, "feature").unwrap();
@@ -835,7 +1003,7 @@ mod tests {
         repo.remote("origin", good.to_str().unwrap()).unwrap();
         repo.remote("broken", dir.join("does-not-exist").to_str().unwrap()).unwrap();
         let names = vec!["origin".to_owned(), "broken".to_owned()];
-        let results = tauri::async_runtime::block_on(fetch_remotes(&dir, &names));
+        let results = tauri::async_runtime::block_on(fetch_remotes(&dir, &names, false));
         assert_eq!(results.len(), 2);
         assert_eq!((results[0].remote.as_str(), results[0].ok), ("origin", true));
         assert!(results[0].error.is_none());
@@ -851,7 +1019,7 @@ mod tests {
         set_cfg(&repo, "remote.pushDefault", "fork");
         let (t, a) = push(&repo, "feature", false);
         assert_eq!((t.remote.as_str(), t.set_upstream), ("fork", false));
-        assert_eq!(a, args(&["push", "fork", "refs/heads/feature:refs/heads/feature"]));
+        assert_eq!(a, args(&["push", "--porcelain", "fork", "refs/heads/feature:refs/heads/feature"]));
         set_cfg(&repo, "branch.feature2.pushRemote", "fork");
         assert!(!push(&repo, "feature2", false).0.set_upstream);
         let _ = std::fs::remove_dir_all(dir);
@@ -871,21 +1039,6 @@ mod tests {
         let repo = Repository::init(&dir).unwrap();
         assert!(resolve_push_target(&BranchCtx::load(&repo, "main"), "main").is_none());
         let _ = std::fs::remove_dir_all(dir);
-    }
-
-    #[test]
-    fn push_rejection_is_recognised_in_git_stderr() {
-        for msg in [
-            " ! [rejected]        main -> main (non-fast-forward)",
-            "error: failed to push some refs
-hint: Updates were rejected because the tip of your current branch is behind",
-            " ! [rejected]        main -> main (fetch first)",
-            "! [remote rejected] main -> main (pre-receive hook declined)",
-        ] {
-            assert_eq!(is_push_rejection(msg), !msg.contains("remote rejected"), "{msg}");
-        }
-        assert!(!is_push_rejection("fatal: Authentication failed for 'https://example.invalid/'"));
-        assert!(!is_push_rejection("fatal: unable to access: Could not resolve host"));
     }
 
     #[test]
@@ -921,12 +1074,12 @@ hint: Updates were rejected because the tip of your current branch is behind",
     fn fetch_remotes_are_default_pull_and_push_deduplicated() {
         let (dir, repo) = two_remote_repo();
         repo.remote("zeta", "https://example.invalid/z.git").unwrap();
-        assert_eq!(fetch_remote_names(&repo, Some("main")), vec!["origin"]);
+        assert_eq!(fetch_remote_names(&repo, Some("main"), false), vec!["origin"]);
         set_upstream(&repo, "main", "fork", "refs/heads/main");
         set_cfg(&repo, "branch.main.pushRemote", "zeta");
-        assert_eq!(fetch_remote_names(&repo, Some("main")), vec!["origin", "fork", "zeta"]);
+        assert_eq!(fetch_remote_names(&repo, Some("main"), false), vec!["origin", "fork", "zeta"]);
         // Detached HEAD: just the default.
-        assert_eq!(fetch_remote_names(&repo, None), vec!["origin"]);
+        assert_eq!(fetch_remote_names(&repo, None, false), vec!["origin"]);
         let _ = std::fs::remove_dir_all(dir);
     }
 
@@ -935,10 +1088,10 @@ hint: Updates were rejected because the tip of your current branch is behind",
         let dir = make_temp_dir("remote");
         let repo = Repository::init(&dir).unwrap();
         repo.remote("zeta", "https://example.invalid/z.git").unwrap();
-        assert_eq!(fetch_remote_names(&repo, None), vec!["zeta"]);
+        assert_eq!(fetch_remote_names(&repo, None, false), vec!["zeta"]);
         let empty = make_temp_dir("remote");
         let r2 = Repository::init(&empty).unwrap();
-        assert!(fetch_remote_names(&r2, Some("main")).is_empty());
+        assert!(fetch_remote_names(&r2, Some("main"), false).is_empty());
         let _ = std::fs::remove_dir_all(dir);
         let _ = std::fs::remove_dir_all(empty);
     }

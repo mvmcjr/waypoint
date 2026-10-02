@@ -108,14 +108,14 @@ describe("buildApiHandlers", () => {
   });
 
   it("push passes its explicit remote through to ipc.pushBranch", async () => {
-    vi.mocked(ipc.pushBranch).mockResolvedValue({ kind: "pushed", remote: "fork", branch: "main", detail: null });
+    vi.mocked(ipc.pushBranch).mockResolvedValue({ kind: "pushed", remote: "fork", branch: "main", detail: null, set_upstream: false });
     const api = buildApiHandlers(ctx, extras);
     await api.push("fork", "main", true);
     expect(ipc.pushBranch).toHaveBeenCalledWith("repo1", "fork", "main", true);
   });
 
   it("push throws when the remote rejects it, as it did when rejection was an error", async () => {
-    vi.mocked(ipc.pushBranch).mockResolvedValue({ kind: "rejected", remote: "fork", branch: "main", detail: "! [rejected] (non-fast-forward)" });
+    vi.mocked(ipc.pushBranch).mockResolvedValue({ kind: "rejected", remote: "fork", branch: "main", detail: "! [rejected] (non-fast-forward)", set_upstream: false });
     const api = buildApiHandlers(ctx, extras);
     await expect(api.push("fork", "main")).rejects.toThrow(/non-fast-forward/);
   });

@@ -139,8 +139,8 @@ vi.mock("@/components/detail/StagingFileDiffPanel", () => ({
 // can assert on the `worktree` prop RepoView computes for it, without needing
 // the real dialog's ipc/query dependencies wired up in this test file.
 vi.mock("@/components/actions/Dialogs", () => ({
-  PushRejectedDialog: ({ branchName, target }: { branchName: string; target: { remote: string; branch: string } }) => (
-    <div data-testid="push-rejected" data-branch={branchName} data-remote={target.remote} data-destination={target.branch}>
+  PushRejectedDialog: ({ branchName, target }: { branchName: string; target: { remote: string; branch: string; set_upstream: boolean } }) => (
+    <div data-testid="push-rejected" data-branch={branchName} data-remote={target.remote} data-destination={target.branch} data-set-upstream={String(target.set_upstream)}>
       PushRejectedDialog
     </div>
   ),
@@ -325,8 +325,8 @@ describe("RepoView", () => {
       { name: "origin", url: "https://github.com/x/y" },
       { name: "fork", url: "https://github.com/me/y" },
     ];
-    const pushed = (remote: string, branch: string) => ({ kind: "pushed", remote, branch, detail: null });
-    const rejected = (remote: string, branch: string) => ({ kind: "rejected", remote, branch, detail: "! [rejected]" });
+    const pushed = (remote: string, branch: string) => ({ kind: "pushed", remote, branch, detail: null, set_upstream: false });
+    const rejected = (remote: string, branch: string, set_upstream = false) => ({ kind: "rejected", remote, branch, detail: "! [rejected]", set_upstream });
 
     beforeEach(() => {
       vi.mocked(useRemotes).mockReturnValue({ data: TWO_REMOTES } as any);
@@ -361,6 +361,13 @@ describe("RepoView", () => {
       await screen.findByTestId("push-rejected");
       expect(toast.success).not.toHaveBeenCalled();
       expect(toast.dismiss).toHaveBeenCalledWith("toast-id");
+    });
+
+    it("carries the first-push --set-upstream into the force-push dialog", async () => {
+      vi.mocked(ipc.pushBranch).mockResolvedValue(rejected("origin", "main", true) as any);
+      render(<RepoView />);
+      fireEvent.click(screen.getByRole("button", { name: /push/i }));
+      expect(await screen.findByTestId("push-rejected")).toHaveAttribute("data-set-upstream", "true");
     });
 
     it("opens the force-push dialog with the returned target when the push is rejected", async () => {
@@ -448,6 +455,13 @@ describe("RepoView", () => {
       vi.mocked(ipc.fetchAll).mockRejectedValue("boom");
       await clickFetch();
       await waitFor(() => expect(toast.error).toHaveBeenCalledWith("Fetch failed: boom", { id: "toast-id" }));
+    });
+
+    it("auto-fetch is a background fetch with no branch (default remote only)", async () => {
+      vi.mocked(ipc.fetchAll).mockResolvedValue([ok("origin")]);
+      render(<RepoView />);
+      await waitFor(() => expect(ipc.fetchAll).toHaveBeenCalled(), { timeout: 4000 });
+      expect(ipc.fetchAll).toHaveBeenCalledWith("repo1", null, true);
     });
 
     it("auto-fetch refreshes even when every remote fails", async () => {

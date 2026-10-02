@@ -142,19 +142,30 @@ export interface PullResult {
   branch: string;
 }
 
-/** A rejected push (remote has commits we lack) is an outcome, not an error. */
 export interface FetchResult {
   remote: string;
   ok: boolean;
   error: string | null;
 }
 
+/** An exact push destination, pushed verbatim (no config lookup). */
+export interface PushDest {
+  remote: string;
+  /** Destination branch name on `remote`. */
+  branch: string;
+  /** Record an upstream (`--set-upstream`), as the rejected first push would have. */
+  set_upstream: boolean;
+}
+
+/** A rejected push (remote has commits we lack) is an outcome, not an error. */
 export interface PushOutcome {
   kind: "pushed" | "rejected";
   remote: string;
   /** Destination branch name on `remote`. */
   branch: string;
   detail: string | null;
+  /** The push asked for `--set-upstream`; a force-push retry must keep it. */
+  set_upstream: boolean;
 }
 
 export interface OpenedRepo {
@@ -381,24 +392,26 @@ export const ipc = {
   /**
    * Fetches the default, pull and push remotes of `branchName` (resolved by the
    * backend), one after another, and reports each remote's result. Empty when
-   * the repo has no remotes.
+   * the repo has no remotes. `background` (auto-fetch) fetches only the default
+   * remote and never prompts for credentials.
    */
-  fetchAll: (repoId: string, branchName: string | null) =>
-    invoke<FetchResult[]>("fetch_all", { repoId, branchName }),
+  fetchAll: (repoId: string, branchName: string | null, background?: boolean) =>
+    invoke<FetchResult[]>("fetch_all", { repoId, branchName, background }),
 
   /**
    * Without `remoteName` the backend resolves the target (pushRemote /
    * pushDefault / push.default / upstream) and reports it in the outcome. With
    * one, it is a plain same-name push to that remote. With `target` it pushes
    * exactly `refs/heads/<branchName>:refs/heads/<target.branch>` to
-   * `target.remote`, ignoring config (used to force-push what a rejection showed).
+   * `target.remote`, ignoring config (used to force-push what a rejection showed),
+   * with `--set-upstream` iff `target.set_upstream`.
    */
   pushBranch: (
     repoId: string,
     remoteName: string | undefined,
     branchName: string,
     force: boolean,
-    target?: { remote: string; branch: string },
+    target?: PushDest,
   ) => invoke<PushOutcome>("push_branch", { repoId, remoteName, branchName, force, target }),
 
   /** Without `remoteName` the backend chooses (upstream remote, origin, first) and reports it. */

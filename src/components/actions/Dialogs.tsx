@@ -20,7 +20,7 @@ import {
   SelectTrigger,
   SelectValue,
 } from "@/components/ui/select";
-import { ipc, type CheckoutRemoteResult, type RemoteInfo } from "@/lib/ipc";
+import { ipc, type CheckoutRemoteResult, type PushDest, type RemoteInfo } from "@/lib/ipc";
 import { useRefs, useCommitInRef, useWorktreeStatus } from "@/lib/queries";
 
 // ─── Shared helpers ────────────────────────────────────────────────────────
@@ -151,7 +151,7 @@ interface PushRejectedProps {
   /** Local branch being pushed. */
   branchName: string;
   /** Where the rejected push went, as reported by the backend; the force push hits exactly this. */
-  target: { remote: string; branch: string };
+  target: PushDest;
   onClose: () => void;
   onSuccess: () => void;
 }

@@ -380,7 +380,7 @@ describe("Dialogs", () => {
   });
 
   describe("PushRejectedDialog", () => {
-    const pushed = { kind: "pushed", remote: "origin", branch: "main", detail: null } as const;
+    const pushed = { kind: "pushed", remote: "origin", branch: "main", detail: null, set_upstream: false } as const;
 
     it("names the returned target and force pushes exactly that target", async () => {
       vi.mocked(ipc.pushBranch).mockResolvedValue(pushed);
@@ -388,7 +388,7 @@ describe("Dialogs", () => {
         <PushRejectedDialog
           repoId="repo1"
           branchName="feature"
-          target={{ remote: "origin", branch: "main" }}
+          target={{ remote: "origin", branch: "main", set_upstream: false }}
           onClose={mockOnClose}
           onSuccess={mockOnSuccess}
         />
@@ -396,7 +396,7 @@ describe("Dialogs", () => {
       expect(screen.getByRole("heading", { name: "Push rejected" })).toBeInTheDocument();
       expect(screen.getByText("origin/main")).toBeInTheDocument();
       fireEvent.click(screen.getByRole("button", { name: "Force push" }));
-      expect(ipc.pushBranch).toHaveBeenCalledWith("repo1", undefined, "feature", true, { remote: "origin", branch: "main" });
+      expect(ipc.pushBranch).toHaveBeenCalledWith("repo1", undefined, "feature", true, { remote: "origin", branch: "main", set_upstream: false });
       await waitFor(() => expect(mockOnSuccess).toHaveBeenCalled());
     });
 
@@ -406,24 +406,40 @@ describe("Dialogs", () => {
         <PushRejectedDialog
           repoId="repo1"
           branchName="main"
-          target={{ remote: "fork", branch: "release" }}
+          target={{ remote: "fork", branch: "release", set_upstream: false }}
           onClose={mockOnClose}
           onSuccess={mockOnSuccess}
         />
       );
       expect(screen.getByText("fork/release")).toBeInTheDocument();
       fireEvent.click(screen.getByRole("button", { name: "Force push" }));
-      expect(ipc.pushBranch).toHaveBeenCalledWith("repo1", undefined, "main", true, { remote: "fork", branch: "release" });
+      expect(ipc.pushBranch).toHaveBeenCalledWith("repo1", undefined, "main", true, { remote: "fork", branch: "release", set_upstream: false });
+      await waitFor(() => expect(mockOnSuccess).toHaveBeenCalled());
+    });
+
+    it("keeps --set-upstream on the force push of a rejected first push", async () => {
+      vi.mocked(ipc.pushBranch).mockResolvedValue(pushed);
+      render(
+        <PushRejectedDialog
+          repoId="repo1"
+          branchName="feature"
+          target={{ remote: "origin", branch: "feature", set_upstream: true }}
+          onClose={mockOnClose}
+          onSuccess={mockOnSuccess}
+        />
+      );
+      fireEvent.click(screen.getByRole("button", { name: "Force push" }));
+      expect(ipc.pushBranch).toHaveBeenCalledWith("repo1", undefined, "feature", true, { remote: "origin", branch: "feature", set_upstream: true });
       await waitFor(() => expect(mockOnSuccess).toHaveBeenCalled());
     });
 
     it("shows the error instead of closing when the force push is rejected again", async () => {
-      vi.mocked(ipc.pushBranch).mockResolvedValue({ kind: "rejected", remote: "origin", branch: "main", detail: "! [rejected] stale info" });
+      vi.mocked(ipc.pushBranch).mockResolvedValue({ kind: "rejected", remote: "origin", branch: "main", detail: "! [rejected] stale info", set_upstream: false });
       render(
         <PushRejectedDialog
           repoId="repo1"
           branchName="main"
-          target={{ remote: "origin", branch: "main" }}
+          target={{ remote: "origin", branch: "main", set_upstream: false }}
           onClose={mockOnClose}
           onSuccess={mockOnSuccess}
         />
@@ -438,7 +454,7 @@ describe("Dialogs", () => {
         <PushRejectedDialog
           repoId="repo1"
           branchName="main"
-          target={{ remote: "origin", branch: "main" }}
+          target={{ remote: "origin", branch: "main", set_upstream: false }}
           onClose={mockOnClose}
           onSuccess={mockOnSuccess}
         />

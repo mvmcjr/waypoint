@@ -38,7 +38,7 @@ import {
 import { RemoveWorktreeDialog } from "@/components/actions/RemoveWorktreeDialog";
 import type { CommitAction } from "@/components/timeline/CommitContextMenu";
 import type { RefAction } from "@/components/sidebar/RefTree";
-import { ipc, type RefInfo, type WorktreeInfo } from "@/lib/ipc";
+import { ipc, type PushDest, type RefInfo, type WorktreeInfo } from "@/lib/ipc";
 import { RefreshCw, ArrowDown, ArrowUp, Puzzle } from "lucide-react";
 import { usePluginRegistry, commandsForSurface } from "@/lib/plugins/registry";
 import { usePluginRunner } from "@/components/plugins/PluginRunnerProvider";
@@ -71,7 +71,7 @@ type DialogState =
   | { kind: "revert"; oid: string; summary: string }
   | { kind: "check-in-branch"; oid: string; summary: string }
   | { kind: "pull-conflicts" }
-  | { kind: "push-rejected"; branchName: string; target: { remote: string; branch: string } }
+  | { kind: "push-rejected"; branchName: string; target: PushDest }
   | { kind: "remote-error"; message: string }
   | { kind: "create-tag"; oid: string }
   | { kind: "delete-tag"; tagName: string }
@@ -146,8 +146,6 @@ export function RepoView() {
   isFetchingRef.current = isFetching;
   const refreshRef = useRef(refresh);
   refreshRef.current = refresh;
-  const headBranchRef = useRef(head?.branch);
-  headBranchRef.current = head?.branch;
   const lastAutoFetchRef = useRef<number>(0);
   const autoFetchInFlightRef = useRef(false);
 
@@ -158,7 +156,7 @@ export function RepoView() {
     try {
       // The backend reports failures per remote; auto-fetch swallows them (the
       // user can fetch manually) and a rejected command is treated the same.
-      await ipc.fetchAll(forRepoId, headBranchRef.current ?? null).catch(() => []);
+      await ipc.fetchAll(forRepoId, null, true).catch(() => []);
       if (repoIdRef.current !== forRepoId) return;
       // Refresh even if every remote "failed": git can exit non-zero after updating most refs.
       refreshRef.current();
@@ -252,7 +250,7 @@ export function RepoView() {
       }
       if (repoIdRef.current !== myRepoId) return; // user switched repos mid-flight
       if (outcome.kind === "rejected") {
-        setDialog({ kind: "push-rejected", branchName, target: { remote: outcome.remote, branch: outcome.branch } });
+        setDialog({ kind: "push-rejected", branchName, target: { remote: outcome.remote, branch: outcome.branch, set_upstream: outcome.set_upstream } });
       } else {
         refresh();
       }
