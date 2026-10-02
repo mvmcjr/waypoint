@@ -83,11 +83,8 @@ fn replay_onto(
     // Working tree and index first (relative to the still-current HEAD), then
     // the ref: if the checkout refuses, nothing has moved.
     repo.checkout_tree(last.as_object(), Some(git2::build::CheckoutBuilder::new().safe()))?;
-    // git (and libgit2's rebase) record the pre-rewrite tip for `git reset
-    // ORIG_HEAD`. Best effort: a failure to write it must not block the rewrite.
-    let _ = repo.reference("ORIG_HEAD", old_tip, true, "rebase: updating ORIG_HEAD");
     let reflog = format!("rebase (finish): {branch_ref} onto {onto}");
-    if let Err(e) = repo.reference_matching(branch_ref, new_tip, true, old_tip, &reflog) {
+    if let Err(e) = move_branch_recording_orig_head(repo, branch_ref, new_tip, old_tip, &reflog) {
         // Put the working tree back where the untouched branch expects it.
         if let Ok(old) = repo.find_commit(old_tip) {
             let _ = repo.checkout_tree(old.as_object(), Some(git2::build::CheckoutBuilder::new().force()));
@@ -95,6 +92,22 @@ fn replay_onto(
         return Err(Error::Git(e));
     }
     repo.set_head(branch_ref)?;
+    Ok(())
+}
+
+/// Moves `branch_ref` from `old_tip` to `new_tip`, guarded against the branch
+/// having moved meanwhile, and only then records `old_tip` as ORIG_HEAD (what
+/// `reset ORIG_HEAD` expects after a rewrite). A refused update must not
+/// clobber the user's ORIG_HEAD; failing to write it never blocks the rewrite.
+fn move_branch_recording_orig_head(
+    repo: &git2::Repository,
+    branch_ref: &str,
+    new_tip: git2::Oid,
+    old_tip: git2::Oid,
+    reflog: &str,
+) -> std::result::Result<(), git2::Error> {
+    repo.reference_matching(branch_ref, new_tip, true, old_tip, reflog)?;
+    let _ = repo.reference("ORIG_HEAD", old_tip, true, "rewrite: updating ORIG_HEAD");
     Ok(())
 }
 
@@ -117,8 +130,11 @@ fn ensure_clean_for_rewrite(repo: &git2::Repository) -> Result<()> {
     if repo.diff_index_to_workdir(None, Some(&mut opts))?.deltas().len() > 0 {
         return Err(Error::Git(git2::Error::from_str("unstaged changes exist in workdir")));
     }
-    for sm in repo.submodules()? {
-        if submodule_is_dirty(repo, &sm)? {
+    // A malformed or stale submodule entry (duplicated path, no checkout...) can't
+    // hold edits we would lose, so an unreadable listing or status is skipped
+    // rather than blocking every rewrite; the diffs above already cover the rest.
+    for sm in repo.submodules().unwrap_or_default() {
+        if submodule_is_dirty(repo, &sm) {
             return Err(Error::Git(git2::Error::from_str("uncommitted changes exist in submodule")));
         }
     }
@@ -128,11 +144,11 @@ fn ensure_clean_for_rewrite(repo: &git2::Repository) -> Result<()> {
 /// Whether a submodule has anything but untracked files to commit: a new HEAD
 /// or staged/unstaged change inside it, or a gitlink that differs from the
 /// index/HEAD.
-fn submodule_is_dirty(repo: &git2::Repository, sm: &git2::Submodule) -> Result<bool> {
+fn submodule_is_dirty(repo: &git2::Repository, sm: &git2::Submodule) -> bool {
     use git2::SubmoduleStatus as S;
-    let Ok(name) = sm.name() else { return Ok(false) };
-    let status = repo.submodule_status(name, git2::SubmoduleIgnore::Untracked)?;
-    Ok(status.intersects(
+    let Ok(name) = sm.name() else { return false };
+    let Ok(status) = repo.submodule_status(name, git2::SubmoduleIgnore::Untracked) else { return false };
+    status.intersects(
         S::INDEX_ADDED
             | S::INDEX_DELETED
             | S::INDEX_MODIFIED
@@ -141,7 +157,7 @@ fn submodule_is_dirty(repo: &git2::Repository, sm: &git2::Submodule) -> Result<b
             | S::WD_MODIFIED
             | S::WD_INDEX_MODIFIED
             | S::WD_WD_MODIFIED,
-    ))
+    )
 }
 
 #[derive(Debug, Serialize)]
@@ -592,8 +608,7 @@ fn squash_in(repo: &git2::Repository, oids: &[String], message: &str) -> Result<
     // No descendants beyond the range — just point the branch at the squash.
     // Working dir/index already match (squash tree == old HEAD tree == tip tree).
     if tip_oid == head_oid {
-        let _ = repo.reference("ORIG_HEAD", head_oid, true, "squash: updating ORIG_HEAD");
-        repo.reference_matching(&branch_ref, squashed_oid, true, head_oid, "squash commits")?;
+        move_branch_recording_orig_head(repo, &branch_ref, squashed_oid, head_oid, "squash commits")?;
         repo.set_head(&branch_ref)?;
         return Ok(());
     }
@@ -1273,6 +1288,44 @@ mod tests {
         let _ = std::fs::remove_dir_all(dir);
     }
 
+    /// A failed ref update (branch moved under us) must leave ORIG_HEAD alone.
+    #[test]
+    fn failed_replay_ref_update_leaves_orig_head_untouched() {
+        use crate::repo::test_support::*;
+        let (dir, repo) = make_repo_with_commit();
+        let base = repo.head().unwrap().peel_to_commit().unwrap().id();
+        let first = push_raw_commit(&repo, "b.txt", T, T, b"", b"first\n");
+        let second = push_raw_commit(&repo, "c.txt", T, T, b"", b"second\n");
+        move_branch(&repo, base);
+        let theirs = commit_file(&repo, "t.txt", "t", "theirs");
+        move_branch(&repo, second);
+        let branch_ref = repo.head().unwrap().name().unwrap().to_owned();
+        let prior = repo.head().unwrap().peel_to_commit().unwrap().id();
+        repo.reference("ORIG_HEAD", prior, true, "test").unwrap();
+        // `first` is stale: the branch is already at `second`, so the guarded update fails.
+        let sig = repo.signature().unwrap();
+        assert!(replay_onto(&repo, &branch_ref, first, base, theirs, &sig, "conflict").is_err());
+        assert_eq!(orig_head(&repo), Some(prior));
+        assert_eq!(repo.head().unwrap().peel_to_commit().unwrap().id(), second);
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn move_branch_records_orig_head_only_after_the_update_succeeds() {
+        use crate::repo::test_support::*;
+        let (dir, repo) = make_repo_with_commit();
+        let a = repo.head().unwrap().peel_to_commit().unwrap().id();
+        let b = push_raw_commit(&repo, "b.txt", T, T, b"", b"b\n");
+        let branch_ref = repo.head().unwrap().name().unwrap().to_owned();
+        // Wrong expected value: the update is refused and ORIG_HEAD is not written.
+        assert!(move_branch_recording_orig_head(&repo, &branch_ref, a, a, "test").is_err());
+        assert_eq!(orig_head(&repo), None);
+        move_branch_recording_orig_head(&repo, &branch_ref, a, b, "test").unwrap();
+        assert_eq!(orig_head(&repo), Some(b));
+        assert_eq!(repo.refname_to_id(&branch_ref).unwrap(), a);
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
     /// Repo with a submodule `sub` committed on the default branch.
     fn repo_with_submodule() -> (PathBuf, Repository, PathBuf) {
         use crate::repo::test_support::*;
@@ -1313,6 +1366,59 @@ mod tests {
         assert!(dir.join("sub").join("untracked.txt").exists());
         let _ = std::fs::remove_dir_all(dir);
         let _ = std::fs::remove_dir_all(sub_dir);
+    }
+
+    /// Commits `.gitmodules` text (and optionally a gitlink at `ghost`) on HEAD.
+    fn commit_gitmodules(repo: &Repository, dir: &Path, text: Option<&str>, gitlink: bool) {
+        let mut index = repo.index().unwrap();
+        if let Some(text) = text {
+            std::fs::write(dir.join(".gitmodules"), text).unwrap();
+            index.add_path(Path::new(".gitmodules")).unwrap();
+        }
+        if gitlink {
+            let head = repo.head().unwrap().peel_to_commit().unwrap();
+            let entry = git2::IndexEntry {
+                ctime: git2::IndexTime::new(0, 0),
+                mtime: git2::IndexTime::new(0, 0),
+                dev: 0,
+                ino: 0,
+                mode: 0o160000,
+                uid: 0,
+                gid: 0,
+                file_size: 0,
+                id: head.id(),
+                flags: 0,
+                flags_extended: 0,
+                path: b"ghost".to_vec(),
+            };
+            index.add(&entry).unwrap();
+        }
+        index.write().unwrap();
+        let tree = repo.find_tree(index.write_tree().unwrap()).unwrap();
+        let sig = repo.signature().unwrap();
+        let head = repo.head().unwrap().peel_to_commit().unwrap();
+        repo.commit(Some("HEAD"), &sig, &sig, "add submodule entry", &tree, &[&head]).unwrap();
+    }
+
+    /// A stale/malformed submodule entry (no gitlink, or a gitlink with no
+    /// `.gitmodules` entry or no checkout) can't hold user edits: it must not
+    /// block rewriting an otherwise clean tree. Real tracked changes still do.
+    #[test]
+    fn rewrite_ignores_broken_submodule_entries() {
+        use crate::repo::test_support::*;
+        const GHOST: &str = "[submodule \"ghost\"]\n\tpath = ghost\n\turl = https://example.invalid/ghost.git\n";
+        for (text, gitlink) in [(Some(GHOST), false), (Some(GHOST), true), (None, true), (Some("[submodule \"ghost\"]\n\tpath = ghost\n"), true), (Some("[submodule \"a\"]\n\tpath = ghost\n\turl = x\n[submodule \"b\"]\n\tpath = ghost\n"), true)] {
+            let (dir, repo) = make_repo_with_commit();
+            commit_gitmodules(&repo, &dir, text, gitlink);
+            let target = push_raw_commit(&repo, "b.txt", T, T, b"", b"target\n");
+            push_raw_commit(&repo, "c.txt", T, T, b"", b"tip\n");
+            reword_in(&repo, &target.to_string(), "reworded").unwrap_or_else(|e| panic!("{text:?} {gitlink}: {e}"));
+            let tip = repo.head().unwrap().peel_to_commit().unwrap();
+            assert_eq!(tip.parent(0).unwrap().summary(), Ok(Some("reworded")));
+            std::fs::write(dir.join("a.txt"), "dirty").unwrap();
+            assert!(reword_in(&repo, &tip.parent(0).unwrap().id().to_string(), "again").is_err());
+            let _ = std::fs::remove_dir_all(dir);
+        }
     }
 
     #[test]

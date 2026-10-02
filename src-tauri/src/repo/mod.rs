@@ -175,15 +175,14 @@ pub(crate) mod test_support {
     /// `encoding ISO-8859-1` header and a Latin-1 author, committer and message
     /// ("André" / "Corrigé le bug"), and move HEAD's branch to it.
     pub(crate) fn push_latin1_commit(repo: &Repository) -> git2::Oid {
-        let head = repo.head().unwrap().peel_to_commit().unwrap();
-        let mut raw = format!("tree {}\nparent {}\n", head.tree_id(), head.id()).into_bytes();
-        raw.extend_from_slice(b"author Andr\xe9 <a@example.com> 1000000000 +0000\n");
-        raw.extend_from_slice(b"committer Andr\xe9 <a@example.com> 1000000000 +0000\n");
-        raw.extend_from_slice(b"encoding ISO-8859-1\n\nCorrig\xe9 le bug\n");
-        let oid = repo.odb().unwrap().write(git2::ObjectType::Commit, &raw).unwrap();
-        let name = repo.head().unwrap().name().unwrap().to_owned();
-        repo.reference(&name, oid, true, "test").unwrap();
-        oid
+        push_raw_commit(
+            repo,
+            "latin1.txt",
+            b"Andr\xe9 <a@example.com> 1000000000 +0000",
+            b"Andr\xe9 <a@example.com> 1000000000 +0000",
+            b"encoding ISO-8859-1\n",
+            b"Corrig\xe9 le bug\n",
+        )
     }
 
     /// Write a commit on top of HEAD that adds `file`, with the raw `author` and

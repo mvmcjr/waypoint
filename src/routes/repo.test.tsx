@@ -139,8 +139,9 @@ vi.mock("@/components/detail/StagingFileDiffPanel", () => ({
 // can assert on the `worktree` prop RepoView computes for it, without needing
 // the real dialog's ipc/query dependencies wired up in this test file.
 vi.mock("@/components/actions/Dialogs", () => ({
-  PushRejectedDialog: ({ branchName, target }: { branchName: string; target: { remote: string; branch: string; set_upstream: boolean } }) => (
-    <div data-testid="push-rejected" data-branch={branchName} data-remote={target.remote} data-destination={target.branch} data-set-upstream={String(target.set_upstream)}>
+  PullConflictsDialog: () => <div data-testid="pull-conflicts" />,
+  PushRejectedDialog: ({ branchName, target }: { branchName: string; target: { remote: string; branch: string; set_upstream: boolean; expected_remote_oid?: string | null } }) => (
+    <div data-testid="push-rejected" data-branch={branchName} data-remote={target.remote} data-destination={target.branch} data-set-upstream={String(target.set_upstream)} data-lease={String(target.expected_remote_oid ?? "")}>
       PushRejectedDialog
     </div>
   ),
@@ -339,10 +340,22 @@ describe("RepoView", () => {
       render(<RepoView />);
       fireEvent.click(screen.getByRole("button", { name: /pull/i }));
       await waitFor(() => expect(ipc.pullBranch).toHaveBeenCalledWith("repo1"));
-      const opts = vi.mocked(toast.promise).mock.lastCall![1] as any;
-      expect(opts.success({ kind: "fast_forward", conflicted: [], remote: "fork", branch: "dev" })).toBe("Pulled fork/dev (fast-forward)");
-      expect(opts.success({ kind: "up_to_date", conflicted: [], remote: "fork", branch: "dev" })).toBe("Already up to date with fork/dev");
-      expect(opts.success({ kind: "merged", conflicted: [], remote: "fork", branch: "dev" })).toBe("Pulled fork/dev and merged");
+      await waitFor(() => expect(toast.success).toHaveBeenCalledWith("Already up to date with fork/main", { id: "toast-id" }));
+      for (const [kind, text] of [["fast_forward", "Pulled fork/dev (fast-forward)"], ["merged", "Pulled fork/dev and merged"]]) {
+        vi.mocked(ipc.pullBranch).mockResolvedValue({ kind, conflicted: [], remote: "fork", branch: "dev" } as any);
+        fireEvent.click(screen.getByRole("button", { name: /pull/i }));
+        await waitFor(() => expect(toast.success).toHaveBeenCalledWith(text, { id: "toast-id" }));
+      }
+    });
+
+    it("a pull that ends in conflicts shows no success toast", async () => {
+      vi.mocked(toast.success).mockClear();
+      vi.mocked(ipc.pullBranch).mockResolvedValue({ kind: "conflicts", conflicted: ["a.txt"], remote: "fork", branch: "main" } as any);
+      render(<RepoView />);
+      fireEvent.click(screen.getByRole("button", { name: /pull/i }));
+      await screen.findByTestId("pull-conflicts");
+      expect(toast.success).not.toHaveBeenCalled();
+      expect(toast.dismiss).toHaveBeenCalledWith("toast-id");
     });
 
     it("pushes without naming a remote or destination and reports the target used", async () => {
@@ -368,6 +381,13 @@ describe("RepoView", () => {
       render(<RepoView />);
       fireEvent.click(screen.getByRole("button", { name: /push/i }));
       expect(await screen.findByTestId("push-rejected")).toHaveAttribute("data-set-upstream", "true");
+    });
+
+    it("passes the rejection's remote oid through so the force push can lease against it", async () => {
+      vi.mocked(ipc.pushBranch).mockResolvedValue({ ...rejected("origin", "main"), expected_remote_oid: "abc123" } as any);
+      render(<RepoView />);
+      fireEvent.click(screen.getByRole("button", { name: /push/i }));
+      expect(await screen.findByTestId("push-rejected")).toHaveAttribute("data-lease", "abc123");
     });
 
     it("opens the force-push dialog with the returned target when the push is rejected", async () => {
@@ -464,14 +484,23 @@ describe("RepoView", () => {
       expect(ipc.fetchAll).toHaveBeenCalledWith("repo1", null, true);
     });
 
-    it("auto-fetch refreshes even when every remote fails", async () => {
+    it("auto-fetch does not reload when every remote fails (offline)", async () => {
       vi.mocked(ipc.fetchAll).mockResolvedValue([bad("origin", "offline")]);
       const refreshCalls = mockRefresh.mock.calls.length;
       render(<RepoView />);
       // The auto-fetch fires 2s after the repo opens (real timers: no fake-timer/waitFor interplay).
       await waitFor(() => expect(ipc.fetchAll).toHaveBeenCalled(), { timeout: 4000 });
-      await waitFor(() => expect(mockRefresh.mock.calls.length).toBeGreaterThan(refreshCalls));
+      await new Promise((r) => setTimeout(r, 100));
+      expect(mockRefresh.mock.calls.length).toBe(refreshCalls);
       expect(toast.error).not.toHaveBeenCalled();
+    });
+
+    it("auto-fetch refreshes when at least one remote succeeded", async () => {
+      vi.mocked(ipc.fetchAll).mockResolvedValue([bad("fork", "offline"), ok("origin")]);
+      const refreshCalls = mockRefresh.mock.calls.length;
+      render(<RepoView />);
+      await waitFor(() => expect(ipc.fetchAll).toHaveBeenCalled(), { timeout: 4000 });
+      await waitFor(() => expect(mockRefresh.mock.calls.length).toBeGreaterThan(refreshCalls));
     });
   });
 

@@ -35,6 +35,10 @@ pub struct PushOutcome {
     /// The push asked git to record an upstream (`--set-upstream`); a force push
     /// retrying a rejected one must keep doing so.
     pub set_upstream: bool,
+    /// For a rejected push: the value of `refs/remotes/<remote>/<branch>` when it
+    /// was rejected, which the dialog's force push leases against. `None` when
+    /// there is no such tracking ref.
+    pub expected_remote_oid: Option<String>,
 }
 
 /// Shell out to the system `git` binary so that GCM / credential helpers work
@@ -121,14 +125,6 @@ struct Upstream {
     branch: String,
 }
 
-/// The configured upstream of local `branch_name`, if it tracks a branch
-/// (`refs/heads/*`) on a remote. Anything else reads as "no upstream".
-fn branch_upstream(repo: &git2::Repository, branch_name: &str) -> Option<Upstream> {
-    let local_ref = format!("refs/heads/{}", branch_name);
-    let remote = repo.branch_upstream_remote(&local_ref).ok()?;
-    upstream_on(repo, &local_ref, remote.as_str().ok()?)
-}
-
 /// `local_ref`'s upstream branch given its already-read upstream `remote`.
 fn upstream_on(repo: &git2::Repository, local_ref: &str, remote: &str) -> Option<Upstream> {
     let merge = repo.branch_upstream_merge(local_ref).ok()?;
@@ -148,6 +144,8 @@ fn remote_names(repo: &git2::Repository) -> Vec<String> {
 struct BranchCtx {
     remotes: Vec<String>,
     upstream: Option<Upstream>,
+    /// `branch.<name>.merge` as configured, whatever it names (a tag, say).
+    upstream_merge: Option<String>,
     /// Whether the branch has an upstream configured on an existing remote (even
     /// one that isn't a `refs/heads/*` branch, which `upstream` reads as `None`).
     /// An upstream naming a removed remote counts as none, so a push re-binds it.
@@ -173,7 +171,12 @@ impl BranchCtx {
             .and_then(|r| r.as_str().ok().map(str::to_owned));
         BranchCtx {
             upstream: upstream_remote.as_deref().and_then(|r| upstream_on(repo, &local_ref, r)),
-            tracks_something: upstream_remote.as_ref().is_some_and(|r| remotes.contains(r)),
+            upstream_merge: upstream_remote
+                .as_ref()
+                .and_then(|_| repo.branch_upstream_merge(&local_ref).ok())
+                .and_then(|m| m.as_str().ok().map(str::to_owned)),
+            // `.` is a local branch as upstream: configured, even though no remote.
+            tracks_something: upstream_remote.as_ref().is_some_and(|r| r == "." || remotes.contains(r)),
             push_remote: existing(format!("branch.{}.pushRemote", branch_name)),
             push_default_remote: existing("remote.pushDefault".to_owned()),
             push_follows_upstream: get("push.default".to_owned())
@@ -215,6 +218,10 @@ struct PushTarget {
     /// Plugin API: the caller's argument goes to git exactly as given (`HEAD`,
     /// `a:b`, a tag...) instead of a `refs/heads/` refspec built from the branch.
     passthrough: bool,
+    /// A forced push uses `--force-with-lease` against `branch` on `remote`
+    /// (pinned to `expected_oid` when known) instead of a blind `--force`.
+    lease: bool,
+    expected_oid: Option<String>,
 }
 
 /// Mirrors git's `push.default`: with `upstream`/`tracking` and the upstream on
@@ -232,13 +239,13 @@ fn resolve_push_target(ctx: &BranchCtx, branch_name: &str) -> Option<PushTarget>
         _ => branch_name.to_owned(),
     };
     let set_upstream = !ctx.tracks_something && choose_remote(ctx).as_deref() == Some(remote.as_str());
-    Some(PushTarget { remote, branch, set_upstream, passthrough: false })
+    Some(PushTarget { remote, branch, set_upstream, passthrough: false, lease: false, expected_oid: None })
 }
 
 /// An explicitly requested remote (plugin API): exactly `git push <remote>
 /// <arg>` — the argument is passed as-is, no push.default mapping, no upstream change.
 fn explicit_push_target(remote: &str, arg: &str) -> PushTarget {
-    PushTarget { remote: remote.to_owned(), branch: arg.to_owned(), set_upstream: false, passthrough: true }
+    PushTarget { remote: remote.to_owned(), branch: arg.to_owned(), set_upstream: false, passthrough: true, lease: false, expected_oid: None }
 }
 
 /// Remotes a fetch should hit: the default remote (origin / first), the branch's
@@ -310,7 +317,15 @@ fn push_args(target: &PushTarget, branch_name: &str, force: bool) -> Vec<String>
     // --porcelain: stable per-ref status lines on stdout (see `classify_push`).
     let mut args = vec!["push".to_owned(), "--porcelain".to_owned()];
     if force {
-        args.push("--force".into());
+        args.push(if target.lease {
+            // Only overwrite the remote branch if it still is what the user was shown.
+            match &target.expected_oid {
+                Some(oid) => format!("--force-with-lease=refs/heads/{}:{}", target.branch, oid),
+                None => format!("--force-with-lease=refs/heads/{}", target.branch),
+            }
+        } else {
+            "--force".into()
+        });
     }
     if target.set_upstream {
         args.push("--set-upstream".into());
@@ -349,6 +364,12 @@ fn classify_push(success: bool, stdout: &str, stderr: &str) -> Result<Option<Str
     if !failed.is_empty() && failed.iter().all(|l| overridable(l)) {
         return Ok(Some(message(&failed.join("\n"))));
     }
+    // A failed --force-with-lease: not overridable again without a fresh look.
+    if failed.iter().any(|l| l.split('\t').nth(2).unwrap_or("").contains("(stale info)")) {
+        return Err(Error::InvalidArg(
+            "The remote changed since you were shown it; fetch and review before force pushing.".into(),
+        ));
+    }
     // Keep the per-ref status in the message: stderr alone may be empty or vague.
     let detail = if failed.is_empty() { message("push failed") } else { format!("{}\n{}", message(""), failed.join("\n")).trim().to_owned() };
     Err(Error::InvalidArg(detail))
@@ -362,6 +383,15 @@ pub struct PushDest {
     /// Keep `--set-upstream` (the rejected push was a first push).
     #[serde(default)]
     pub set_upstream: bool,
+    /// The remote-tracking value the rejection reported; the force push leases against it.
+    #[serde(default)]
+    pub expected_remote_oid: Option<String>,
+}
+
+/// The remote-tracking ref's current value for `branch` on `remote`.
+fn remote_tracking_oid(repo: &git2::Repository, remote: &str, branch: &str) -> Option<String> {
+    let r = repo.find_reference(&format!("refs/remotes/{}/{}", remote, branch)).ok()?;
+    Some(r.resolve().ok()?.target()?.to_string())
 }
 
 /// The target of a push: an exact `dest` verbatim (no config, no upstream
@@ -373,7 +403,14 @@ fn plan_push(
     branch_name: &str,
 ) -> Result<PushTarget> {
     if let Some(d) = dest {
-        return Ok(PushTarget { remote: d.remote.clone(), branch: d.branch.clone(), set_upstream: d.set_upstream, passthrough: false });
+        return Ok(PushTarget {
+            remote: d.remote.clone(),
+            branch: d.branch.clone(),
+            set_upstream: d.set_upstream,
+            passthrough: false,
+            lease: true,
+            expected_oid: d.expected_remote_oid.clone(),
+        });
     }
     match remote_name {
         Some(remote) => Ok(explicit_push_target(remote, branch_name)),
@@ -411,12 +448,19 @@ pub async fn push_branch(
         &String::from_utf8_lossy(&output.stderr),
     )?;
     let kind = if detail.is_some() { "rejected" } else { "pushed" };
+    let expected_remote_oid = if detail.is_some() {
+        let repos = state.0.lock().unwrap();
+        repos.get(&repo_id).and_then(|repo| remote_tracking_oid(repo, &target.remote, &target.branch))
+    } else {
+        None
+    };
     Ok(PushOutcome {
         kind: kind.into(),
         remote: target.remote,
         branch: target.branch,
         detail,
         set_upstream: target.set_upstream,
+        expected_remote_oid,
     })
 }
 
@@ -469,21 +513,19 @@ pub async fn rename_remote_branch(
 /// same-named branch on `remote_name`. An upstream on `remote_name` that can't
 /// be resolved is an error rather than a fallback, which would silently merge
 /// a different branch than the one configured.
-fn resolve_pull_source(repo: &git2::Repository, remote_name: &str, branch_name: &str) -> Result<(String, String)> {
+fn resolve_pull_source(
+    repo: &git2::Repository,
+    ctx: &BranchCtx,
+    remote_name: &str,
+    branch_name: &str,
+) -> Result<(String, String)> {
     let local_ref = format!("refs/heads/{}", branch_name);
-    let Some(up) = branch_upstream(repo, branch_name).filter(|u| u.remote == remote_name) else {
-        // Tracking something that isn't a branch (e.g. refs/tags/*) on this
-        // remote can't be followed — error rather than guess a same-named branch.
-        let tracks_here = repo.branch_upstream_remote(&local_ref).ok().is_some_and(|r| r.as_str().ok() == Some(remote_name));
-        if tracks_here {
-            let merge = repo.branch_upstream_merge(&local_ref)?;
-            return Err(Error::InvalidArg(format!(
-                "'{}' tracks '{}', which is not a branch on {}.",
-                branch_name,
-                merge.as_str()?,
-                remote_name
-            )));
-        }
+    // Tracking something that isn't a branch (e.g. refs/tags/*) can't be followed,
+    // on any remote — error rather than guess a same-named branch.
+    if let Some(merge) = ctx.upstream_merge.as_deref().filter(|m| !m.starts_with("refs/heads/")) {
+        return Err(Error::InvalidArg(format!("'{}' tracks '{}', which is not a branch.", branch_name, merge)));
+    }
+    let Some(up) = ctx.upstream.as_ref().filter(|u| u.remote == remote_name) else {
         return Ok((branch_name.to_owned(), format!("refs/remotes/{}/{}", remote_name, branch_name)));
     };
     let tracking_ref = repo.branch_upstream_name(&local_ref).map_err(|_| {
@@ -492,7 +534,7 @@ fn resolve_pull_source(repo: &git2::Repository, remote_name: &str, branch_name: 
             branch_name, remote_name, up.branch
         ))
     })?;
-    Ok((up.branch, tracking_ref.as_str()?.to_owned()))
+    Ok((up.branch.clone(), tracking_ref.as_str()?.to_owned()))
 }
 
 /// What `pull_branch` will do, resolved under the lock.
@@ -512,12 +554,12 @@ impl PullPlan {
 /// Pull plan for local `branch_name`: from `requested` if given, else the
 /// backend's choice (`choose_remote`: upstream remote, origin, first).
 fn plan_pull(repo: &git2::Repository, requested: Option<&str>, branch_name: &str) -> Result<PullPlan> {
+    let ctx = BranchCtx::load(repo, branch_name);
     let remote = match requested {
         Some(r) => r.to_owned(),
-        None => choose_remote(&BranchCtx::load(repo, branch_name))
-            .ok_or_else(|| Error::InvalidArg("no remote to pull from".into()))?,
+        None => choose_remote(&ctx).ok_or_else(|| Error::InvalidArg("no remote to pull from".into()))?,
     };
-    let (remote_branch, tracking_ref) = resolve_pull_source(repo, &remote, branch_name)?;
+    let (remote_branch, tracking_ref) = resolve_pull_source(repo, &ctx, &remote, branch_name)?;
     Ok(PullPlan { branch_name: branch_name.to_owned(), remote, remote_branch, tracking_ref })
 }
 
@@ -654,6 +696,10 @@ mod tests {
         cfg.set_str(&format!("branch.{branch}.merge"), merge).unwrap();
     }
 
+    fn pull_src(repo: &Repository, remote: &str, branch: &str) -> Result<(String, String)> {
+        resolve_pull_source(repo, &BranchCtx::load(repo, branch), remote, branch)
+    }
+
     fn src(branch: &str, tracking: &str) -> (String, String) {
         (branch.to_owned(), tracking.to_owned())
     }
@@ -664,7 +710,7 @@ mod tests {
     fn pull_uses_the_configured_upstream_when_names_differ() {
         let (dir, repo) = make_repo();
         set_upstream(&repo, "main", "origin", "refs/heads/master");
-        let got = resolve_pull_source(&repo, "origin", "main").unwrap();
+        let got = pull_src(&repo, "origin", "main").unwrap();
         assert_eq!(got, src("master", "refs/remotes/origin/master"));
         let _ = std::fs::remove_dir_all(dir);
     }
@@ -673,7 +719,7 @@ mod tests {
     fn pull_keeps_nested_upstream_branch_names() {
         let (dir, repo) = make_repo();
         set_upstream(&repo, "feat", "origin", "refs/heads/feature/x");
-        let got = resolve_pull_source(&repo, "origin", "feat").unwrap();
+        let got = pull_src(&repo, "origin", "feat").unwrap();
         assert_eq!(got, src("feature/x", "refs/remotes/origin/feature/x"));
         let _ = std::fs::remove_dir_all(dir);
     }
@@ -681,7 +727,7 @@ mod tests {
     #[test]
     fn pull_falls_back_to_same_name_without_upstream() {
         let (dir, repo) = make_repo();
-        let got = resolve_pull_source(&repo, "origin", "main").unwrap();
+        let got = pull_src(&repo, "origin", "main").unwrap();
         assert_eq!(got, src("main", "refs/remotes/origin/main"));
         let _ = std::fs::remove_dir_all(dir);
     }
@@ -693,7 +739,7 @@ mod tests {
         let (dir, repo) = make_repo();
         repo.remote("fork", "https://example.invalid/fork.git").unwrap();
         set_upstream(&repo, "main", "origin", "refs/heads/master");
-        let got = resolve_pull_source(&repo, "fork", "main").unwrap();
+        let got = pull_src(&repo, "fork", "main").unwrap();
         assert_eq!(got, src("main", "refs/remotes/fork/main"));
         let _ = std::fs::remove_dir_all(dir);
     }
@@ -712,8 +758,32 @@ mod tests {
         )
         .unwrap();
         set_upstream(&repo, "main", "origin", "refs/heads/release");
-        let err = resolve_pull_source(&repo, "origin", "main").unwrap_err();
+        let err = pull_src(&repo, "origin", "main").unwrap_err();
         assert!(err.to_string().contains("origin/release"), "{err}");
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    /// An upstream that isn't a branch (e.g. a tag) can't be pulled, whichever
+    /// remote the pull goes to — never a silent fall back to origin/<same name>.
+    #[test]
+    fn pull_errors_for_a_non_branch_upstream_on_any_remote() {
+        let (dir, repo) = two_remote_repo();
+        set_upstream(&repo, "main", "fork", "refs/tags/v1");
+        for remote in ["fork", "origin"] {
+            let err = pull_src(&repo, remote, "main").unwrap_err();
+            assert!(err.to_string().contains("refs/tags/v1"), "{remote}: {err}");
+        }
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    /// A branch tracking a local branch (`remote = .`) already tracks something:
+    /// the first push must not --set-upstream over it.
+    #[test]
+    fn local_tracking_branch_is_not_given_set_upstream() {
+        let (dir, repo) = make_repo();
+        set_upstream(&repo, "feature", ".", "refs/heads/main");
+        let t = resolve_push_target(&BranchCtx::load(&repo, "feature"), "feature").unwrap();
+        assert!(!t.set_upstream);
         let _ = std::fs::remove_dir_all(dir);
     }
 
@@ -881,17 +951,56 @@ mod tests {
     #[test]
     fn explicit_target_can_carry_set_upstream() {
         let (dir, repo) = two_remote_repo();
-        let dest = PushDest { remote: "origin".into(), branch: "feature".into(), set_upstream: true };
+        let dest = PushDest { remote: "origin".into(), branch: "feature".into(), set_upstream: true, expected_remote_oid: None };
         let t = plan_push(&repo, None, Some(&dest), "feature").unwrap();
         assert!(t.set_upstream);
         assert_eq!(
             push_args(&t, "feature", true),
-            args(&["push", "--porcelain", "--force", "--set-upstream", "origin", "refs/heads/feature:refs/heads/feature"])
+            args(&["push", "--porcelain", "--force-with-lease=refs/heads/feature", "--set-upstream", "origin", "refs/heads/feature:refs/heads/feature"])
         );
         // And the dest is deserialised with set_upstream defaulting to false.
         let d: PushDest = serde_json::from_str(r#"{"remote":"a","branch":"b"}"#).unwrap();
         assert!(!d.set_upstream);
         let _ = std::fs::remove_dir_all(dir);
+    }
+
+    /// The dialog's force push leases against the oid the rejection reported.
+    #[test]
+    fn dialog_force_push_leases_against_the_expected_oid() {
+        let (dir, repo) = two_remote_repo();
+        let oid = "58eed2c8095f0746d9c1358ec43dac9ae58f5df0";
+        let dest = PushDest { remote: "fork".into(), branch: "release".into(), set_upstream: false, expected_remote_oid: Some(oid.into()) };
+        let t = plan_push(&repo, None, Some(&dest), "feature").unwrap();
+        assert_eq!(
+            push_args(&t, "feature", true),
+            args(&["push", "--porcelain", &format!("--force-with-lease=refs/heads/release:{oid}"), "fork", "refs/heads/feature:refs/heads/release"])
+        );
+        // The plugin API's force stays a plain --force.
+        let plugin = plan_push(&repo, Some("fork"), None, "feature").unwrap();
+        assert!(push_args(&plugin, "feature", true).contains(&"--force".to_owned()));
+        let d: PushDest = serde_json::from_str(r#"{"remote":"a","branch":"b","expected_remote_oid":"abc"}"#).unwrap();
+        assert_eq!(d.expected_remote_oid.as_deref(), Some("abc"));
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn remote_tracking_oid_reads_the_tracking_ref() {
+        let (dir, repo) = make_repo();
+        assert_eq!(remote_tracking_oid(&repo, "origin", "main"), None);
+        let sig = git2::Signature::now("t", "t@t").unwrap();
+        let tree = repo.find_tree(repo.treebuilder(None).unwrap().write().unwrap()).unwrap();
+        let c = repo.commit(Some("refs/remotes/origin/main"), &sig, &sig, "x", &tree, &[]).unwrap();
+        assert_eq!(remote_tracking_oid(&repo, "origin", "main"), Some(c.to_string()));
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    /// Captured from real git: a lease whose expected oid no longer matches the remote.
+    const STALE: &str = "To /tmp/r.git\n!\trefs/heads/main:refs/heads/main\t[rejected] (stale info)\nDone\n";
+
+    #[test]
+    fn porcelain_stale_info_is_an_error_not_force_pushable() {
+        let err = outcome_of(false, STALE, "error: failed to push some refs to '/tmp/r.git'").unwrap_err();
+        assert!(err.to_string().contains("fetch and review"), "{err}");
     }
 
     fn outcome_of(success: bool, stdout: &str, stderr: &str) -> Result<Option<String>> {
@@ -969,12 +1078,12 @@ mod tests {
         set_upstream(&repo, "feature", "origin", "refs/heads/other");
         set_push_default(&repo, "upstream");
         set_cfg(&repo, "branch.feature.pushRemote", "origin");
-        let dest = PushDest { remote: "fork".into(), branch: "release".into(), set_upstream: false };
+        let dest = PushDest { remote: "fork".into(), branch: "release".into(), set_upstream: false, expected_remote_oid: None };
         let t = plan_push(&repo, None, Some(&dest), "feature").unwrap();
         assert_eq!((t.remote.as_str(), t.branch.as_str(), t.set_upstream), ("fork", "release", false));
         assert_eq!(
             push_args(&t, "feature", true),
-            args(&["push", "--porcelain", "--force", "fork", "refs/heads/feature:refs/heads/release"])
+            args(&["push", "--porcelain", "--force-with-lease=refs/heads/release", "fork", "refs/heads/feature:refs/heads/release"])
         );
         // Without a target the same config resolves differently.
         let resolved = plan_push(&repo, None, None, "feature").unwrap();
@@ -1097,27 +1206,27 @@ mod tests {
     }
 
     #[test]
-    fn branch_upstream_configured() {
+    fn ctx_upstream_configured() {
         let (dir, repo) = make_repo();
         set_upstream(&repo, "main", "origin", "refs/heads/master");
-        let got = branch_upstream(&repo, "main").unwrap();
+        let got = BranchCtx::load(&repo, "main").upstream.unwrap();
         assert_eq!(got.remote, "origin");
         assert_eq!(got.branch, "master");
         let _ = std::fs::remove_dir_all(dir);
     }
 
     #[test]
-    fn branch_upstream_none_when_unset() {
+    fn ctx_upstream_none_when_unset() {
         let (dir, repo) = make_repo();
-        assert!(branch_upstream(&repo, "main").is_none());
+        assert!(BranchCtx::load(&repo, "main").upstream.is_none());
         let _ = std::fs::remove_dir_all(dir);
     }
 
     #[test]
-    fn branch_upstream_none_for_non_branch_merge_ref() {
+    fn ctx_upstream_none_for_non_branch_merge_ref() {
         let (dir, repo) = make_repo();
         set_upstream(&repo, "main", "origin", "refs/tags/v1");
-        assert!(branch_upstream(&repo, "main").is_none());
+        assert!(BranchCtx::load(&repo, "main").upstream.is_none());
         let _ = std::fs::remove_dir_all(dir);
     }
 }

@@ -156,10 +156,10 @@ export function RepoView() {
     try {
       // The backend reports failures per remote; auto-fetch swallows them (the
       // user can fetch manually) and a rejected command is treated the same.
-      await ipc.fetchAll(forRepoId, null, true).catch(() => []);
+      const results = await ipc.fetchAll(forRepoId, null, true).catch(() => []);
       if (repoIdRef.current !== forRepoId) return;
-      // Refresh even if every remote "failed": git can exit non-zero after updating most refs.
-      refreshRef.current();
+      // Offline (every remote failed): nothing changed, so don't reload the whole history.
+      if (results.some((r) => r.ok)) refreshRef.current();
     } finally {
       autoFetchInFlightRef.current = false;
     }
@@ -204,27 +204,30 @@ export function RepoView() {
     const myRepoId = repoId;
     setIsPulling(true);
     // No remote named: the backend picks (upstream remote, origin, first) and reports it.
-    const p = ipc.pullBranch(repoId);
-    toast.promise(p, {
-      loading: "Pulling…",
-      success: (result) => {
-        const from = `${result.remote}/${result.branch}`;
-        return result.kind === "up_to_date"
-          ? `Already up to date with ${from}`
-          : result.kind === "fast_forward"
-          ? `Pulled ${from} (fast-forward)`
-          : `Pulled ${from} and merged`;
-      },
-      error: (e) => `Pull failed: ${e}`,
-    });
+    const toastId = toast.loading("Pulling…");
     try {
-      const result = await p;
+      const result = await ipc.pullBranch(repoId);
+      if (result.kind === "conflicts") {
+        // The conflicts dialog is the feedback: no success toast.
+        toast.dismiss(toastId);
+      } else {
+        const from = `${result.remote}/${result.branch}`;
+        toast.success(
+          result.kind === "up_to_date"
+            ? `Already up to date with ${from}`
+            : result.kind === "fast_forward"
+            ? `Pulled ${from} (fast-forward)`
+            : `Pulled ${from} and merged`,
+          { id: toastId },
+        );
+      }
       if (repoIdRef.current !== myRepoId) return; // user switched repos mid-flight
       if (result.kind === "conflicts") {
         setDialog({ kind: "pull-conflicts" });
       }
       refresh();
     } catch (e) {
+      toast.error(`Pull failed: ${e}`, { id: toastId });
       if (repoIdRef.current !== myRepoId) return;
       setDialog({ kind: "remote-error", message: String(e) });
     } finally {
@@ -250,7 +253,7 @@ export function RepoView() {
       }
       if (repoIdRef.current !== myRepoId) return; // user switched repos mid-flight
       if (outcome.kind === "rejected") {
-        setDialog({ kind: "push-rejected", branchName, target: { remote: outcome.remote, branch: outcome.branch, set_upstream: outcome.set_upstream } });
+        setDialog({ kind: "push-rejected", branchName, target: { remote: outcome.remote, branch: outcome.branch, set_upstream: outcome.set_upstream, expected_remote_oid: outcome.expected_remote_oid ?? null } });
       } else {
         refresh();
       }

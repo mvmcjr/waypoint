@@ -155,6 +155,8 @@ export interface PushDest {
   branch: string;
   /** Record an upstream (`--set-upstream`), as the rejected first push would have. */
   set_upstream: boolean;
+  /** Remote-tracking value the rejection reported; the force push leases against it (`--force-with-lease`). */
+  expected_remote_oid?: string | null;
 }
 
 /** A rejected push (remote has commits we lack) is an outcome, not an error. */
@@ -166,6 +168,8 @@ export interface PushOutcome {
   detail: string | null;
   /** The push asked for `--set-upstream`; a force-push retry must keep it. */
   set_upstream: boolean;
+  /** For a rejected push: the remote-tracking ref's value at rejection time, if any. */
+  expected_remote_oid?: string | null;
 }
 
 export interface OpenedRepo {

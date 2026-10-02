@@ -433,6 +433,15 @@ describe("Dialogs", () => {
       await waitFor(() => expect(mockOnSuccess).toHaveBeenCalled());
     });
 
+    it("sends the lease (expected remote oid) back with the force push", async () => {
+      vi.mocked(ipc.pushBranch).mockResolvedValue(pushed);
+      const target = { remote: "origin", branch: "main", set_upstream: false, expected_remote_oid: "abc123" };
+      render(<PushRejectedDialog repoId="repo1" branchName="main" target={target} onClose={mockOnClose} onSuccess={mockOnSuccess} />);
+      fireEvent.click(screen.getByRole("button", { name: "Force push" }));
+      expect(ipc.pushBranch).toHaveBeenCalledWith("repo1", undefined, "main", true, target);
+      await waitFor(() => expect(mockOnSuccess).toHaveBeenCalled());
+    });
+
     it("shows the error instead of closing when the force push is rejected again", async () => {
       vi.mocked(ipc.pushBranch).mockResolvedValue({ kind: "rejected", remote: "origin", branch: "main", detail: "! [rejected] stale info", set_upstream: false });
       render(
