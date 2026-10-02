@@ -46,13 +46,26 @@ impl CommitDecoder {
         }
     }
 
-    /// Re-encode `sig` (taken from this decoder's commit) as a UTF-8
-    /// signature, for use in a commit written without the original's
-    /// `encoding` header.
-    pub(crate) fn signature(&self, sig: &git2::Signature) -> Result<git2::Signature<'static>> {
+    /// Whether the commit declares a usable non-UTF-8 encoding, i.e. its
+    /// signatures and message must be re-encoded before being reused in a
+    /// commit written without that `encoding` header.
+    pub(crate) fn is_declared(&self) -> bool {
+        self.0.is_some()
+    }
+
+    /// A UTF-8 copy of `sig` (taken from this decoder's commit) for a commit
+    /// written without the original's `encoding` header, or `None` when the
+    /// commit declares no encoding and `sig` should be kept untouched.
+    /// Rebuilding is deliberately limited to the declared case:
+    /// `git2::Signature::new` rejects empty names/emails (legal in git, common
+    /// in svn/cvs imports) and angle brackets, and would lossily rewrite bytes.
+    pub(crate) fn utf8_signature(&self, sig: &git2::Signature) -> Result<Option<git2::Signature<'static>>> {
+        if !self.is_declared() {
+            return Ok(None);
+        }
         let name = self.text(sig.name_bytes());
         let email = self.text(sig.email_bytes());
-        Ok(git2::Signature::new(&name, &email, &sig.when())?)
+        Ok(Some(git2::Signature::new(&name, &email, &sig.when())?))
     }
 }
 
@@ -207,10 +220,20 @@ Details
     fn decoder_signature_is_utf8_and_keeps_time() {
         let (dir, repo) = make_repo();
         let c = repo.find_commit(latin1_commit(&repo)).unwrap();
-        let sig = dec(&c).signature(&c.author()).unwrap();
+        let sig = dec(&c).utf8_signature(&c.author()).unwrap().unwrap();
         assert_eq!(sig.name(), Ok("André"));
         assert_eq!(sig.email(), Ok("a@example.com"));
         assert_eq!(sig.when(), c.author().when());
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn undeclared_signature_is_left_alone() {
+        let (dir, repo) = make_repo();
+        let oid = raw_commit(&repo, b"", b"Andr\xe9", b"msg\n");
+        let c = repo.find_commit(oid).unwrap();
+        assert!(!dec(&c).is_declared());
+        assert!(dec(&c).utf8_signature(&c.author()).unwrap().is_none());
         let _ = std::fs::remove_dir_all(dir);
     }
 

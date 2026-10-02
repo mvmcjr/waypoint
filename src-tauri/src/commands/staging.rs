@@ -474,15 +474,16 @@ pub fn amend_commit(repo_id: String, message: String, state: State<RepoState>) -
     amend_in(repo, &message)
 }
 
-/// Core of `amend_commit`. The amended commit is always UTF-8: the kept
-/// author/committer are re-encoded from the original's declared encoding and
-/// the message is written with an explicit UTF-8 `encoding`, so an original
-/// with an `encoding ISO-8859-1` header can't leave Latin-1 header bytes next
-/// to a UTF-8 message.
+/// Core of `amend_commit`. The amended commit is always UTF-8. When the
+/// original declares another encoding, the kept author is re-encoded and the
+/// message written with an explicit UTF-8 `encoding`, so it can't leave
+/// Latin-1 header bytes next to a UTF-8 message. Otherwise the original author
+/// is kept byte-for-byte and no `encoding` header is written (as git does).
 fn amend_in(repo: &git2::Repository, message: &str) -> Result<()> {
     let head_commit = repo.head()?.peel_to_commit()?;
     let dec = CommitDecoder::new(&head_commit);
-    let author = dec.signature(&head_commit.author())?;
+    let author = dec.utf8_signature(&head_commit.author())?;
+    let encoding = dec.is_declared().then_some("UTF-8");
 
     let mut index = repo.index()?;
     let tree_oid = index.write_tree()?;
@@ -492,9 +493,9 @@ fn amend_in(repo: &git2::Repository, message: &str) -> Result<()> {
 
     head_commit.amend(
         Some("HEAD"),
-        Some(&author),  // keep original author (name, email, timestamp)
-        Some(&sig),     // update committer to current user
-        Some("UTF-8"),  // never inherit the original's encoding header
+        author.as_ref(), // None keeps the original author as-is
+        Some(&sig),      // update committer to current user
+        encoding,        // only override a declared (non-UTF-8) encoding header
         Some(message),
         Some(&tree),
     )?;
@@ -521,6 +522,30 @@ mod tests {
         let dec = CommitDecoder::new(&c);
         assert_eq!(dec.text(c.author().name_bytes()), "André");
         assert_eq!(dec.text(c.message_bytes()), "Fixé le bug");
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn amend_keeps_empty_name_and_email_author() {
+        use crate::repo::test_support::*;
+        let (dir, repo) = make_repo_with_commit();
+        push_raw_commit(&repo, "b.txt", b" <> 1600000000 +0000", b" <> 1600000000 +0000", b"", b"msg\n");
+        amend_in(&repo, "new msg").unwrap();
+        let c = repo.head().unwrap().peel_to_commit().unwrap();
+        let raw = String::from_utf8(raw_object(&repo, c.id())).unwrap();
+        assert!(raw.contains("\nauthor  <> 1600000000 +0000\n"), "{raw}");
+        assert_eq!(c.message(), Ok("new msg"));
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn amend_of_utf8_commit_writes_no_encoding_header() {
+        use crate::repo::test_support::*;
+        let (dir, repo) = make_repo_with_commit();
+        amend_in(&repo, "new msg").unwrap();
+        let c = repo.head().unwrap().peel_to_commit().unwrap();
+        let raw = String::from_utf8(raw_object(&repo, c.id())).unwrap();
+        assert!(!raw.contains("\nencoding "), "{raw}");
         let _ = std::fs::remove_dir_all(dir);
     }
 

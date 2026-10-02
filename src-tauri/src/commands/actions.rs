@@ -22,12 +22,23 @@ fn run_rebase_to_completion(
                 let _ = rebase.abort();
                 return Err(Error::Git(e));
             }
-            Some(Ok(_op)) => {
+            Some(Ok(op)) => {
                 if repo.index()?.has_conflicts() {
                     let _ = rebase.abort();
                     return Err(Error::RebaseConflict(conflict_msg.into()));
                 }
-                rebase.commit(None, sig, None)?;
+                // libgit2 would replay a declared-encoding commit with its
+                // original `encoding` header and message bytes next to our
+                // UTF-8 committer — a mixed object. Replay those as UTF-8.
+                let original = repo.find_commit(op.id())?;
+                let dec = CommitDecoder::new(&original);
+                if dec.is_declared() {
+                    let author = dec.utf8_signature(&original.author())?;
+                    let message = dec.text(original.message_bytes());
+                    rebase.commit(author.as_ref(), sig, Some(&message))?;
+                } else {
+                    rebase.commit(None, sig, None)?;
+                }
             }
         }
     }
@@ -606,10 +617,11 @@ fn reword_in(repo: &git2::Repository, oid: &str, message: &str) -> Result<()> {
         .map(|i| target.parent(i))
         .collect::<std::result::Result<_, _>>()?;
     let parent_refs: Vec<&git2::Commit> = parents.iter().collect();
-    // The rebuilt commit has no `encoding` header (UTF-8), so the kept author
-    // must be re-encoded from the original's declared encoding.
-    let author = CommitDecoder::new(&target).signature(&target.author())?;
-    let new_oid = repo.commit(None, &author, &sig, msg, &tree, &parent_refs)?;
+    // The rebuilt commit has no `encoding` header (UTF-8), so a kept author
+    // from a declared-encoding commit must be re-encoded; otherwise keep it as is.
+    let orig_author = target.author();
+    let author = CommitDecoder::new(&target).utf8_signature(&orig_author)?;
+    let new_oid = repo.commit(None, author.as_ref().unwrap_or(&orig_author), &sig, msg, &tree, &parent_refs)?;
 
     // Target was HEAD — no descendants to replay, just move the branch tip.
     if target_oid == head_oid {
@@ -878,6 +890,37 @@ mod tests {
         let child = repo.head().unwrap().peel_to_commit().unwrap();
         assert_eq!(child.summary(), Ok(Some("child")));
         assert_utf8_commit(&repo, child.parent_id(0).unwrap(), "Fixé le bug");
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn reword_keeps_empty_name_and_email_author() {
+        use crate::repo::test_support::*;
+        let (dir, repo) = make_repo_with_commit();
+        let target = push_raw_commit(&repo, "b.txt", b" <> 1600000000 +0000", b" <> 1600000000 +0000", b"", b"msg\n");
+        reword_in(&repo, &target.to_string(), "new msg").unwrap();
+        let c = repo.head().unwrap().peel_to_commit().unwrap();
+        let raw = String::from_utf8(raw_object(&repo, c.id())).unwrap();
+        assert!(raw.contains("\nauthor  <> 1600000000 +0000\n"), "{raw}");
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn interior_reword_replays_latin1_descendant_as_consistent_utf8() {
+        use crate::repo::test_support::*;
+        let (dir, repo) = make_repo_with_commit();
+        let t = b"T <t@example.com> 1600000000 +0000";
+        let target = push_raw_commit(&repo, "b.txt", t, t, b"", b"target\n");
+        let l = b"Andr\xe9 <a@example.com> 1000000000 +0000";
+        push_raw_commit(&repo, "c.txt", l, l, b"encoding ISO-8859-1\n", b"Corrig\xe9 le bug\n");
+        reword_in(&repo, &target.to_string(), "reworded").unwrap();
+        let c = repo.head().unwrap().peel_to_commit().unwrap();
+        let raw = raw_object(&repo, c.id());
+        assert!(!String::from_utf8_lossy(&raw).contains("ISO-8859-1"));
+        assert_eq!(c.author().name(), Ok("André"));
+        assert_eq!(c.author().when().seconds(), 1_000_000_000);
+        assert_eq!(c.committer().name(), Ok("Test User"));
+        assert_eq!(c.message().unwrap().trim(), "Corrigé le bug");
         let _ = std::fs::remove_dir_all(dir);
     }
 

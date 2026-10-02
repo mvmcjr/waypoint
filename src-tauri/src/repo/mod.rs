@@ -186,6 +186,42 @@ pub(crate) mod test_support {
         oid
     }
 
+    /// Write a commit on top of HEAD that adds `file`, with the raw `author` and
+    /// `committer` lines (without the leading keyword), an optional raw extra
+    /// header block (e.g. `b"encoding ISO-8859-1\n"`) and raw message bytes;
+    /// move HEAD's branch to it and sync the working tree.
+    pub(crate) fn push_raw_commit(
+        repo: &Repository,
+        file: &str,
+        author: &[u8],
+        committer: &[u8],
+        extra_header: &[u8],
+        msg: &[u8],
+    ) -> git2::Oid {
+        let head = repo.head().unwrap().peel_to_commit().unwrap();
+        let mut tb = repo.treebuilder(Some(&head.tree().unwrap())).unwrap();
+        tb.insert(file, repo.blob(file.as_bytes()).unwrap(), 0o100644).unwrap();
+        let tree = tb.write().unwrap();
+        let mut raw = format!("tree {tree}\nparent {}\nauthor ", head.id()).into_bytes();
+        raw.extend_from_slice(author);
+        raw.extend_from_slice(b"\ncommitter ");
+        raw.extend_from_slice(committer);
+        raw.extend_from_slice(b"\n");
+        raw.extend_from_slice(extra_header);
+        raw.extend_from_slice(b"\n");
+        raw.extend_from_slice(msg);
+        let oid = repo.odb().unwrap().write(git2::ObjectType::Commit, &raw).unwrap();
+        let name = repo.head().unwrap().name().unwrap().to_owned();
+        repo.reference(&name, oid, true, "test").unwrap();
+        repo.checkout_head(Some(git2::build::CheckoutBuilder::new().force())).unwrap();
+        oid
+    }
+
+    /// Raw object bytes of `oid` (to assert on headers git2 doesn't expose).
+    pub(crate) fn raw_object(repo: &Repository, oid: git2::Oid) -> Vec<u8> {
+        repo.odb().unwrap().read(oid).unwrap().data().to_vec()
+    }
+
     /// Add a REAL linked worktree (via `git2::Repository::worktree`), checked out on
     /// `branch` (created at `main`'s HEAD if it doesn't already exist). Returns the
     /// worktree's working-directory path and an open `Repository` handle for it.
