@@ -80,15 +80,19 @@ fn replay_onto(
     if new_tip == old_tip {
         return Ok(());
     }
-    // Working tree and index first (relative to the still-current HEAD), then
-    // the ref: if the checkout refuses, nothing has moved.
-    repo.checkout_tree(last.as_object(), Some(git2::build::CheckoutBuilder::new().safe()))?;
+    // Move the ref first (guarded): if the branch moved meanwhile this fails
+    // having touched nothing, so index and working tree still match the branch.
+    // Only then bring index and working tree to the new tip (the tree was
+    // verified clean above); if that refuses, put the ref back.
     let reflog = format!("rebase (finish): {branch_ref} onto {onto}");
-    if let Err(e) = move_branch_recording_orig_head(repo, branch_ref, new_tip, old_tip, &reflog) {
-        // Put the working tree back where the untouched branch expects it.
-        if let Ok(old) = repo.find_commit(old_tip) {
-            let _ = repo.checkout_tree(old.as_object(), Some(git2::build::CheckoutBuilder::new().force()));
-        }
+    move_branch_recording_orig_head(repo, branch_ref, new_tip, old_tip, &reflog)?;
+    // The checkout must be relative to the OLD tip: detach HEAD there while it runs.
+    let checkout = repo.set_head_detached(old_tip).and_then(|()| {
+        repo.checkout_tree(last.as_object(), Some(git2::build::CheckoutBuilder::new().safe()))
+    });
+    if let Err(e) = checkout {
+        let _ = repo.reference_matching(branch_ref, old_tip, true, new_tip, "rebase (abort): checkout refused");
+        let _ = repo.set_head(branch_ref);
         return Err(Error::Git(e));
     }
     repo.set_head(branch_ref)?;
@@ -122,33 +126,36 @@ fn move_branch_recording_orig_head(
 /// [`submodule_is_dirty`].
 fn ensure_clean_for_rewrite(repo: &git2::Repository) -> Result<()> {
     let head_tree = repo.head()?.peel_to_tree()?;
-    let mut opts = git2::DiffOptions::new();
-    opts.ignore_submodules(true);
-    if repo.diff_tree_to_index(Some(&head_tree), None, Some(&mut opts))?.deltas().len() > 0 {
+    // Index vs HEAD only compares object ids (no submodule inspection), so a
+    // staged gitlink change is always seen here, whatever `.gitmodules` says.
+    if repo.diff_tree_to_index(Some(&head_tree), None, None)?.deltas().len() > 0 {
         return Err(Error::Git(git2::Error::from_str("uncommitted changes exist in index")));
     }
+    let mut opts = git2::DiffOptions::new();
+    opts.ignore_submodules(true);
     if repo.diff_index_to_workdir(None, Some(&mut opts))?.deltas().len() > 0 {
         return Err(Error::Git(git2::Error::from_str("unstaged changes exist in workdir")));
     }
-    // A malformed or stale submodule entry (duplicated path, no checkout...) can't
-    // hold edits we would lose, so an unreadable listing or status is skipped
-    // rather than blocking every rewrite; the diffs above already cover the rest.
-    for sm in repo.submodules().unwrap_or_default() {
-        if submodule_is_dirty(repo, &sm) {
+    // Check each gitlink in the index by path, independent of `.gitmodules`
+    // (a malformed listing must not hide a dirty submodule). A gitlink whose
+    // status can't be read (no entry, no checkout...) holds no edits we would
+    // lose and is skipped.
+    let index = repo.index()?;
+    for entry in index.iter().filter(|e| e.mode == 0o160000) {
+        let path = String::from_utf8_lossy(&entry.path).into_owned();
+        if submodule_path_is_dirty(repo, &path) {
             return Err(Error::Git(git2::Error::from_str("uncommitted changes exist in submodule")));
         }
     }
     Ok(())
 }
 
-/// Whether a submodule has anything but untracked files to commit: a new HEAD
-/// or staged/unstaged change inside it, or a gitlink that differs from the
-/// index/HEAD.
-fn submodule_is_dirty(repo: &git2::Repository, sm: &git2::Submodule) -> bool {
+/// Whether the submodule at `path` has anything but untracked files to commit:
+/// a new HEAD or staged/unstaged change inside it, or a gitlink that differs
+/// from the index/HEAD.
+fn submodule_path_is_dirty(repo: &git2::Repository, path: &str) -> bool {
     use git2::SubmoduleStatus as S;
-    let Ok(name) = sm.name() else { return false };
-    let Ok(status) = repo.submodule_status(name, git2::SubmoduleIgnore::Untracked) else { return false };
-    status.intersects(
+    let Ok(status) = repo.submodule_status(path, git2::SubmoduleIgnore::Untracked) else { return false };    status.intersects(
         S::INDEX_ADDED
             | S::INDEX_DELETED
             | S::INDEX_MODIFIED
@@ -1307,6 +1314,12 @@ mod tests {
         assert!(replay_onto(&repo, &branch_ref, first, base, theirs, &sig, "conflict").is_err());
         assert_eq!(orig_head(&repo), Some(prior));
         assert_eq!(repo.head().unwrap().peel_to_commit().unwrap().id(), second);
+        // Index and working tree still match the branch's tip: nothing was checked out.
+        let mut opts = git2::StatusOptions::new();
+        opts.include_untracked(true);
+        assert_eq!(repo.statuses(Some(&mut opts)).unwrap().len(), 0);
+        assert!(dir.join("c.txt").exists());
+        assert!(!dir.join("t.txt").exists());
         let _ = std::fs::remove_dir_all(dir);
     }
 
@@ -1435,6 +1448,32 @@ mod tests {
         // A tracked change in the main repo.
         std::fs::write(dir.join("a.txt"), "dirty").unwrap();
         assert!(reword_in(&repo, &target.to_string(), "reworded").is_err());
+        let _ = std::fs::remove_dir_all(dir);
+        let _ = std::fs::remove_dir_all(sub_dir);
+    }
+
+    /// A staged gitlink bump must be refused even when a malformed
+    /// `.gitmodules` entry (duplicated path) breaks the submodule listing.
+    #[test]
+    fn rewrite_refuses_staged_gitlink_bump_despite_malformed_gitmodules() {
+        use crate::repo::test_support::*;
+        let (dir, repo, sub_dir) = repo_with_submodule();
+        let git = |cwd: &Path, args: &[&str]| {
+            let out = std::process::Command::new("git").args(args).current_dir(cwd).output().unwrap();
+            assert!(out.status.success(), "{}", String::from_utf8_lossy(&out.stderr));
+        };
+        let mut text = std::fs::read_to_string(dir.join(".gitmodules")).unwrap();
+        text.push_str("[submodule \"dup\"]\n\tpath = sub\n\turl = x\n");
+        std::fs::write(dir.join(".gitmodules"), text).unwrap();
+        git(&dir, &["add", ".gitmodules"]);
+        git(&dir, &["commit", "-m", "dup entry"]);
+        let target = push_raw_commit(&repo, "b.txt", T, T, b"", b"target\n");
+        let tip = push_raw_commit(&repo, "c.txt", T, T, b"", b"tip\n");
+        let sub = dir.join("sub");
+        git(&sub, &["-c", "user.name=t", "-c", "user.email=t@t", "commit", "--allow-empty", "-m", "bump"]);
+        git(&dir, &["add", "sub"]);
+        assert!(reword_in(&repo, &target.to_string(), "reworded").is_err());
+        assert_eq!(repo.head().unwrap().peel_to_commit().unwrap().id(), tip);
         let _ = std::fs::remove_dir_all(dir);
         let _ = std::fs::remove_dir_all(sub_dir);
     }

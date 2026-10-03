@@ -227,7 +227,8 @@ export function RepoView() {
       }
       refresh();
     } catch (e) {
-      toast.error(`Pull failed: ${e}`, { id: toastId });
+      // The error dialog is the feedback: no error toast as well.
+      toast.dismiss(toastId);
       if (repoIdRef.current !== myRepoId) return;
       setDialog({ kind: "remote-error", message: String(e) });
     } finally {

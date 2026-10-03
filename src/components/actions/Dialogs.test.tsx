@@ -380,7 +380,7 @@ describe("Dialogs", () => {
   });
 
   describe("PushRejectedDialog", () => {
-    const pushed = { kind: "pushed", remote: "origin", branch: "main", detail: null, set_upstream: false } as const;
+    const pushed = { kind: "pushed", remote: "origin", branch: "main", detail: null, set_upstream: false, expected_remote_oid: "abc123" } as const;
 
     it("names the returned target and force pushes exactly that target", async () => {
       vi.mocked(ipc.pushBranch).mockResolvedValue(pushed);
@@ -388,7 +388,7 @@ describe("Dialogs", () => {
         <PushRejectedDialog
           repoId="repo1"
           branchName="feature"
-          target={{ remote: "origin", branch: "main", set_upstream: false }}
+          target={{ remote: "origin", branch: "main", set_upstream: false, expected_remote_oid: "abc123" }}
           onClose={mockOnClose}
           onSuccess={mockOnSuccess}
         />
@@ -396,7 +396,7 @@ describe("Dialogs", () => {
       expect(screen.getByRole("heading", { name: "Push rejected" })).toBeInTheDocument();
       expect(screen.getByText("origin/main")).toBeInTheDocument();
       fireEvent.click(screen.getByRole("button", { name: "Force push" }));
-      expect(ipc.pushBranch).toHaveBeenCalledWith("repo1", undefined, "feature", true, { remote: "origin", branch: "main", set_upstream: false });
+      expect(ipc.pushBranch).toHaveBeenCalledWith("repo1", undefined, "feature", true, { remote: "origin", branch: "main", set_upstream: false, expected_remote_oid: "abc123" });
       await waitFor(() => expect(mockOnSuccess).toHaveBeenCalled());
     });
 
@@ -406,14 +406,14 @@ describe("Dialogs", () => {
         <PushRejectedDialog
           repoId="repo1"
           branchName="main"
-          target={{ remote: "fork", branch: "release", set_upstream: false }}
+          target={{ remote: "fork", branch: "release", set_upstream: false, expected_remote_oid: "abc123" }}
           onClose={mockOnClose}
           onSuccess={mockOnSuccess}
         />
       );
       expect(screen.getByText("fork/release")).toBeInTheDocument();
       fireEvent.click(screen.getByRole("button", { name: "Force push" }));
-      expect(ipc.pushBranch).toHaveBeenCalledWith("repo1", undefined, "main", true, { remote: "fork", branch: "release", set_upstream: false });
+      expect(ipc.pushBranch).toHaveBeenCalledWith("repo1", undefined, "main", true, { remote: "fork", branch: "release", set_upstream: false, expected_remote_oid: "abc123" });
       await waitFor(() => expect(mockOnSuccess).toHaveBeenCalled());
     });
 
@@ -423,13 +423,13 @@ describe("Dialogs", () => {
         <PushRejectedDialog
           repoId="repo1"
           branchName="feature"
-          target={{ remote: "origin", branch: "feature", set_upstream: true }}
+          target={{ remote: "origin", branch: "feature", set_upstream: true, expected_remote_oid: "abc123" }}
           onClose={mockOnClose}
           onSuccess={mockOnSuccess}
         />
       );
       fireEvent.click(screen.getByRole("button", { name: "Force push" }));
-      expect(ipc.pushBranch).toHaveBeenCalledWith("repo1", undefined, "feature", true, { remote: "origin", branch: "feature", set_upstream: true });
+      expect(ipc.pushBranch).toHaveBeenCalledWith("repo1", undefined, "feature", true, { remote: "origin", branch: "feature", set_upstream: true, expected_remote_oid: "abc123" });
       await waitFor(() => expect(mockOnSuccess).toHaveBeenCalled());
     });
 
@@ -443,12 +443,12 @@ describe("Dialogs", () => {
     });
 
     it("shows the error instead of closing when the force push is rejected again", async () => {
-      vi.mocked(ipc.pushBranch).mockResolvedValue({ kind: "rejected", remote: "origin", branch: "main", detail: "! [rejected] stale info", set_upstream: false });
+      vi.mocked(ipc.pushBranch).mockResolvedValue({ kind: "rejected", remote: "origin", branch: "main", detail: "! [rejected] stale info", set_upstream: false, expected_remote_oid: "abc123" });
       render(
         <PushRejectedDialog
           repoId="repo1"
           branchName="main"
-          target={{ remote: "origin", branch: "main", set_upstream: false }}
+          target={{ remote: "origin", branch: "main", set_upstream: false, expected_remote_oid: "abc123" }}
           onClose={mockOnClose}
           onSuccess={mockOnSuccess}
         />
@@ -458,12 +458,35 @@ describe("Dialogs", () => {
       expect(mockOnSuccess).not.toHaveBeenCalled();
     });
 
+    it("disables Force push after a stale-lease error so the same oid is never resent", async () => {
+      vi.mocked(ipc.pushBranch).mockClear();
+      vi.mocked(ipc.pushBranch).mockRejectedValue("Push rejected: ! refs/heads/main:refs/heads/main [rejected] (stale info)");
+      const target = { remote: "origin", branch: "main", set_upstream: false, expected_remote_oid: "abc123" };
+      render(<PushRejectedDialog repoId="repo1" branchName="main" target={target} onClose={mockOnClose} onSuccess={mockOnSuccess} />);
+      fireEvent.click(screen.getByRole("button", { name: "Force push" }));
+      expect(await screen.findByText(/stale info/)).toBeInTheDocument();
+      expect(screen.getByText(/push again/)).toBeInTheDocument();
+      expect(screen.getByRole("button", { name: "Force push" })).toBeDisabled();
+      expect(ipc.pushBranch).toHaveBeenCalledTimes(1);
+    });
+
+    it("refuses to force push when the remote tip is unknown (no tracking ref)", () => {
+      vi.mocked(ipc.pushBranch).mockClear();
+      const target = { remote: "origin", branch: "main", set_upstream: false, expected_remote_oid: null };
+      render(<PushRejectedDialog repoId="repo1" branchName="main" target={target} onClose={mockOnClose} onSuccess={mockOnSuccess} />);
+      expect(screen.getByText(/Fetch first/)).toBeInTheDocument();
+      const button = screen.getByRole("button", { name: "Force push" });
+      expect(button).toBeDisabled();
+      fireEvent.click(button);
+      expect(ipc.pushBranch).not.toHaveBeenCalled();
+    });
+
     it("calls onClose when Cancel is clicked", () => {
       render(
         <PushRejectedDialog
           repoId="repo1"
           branchName="main"
-          target={{ remote: "origin", branch: "main", set_upstream: false }}
+          target={{ remote: "origin", branch: "main", set_upstream: false, expected_remote_oid: "abc123" }}
           onClose={mockOnClose}
           onSuccess={mockOnSuccess}
         />

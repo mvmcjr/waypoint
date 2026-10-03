@@ -358,6 +358,17 @@ describe("RepoView", () => {
       expect(toast.dismiss).toHaveBeenCalledWith("toast-id");
     });
 
+    it("a failed pull shows the error dialog and dismisses the loading toast instead of an error toast", async () => {
+      vi.mocked(toast.error).mockClear();
+      vi.mocked(toast.dismiss).mockClear();
+      vi.mocked(ipc.pullBranch).mockRejectedValue("Authentication failed");
+      render(<RepoView />);
+      fireEvent.click(screen.getByRole("button", { name: /pull/i }));
+      expect(await screen.findByTestId("remote-error")).toHaveTextContent("Authentication failed");
+      expect(toast.error).not.toHaveBeenCalled();
+      expect(toast.dismiss).toHaveBeenCalledWith("toast-id");
+    });
+
     it("pushes without naming a remote or destination and reports the target used", async () => {
       vi.mocked(ipc.pushBranch).mockResolvedValue(pushed("fork", "dev") as any);
       render(<RepoView />);

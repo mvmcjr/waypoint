@@ -159,16 +159,30 @@ interface PushRejectedProps {
 export function PushRejectedDialog({ repoId, branchName, target, onClose, onSuccess }: PushRejectedProps) {
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  // The lease went stale (the remote moved since the rejection): resending the
+  // same oid can only fail again, so Force push stays off until a fresh push.
+  const [stale, setStale] = useState(false);
+  // Without the remote-tracking oid we can't say what a force push would overwrite.
+  const unknownRemote = !target.expected_remote_oid;
+
+  function fail(message: string) {
+    if (message.includes("stale info")) {
+      setStale(true);
+      setError(`${message} The remote changed since this was shown: close this dialog and push again.`);
+    } else {
+      setError(message);
+    }
+  }
 
   async function handleForcePush() {
     setLoading(true);
     setError(null);
     try {
       const outcome = await ipc.pushBranch(repoId, undefined, branchName, true, target);
-      if (outcome.kind === "rejected") setError(outcome.detail ?? "Push rejected");
+      if (outcome.kind === "rejected") fail(outcome.detail ?? "Push rejected");
       else onSuccess();
     } catch (e) {
-      setError(String(e));
+      fail(String(e));
     } finally {
       setLoading(false);
     }
@@ -186,10 +200,13 @@ export function PushRejectedDialog({ repoId, branchName, target, onClose, onSucc
         <RiskBanner level="danger">
           Force push will overwrite the remote branch and may cause data loss for collaborators.
         </RiskBanner>
+        {unknownRemote && (
+          <ErrorNote msg="Fetch first so Waypoint can show what you'd overwrite, then push again." />
+        )}
         {error && <ErrorNote msg={error} />}
         <DialogFooter>
           <Button variant="outline" onClick={onClose} disabled={loading}>Cancel</Button>
-          <Button variant="destructive" onClick={handleForcePush} disabled={loading}>
+          <Button variant="destructive" onClick={handleForcePush} disabled={loading || stale || unknownRemote}>
             {loading ? "Pushing…" : "Force push"}
           </Button>
         </DialogFooter>

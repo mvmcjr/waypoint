@@ -125,10 +125,9 @@ struct Upstream {
     branch: String,
 }
 
-/// `local_ref`'s upstream branch given its already-read upstream `remote`.
-fn upstream_on(repo: &git2::Repository, local_ref: &str, remote: &str) -> Option<Upstream> {
-    let merge = repo.branch_upstream_merge(local_ref).ok()?;
-    let branch = merge.as_str().ok()?.strip_prefix("refs/heads/")?;
+/// The upstream branch for an already-read upstream `remote` and `merge` ref.
+fn upstream_from(remote: &str, merge: &str) -> Option<Upstream> {
+    let branch = merge.strip_prefix("refs/heads/")?;
     Some(Upstream { remote: remote.to_owned(), branch: branch.to_owned() })
 }
 
@@ -169,12 +168,13 @@ impl BranchCtx {
             .branch_upstream_remote(&local_ref)
             .ok()
             .and_then(|r| r.as_str().ok().map(str::to_owned));
+        let upstream_merge = upstream_remote
+            .as_ref()
+            .and_then(|_| repo.branch_upstream_merge(&local_ref).ok())
+            .and_then(|m| m.as_str().ok().map(str::to_owned));
         BranchCtx {
-            upstream: upstream_remote.as_deref().and_then(|r| upstream_on(repo, &local_ref, r)),
-            upstream_merge: upstream_remote
-                .as_ref()
-                .and_then(|_| repo.branch_upstream_merge(&local_ref).ok())
-                .and_then(|m| m.as_str().ok().map(str::to_owned)),
+            upstream: upstream_remote.as_deref().zip(upstream_merge.as_deref()).and_then(|(r, m)| upstream_from(r, m)),
+            upstream_merge,
             // `.` is a local branch as upstream: configured, even though no remote.
             tracks_something: upstream_remote.as_ref().is_some_and(|r| r == "." || remotes.contains(r)),
             push_remote: existing(format!("branch.{}.pushRemote", branch_name)),
@@ -390,8 +390,34 @@ pub struct PushDest {
 
 /// The remote-tracking ref's current value for `branch` on `remote`.
 fn remote_tracking_oid(repo: &git2::Repository, remote: &str, branch: &str) -> Option<String> {
-    let r = repo.find_reference(&format!("refs/remotes/{}/{}", remote, branch)).ok()?;
-    Some(r.resolve().ok()?.target()?.to_string())
+    repo.refname_to_id(&format!("refs/remotes/{}/{}", remote, branch)).ok().map(|oid| oid.to_string())
+}
+
+/// A leased force push needs the remote tip the user was shown. A rejection
+/// means the remote branch exists, so no tracking oid means we don't know what
+/// would be overwritten, and a bare lease against a missing tracking ref can
+/// only fail: refuse up front.
+fn ensure_lease_known(target: &PushTarget, force: bool) -> Result<()> {
+    if force && target.lease && target.expected_oid.is_none() {
+        return Err(Error::InvalidArg(
+            "Fetch first so Waypoint can show what you'd overwrite, then push again.".into(),
+        ));
+    }
+    Ok(())
+}
+
+/// The outcome of a finished push. `planned_oid` is the tracking ref as it was
+/// when the push was planned: a background fetch during the push may already
+/// have advanced it to the remote's new tip, which a lease must not be set to.
+fn push_outcome(target: PushTarget, planned_oid: Option<String>, detail: Option<String>) -> PushOutcome {
+    PushOutcome {
+        kind: if detail.is_some() { "rejected" } else { "pushed" }.into(),
+        remote: target.remote,
+        branch: target.branch,
+        expected_remote_oid: if detail.is_some() { planned_oid } else { None },
+        detail,
+        set_upstream: target.set_upstream,
+    }
 }
 
 /// The target of a push: an exact `dest` verbatim (no config, no upstream
@@ -433,12 +459,14 @@ pub async fn push_branch(
     state: State<'_, RepoState>,
 ) -> Result<PushOutcome> {
     // Compute args and release the lock before the async network call.
-    let (target, args, workdir) = {
+    let (target, args, workdir, planned_oid) = {
         let repos = state.0.lock().unwrap();
         let repo = repos.get(&repo_id).ok_or_else(|| Error::RepoNotFound(repo_id.clone()))?;
         let target = plan_push(repo, remote_name.as_deref(), target.as_ref(), &branch_name)?;
+        ensure_lease_known(&target, force)?;
         let args = push_args(&target, &branch_name, force);
-        (target, args, crate::repo::workdir(repo)?)
+        let planned_oid = remote_tracking_oid(repo, &target.remote, &target.branch);
+        (target, args, crate::repo::workdir(repo)?, planned_oid)
     };
     let args: Vec<&str> = args.iter().map(String::as_str).collect();
     let output = git_output(&workdir, &args, &[]).await?;
@@ -447,21 +475,7 @@ pub async fn push_branch(
         &String::from_utf8_lossy(&output.stdout),
         &String::from_utf8_lossy(&output.stderr),
     )?;
-    let kind = if detail.is_some() { "rejected" } else { "pushed" };
-    let expected_remote_oid = if detail.is_some() {
-        let repos = state.0.lock().unwrap();
-        repos.get(&repo_id).and_then(|repo| remote_tracking_oid(repo, &target.remote, &target.branch))
-    } else {
-        None
-    };
-    Ok(PushOutcome {
-        kind: kind.into(),
-        remote: target.remote,
-        branch: target.branch,
-        detail,
-        set_upstream: target.set_upstream,
-        expected_remote_oid,
-    })
+    Ok(push_outcome(target, planned_oid, detail))
 }
 
 /// Push a local tag to a remote.
@@ -980,6 +994,45 @@ mod tests {
         assert!(push_args(&plugin, "feature", true).contains(&"--force".to_owned()));
         let d: PushDest = serde_json::from_str(r#"{"remote":"a","branch":"b","expected_remote_oid":"abc"}"#).unwrap();
         assert_eq!(d.expected_remote_oid.as_deref(), Some("abc"));
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    /// The lease is the tracking oid from planning time, even if a background
+    /// fetch moved the ref while the push ran.
+    #[test]
+    fn rejected_outcome_reports_the_oid_planned_before_the_push() {
+        let (dir, repo) = two_remote_repo();
+        let sig = git2::Signature::now("t", "t@t").unwrap();
+        let tree = repo.find_tree(repo.treebuilder(None).unwrap().write().unwrap()).unwrap();
+        let old = repo.commit(Some("refs/remotes/fork/release"), &sig, &sig, "old", &tree, &[]).unwrap();
+        let dest = PushDest { remote: "fork".into(), branch: "release".into(), set_upstream: false, expected_remote_oid: None };
+        let target = plan_push(&repo, None, Some(&dest), "feature").unwrap();
+        let planned = remote_tracking_oid(&repo, &target.remote, &target.branch);
+        // A background fetch lands during the push.
+        let parent = repo.find_commit(old).unwrap();
+        repo.commit(Some("refs/remotes/fork/release"), &sig, &sig, "new", &tree, &[&parent]).unwrap();
+        let out = push_outcome(target, planned.clone(), Some("rejected".into()));
+        assert_eq!(out.kind, "rejected");
+        assert_eq!(out.expected_remote_oid, Some(old.to_string()));
+        let target = plan_push(&repo, None, Some(&dest), "feature").unwrap();
+        let ok = push_outcome(target, planned, None);
+        assert_eq!((ok.kind.as_str(), ok.expected_remote_oid), ("pushed", None));
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn leased_force_push_without_a_known_remote_tip_is_refused() {
+        let (dir, repo) = two_remote_repo();
+        let mut dest = PushDest { remote: "fork".into(), branch: "release".into(), set_upstream: false, expected_remote_oid: None };
+        let t = plan_push(&repo, None, Some(&dest), "feature").unwrap();
+        assert!(ensure_lease_known(&t, true).is_err());
+        assert!(ensure_lease_known(&t, false).is_ok());
+        dest.expected_remote_oid = Some("abc".into());
+        let t = plan_push(&repo, None, Some(&dest), "feature").unwrap();
+        assert!(ensure_lease_known(&t, true).is_ok());
+        // A plain (non-dialog) force push is unleased and unaffected.
+        let plain = plan_push(&repo, Some("fork"), None, "feature").unwrap();
+        assert!(ensure_lease_known(&plain, true).is_ok());
         let _ = std::fs::remove_dir_all(dir);
     }
 
