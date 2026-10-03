@@ -2,6 +2,7 @@ use serde::{Deserialize, Serialize};
 use tauri::State;
 
 use crate::error::{Error, Result};
+use crate::repo::lock_retry::{checkout_head_for, commit_for, fresh_index, write_index, MAX_WAIT};
 use crate::repo::RepoState;
 
 #[derive(Debug, Serialize)]
@@ -638,6 +639,8 @@ pub async fn pull_branch(
     // Re-acquire the lock for the merge logic (no more .await points after this).
     let repos = state.0.lock().unwrap();
     let repo = repos.get(&repo_id).ok_or_else(|| Error::RepoNotFound(repo_id.clone()))?;
+    // Drop any stale in-memory index state before reading or writing it below.
+    fresh_index(repo)?;
 
     // Guard against a concurrent checkout that happened while we were fetching.
     let current_head = repo.head()?;
@@ -688,14 +691,14 @@ pub async fn pull_branch(
         repo.set_head(&refname)?;
         // No .force() — libgit2 will protect unstaged working-tree changes
         // that would be overwritten by the fast-forward.
-        repo.checkout_head(Some(&mut git2::build::CheckoutBuilder::new()))?;
+        checkout_head_for(MAX_WAIT, repo, &mut git2::build::CheckoutBuilder::new())?;
         return Ok(plan.result("fast_forward", vec![]));
     }
 
     // Normal merge.
     repo.merge(&[&annotated], None, None)?;
     let mut index = repo.index()?;
-    index.write()?;
+    write_index(&mut index)?;
 
     let merge_msg = format!("Merge remote-tracking branch '{}/{}'", remote_name, remote_branch);
 
@@ -714,7 +717,7 @@ pub async fn pull_branch(
     let other_commit = repo.find_commit(tracking_oid)?;
     let tree_oid = index.write_tree()?;
     let tree = repo.find_tree(tree_oid)?;
-    repo.commit(Some("HEAD"), &sig, &sig, &merge_msg, &tree, &[&head_commit, &other_commit])?;
+    commit_for(MAX_WAIT, repo, Some("HEAD"), &sig, &merge_msg, &tree, &[&head_commit, &other_commit])?;
     crate::commands::merge::cleanup_merge_state(repo);
 
     Ok(plan.result("merged", vec![]))

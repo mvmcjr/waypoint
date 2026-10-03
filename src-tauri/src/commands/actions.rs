@@ -3,7 +3,19 @@ use crate::git_text::CommitDecoder;
 use tauri::State;
 
 use crate::error::{Error, Result};
-use crate::repo::RepoState;
+use crate::repo::lock_retry::{
+    checkout_tree_for, fresh_index, reset_for, reset_hard_for, MAX_WAIT,
+};
+use crate::repo::{with_repo_blocking, RepoState};
+
+/// Flatten a crate error back to a `git2::Error` for code paths that still
+/// speak `git2::Error` (the rewrite rollback chain).
+fn into_git(e: Error) -> git2::Error {
+    match e {
+        Error::Git(g) => g,
+        other => git2::Error::from_str(&other.to_string()),
+    }
+}
 
 /// Replay the commits in `upstream..old_tip` (oldest first) on top of `onto`
 /// and move `branch_ref` to the result. Shared by every command that rewrites
@@ -36,6 +48,9 @@ fn replay_onto(
     sig: &git2::Signature,
     conflict_msg: &str,
 ) -> Result<()> {
+    // The cleanliness check below and the final checkout both read the shared
+    // in-memory index; make sure it is not stale state from an earlier command.
+    fresh_index(repo)?;
     ensure_no_operation_in_progress(repo)?;
     ensure_clean_for_rewrite(repo)?;
 
@@ -107,7 +122,9 @@ fn replay_onto(
     };
     // 3. Bring index and working tree to the new tip (the tree was verified
     //    clean above); if that refuses, undo everything.
-    let checkout = repo.checkout_tree(last.as_object(), Some(git2::build::CheckoutBuilder::new().safe()));
+    let mut safe = git2::build::CheckoutBuilder::new();
+    safe.safe();
+    let checkout = checkout_tree_for(MAX_WAIT, repo, last.as_object(), &mut safe).map_err(into_git);
     if let Err(e) = checkout {
         let (mut steps, branch_stuck) = match rollback_replay(repo, branch_ref, old_tip, new_tip, prior_orig_head) {
             Ok(()) => (Vec::new(), false),
@@ -241,7 +258,7 @@ fn rollback_replay(
     let mut failures = Vec::new();
     let restored = failpoint("reset")
         .and_then(|_| repo.find_object(old_tip, None))
-        .and_then(|old| repo.reset(&old, git2::ResetType::Hard, None));
+        .and_then(|old| reset_hard_for(MAX_WAIT, repo, &old).map_err(into_git));
     if let Err(e) = restored {
         failures.push(format!("index and working tree were not restored: {e}"));
     }
@@ -421,24 +438,26 @@ fn head_info(repo: &git2::Repository) -> Result<HeadInfo> {
 
 /// Checkout a local branch by short name (e.g. "main").
 #[tauri::command]
-pub fn checkout_branch(repo_id: String, branch_name: String, force: bool, state: State<RepoState>) -> Result<()> {
-    let repos = state.0.lock().unwrap();
-    let repo = repos.get(&repo_id).ok_or_else(|| Error::RepoNotFound(repo_id.clone()))?;
-
-    let refspec = format!("refs/heads/{}", branch_name);
-    do_checkout(repo, &refspec, force)
+pub async fn checkout_branch(app: tauri::AppHandle, repo_id: String, branch_name: String, force: bool) -> Result<()> {
+    with_repo_blocking(app, repo_id, move |repo| {
+        let refspec = format!("refs/heads/{}", branch_name);
+        do_checkout(repo, &refspec, force)
+    })
+    .await
 }
 
 /// Checkout a specific commit by OID (creates detached HEAD).
 #[tauri::command]
-pub fn checkout_commit(repo_id: String, oid: String, force: bool, state: State<RepoState>) -> Result<()> {
-    let repos = state.0.lock().unwrap();
-    let repo = repos.get(&repo_id).ok_or_else(|| Error::RepoNotFound(repo_id.clone()))?;
-
-    do_checkout(repo, &oid, force)
+pub async fn checkout_commit(app: tauri::AppHandle, repo_id: String, oid: String, force: bool) -> Result<()> {
+    with_repo_blocking(app, repo_id, move |repo| do_checkout(repo, &oid, force)).await
 }
 
 fn do_checkout(repo: &git2::Repository, refspec: &str, force: bool) -> Result<()> {
+    do_checkout_for(MAX_WAIT, repo, refspec, force)
+}
+
+fn do_checkout_for(max_wait: std::time::Duration, repo: &git2::Repository, refspec: &str, force: bool) -> Result<()> {
+    fresh_index(repo)?;
     let (obj, reference) = repo.revparse_ext(refspec)?;
 
     // Refuse BEFORE any mutation if this resolves to a local branch checked out in
@@ -479,7 +498,7 @@ fn do_checkout(repo: &git2::Repository, refspec: &str, force: bool) -> Result<()
         opts.safe();
     }
 
-    repo.checkout_tree(&obj, Some(&mut opts))?;
+    checkout_tree_for(max_wait, repo, &obj, &mut opts)?;
 
     match reference {
         Some(gref) => repo.set_head(gref.name().unwrap_or(refspec))?,
@@ -494,20 +513,21 @@ fn do_checkout(repo: &git2::Repository, refspec: &str, force: bool) -> Result<()
 
 /// Create a new branch pointing at the given commit OID.
 #[tauri::command]
-pub fn create_branch_at(
+pub async fn create_branch_at(
+    app: tauri::AppHandle,
     repo_id: String,
     name: String,
     oid: String,
     checkout: bool,
-    state: State<RepoState>,
 ) -> Result<()> {
-    let repos = state.0.lock().unwrap();
-    let repo = repos.get(&repo_id).ok_or_else(|| Error::RepoNotFound(repo_id.clone()))?;
+    with_repo_blocking(app, repo_id, move |repo| create_branch_in(repo, &name, &oid, checkout)).await
+}
 
-    let git_oid = git2::Oid::from_str(&oid).map_err(|_| Error::CommitNotFound(oid.clone()))?;
-    let commit = repo.find_commit(git_oid).map_err(|_| Error::CommitNotFound(oid.clone()))?;
+fn create_branch_in(repo: &git2::Repository, name: &str, oid: &str, checkout: bool) -> Result<()> {
+    let git_oid = git2::Oid::from_str(oid).map_err(|_| Error::CommitNotFound(oid.to_owned()))?;
+    let commit = repo.find_commit(git_oid).map_err(|_| Error::CommitNotFound(oid.to_owned()))?;
 
-    repo.branch(&name, &commit, false)?;
+    repo.branch(name, &commit, false)?;
 
     if checkout {
         do_checkout(repo, &format!("refs/heads/{}", name), false)?;
@@ -519,30 +539,29 @@ pub fn create_branch_at(
 /// Reset the current HEAD to the given commit OID.
 /// kind: "soft" | "mixed" | "hard"
 #[tauri::command]
-pub fn reset_head(repo_id: String, oid: String, kind: String, state: State<RepoState>) -> Result<()> {
-    let repos = state.0.lock().unwrap();
-    let repo = repos.get(&repo_id).ok_or_else(|| Error::RepoNotFound(repo_id.clone()))?;
+pub async fn reset_head(app: tauri::AppHandle, repo_id: String, oid: String, kind: String) -> Result<()> {
+    with_repo_blocking(app, repo_id, move |repo| reset_head_for(MAX_WAIT, repo, &oid, &kind)).await
+}
 
-    let git_oid = git2::Oid::from_str(&oid).map_err(|_| Error::CommitNotFound(oid.clone()))?;
+fn reset_head_for(max_wait: std::time::Duration, repo: &git2::Repository, oid: &str, kind: &str) -> Result<()> {
+    fresh_index(repo)?;
+    let git_oid = git2::Oid::from_str(oid).map_err(|_| Error::CommitNotFound(oid.to_owned()))?;
     let obj = repo.find_object(git_oid, None)?;
 
-    let reset_type = match kind.as_str() {
+    let reset_type = match kind {
         "soft" => git2::ResetType::Soft,
         "hard" => git2::ResetType::Hard,
         _ => git2::ResetType::Mixed,
     };
 
-    repo.reset(&obj, reset_type, None)?;
-    Ok(())
+    reset_for(max_wait, repo, &obj, reset_type)
 }
 
 /// Rebase the current branch onto the given commit.
 /// Aborts and returns an error if there are merge conflicts.
 #[tauri::command]
-pub fn rebase_onto(repo_id: String, onto_oid: String, state: State<RepoState>) -> Result<()> {
-    let repos = state.0.lock().unwrap();
-    let repo = repos.get(&repo_id).ok_or_else(|| Error::RepoNotFound(repo_id.clone()))?;
-    rebase_onto_impl(repo, &onto_oid)
+pub async fn rebase_onto(app: tauri::AppHandle, repo_id: String, onto_oid: String) -> Result<()> {
+    with_repo_blocking(app, repo_id, move |repo| rebase_onto_impl(repo, &onto_oid)).await
 }
 
 fn rebase_onto_impl(repo: &git2::Repository, onto_oid: &str) -> Result<()> {
@@ -732,10 +751,8 @@ pub fn get_squash_preview(repo_id: String, oids: Vec<String>, state: State<RepoS
 /// then replay any descendants up to HEAD. Rewrites history on the current
 /// branch. Aborts and errors on conflict.
 #[tauri::command]
-pub fn squash_commits(repo_id: String, oids: Vec<String>, message: String, state: State<RepoState>) -> Result<()> {
-    let repos = state.0.lock().unwrap();
-    let repo = repos.get(&repo_id).ok_or_else(|| Error::RepoNotFound(repo_id.clone()))?;
-    squash_in(repo, &oids, &message)
+pub async fn squash_commits(app: tauri::AppHandle, repo_id: String, oids: Vec<String>, message: String) -> Result<()> {
+    with_repo_blocking(app, repo_id, move |repo| squash_in(repo, &oids, &message)).await
 }
 
 fn squash_in(repo: &git2::Repository, oids: &[String], message: &str) -> Result<()> {
@@ -849,10 +866,8 @@ fn assert_first_parent_chain_is_linear(
 /// already reachable from a remote-tracking branch (rewriting those would
 /// need a force-push) and commits behind a merge in the replay range.
 #[tauri::command]
-pub fn reword_commit(repo_id: String, oid: String, message: String, state: State<RepoState>) -> Result<()> {
-    let repos = state.0.lock().unwrap();
-    let repo = repos.get(&repo_id).ok_or_else(|| Error::RepoNotFound(repo_id.clone()))?;
-    reword_in(repo, &oid, &message)
+pub async fn reword_commit(app: tauri::AppHandle, repo_id: String, oid: String, message: String) -> Result<()> {
+    with_repo_blocking(app, repo_id, move |repo| reword_in(repo, &oid, &message)).await
 }
 
 fn reword_in(repo: &git2::Repository, oid: &str, message: &str) -> Result<()> {
@@ -949,10 +964,8 @@ pub enum CheckoutRemoteResult {
 ///   - behind       → fast-forward the local branch to the remote tip, check out
 ///   - diverged     → check out the remote tip detached, leaving local commits intact
 #[tauri::command]
-pub fn checkout_remote_branch(repo_id: String, remote_branch: String, force: bool, state: State<RepoState>) -> Result<CheckoutRemoteResult> {
-    let repos = state.0.lock().unwrap();
-    let repo = repos.get(&repo_id).ok_or_else(|| Error::RepoNotFound(repo_id.clone()))?;
-    checkout_remote_branch_impl(repo, &remote_branch, force)
+pub async fn checkout_remote_branch(app: tauri::AppHandle, repo_id: String, remote_branch: String, force: bool) -> Result<CheckoutRemoteResult> {
+    with_repo_blocking(app, repo_id, move |repo| checkout_remote_branch_impl(repo, &remote_branch, force)).await
 }
 
 fn checkout_remote_branch_impl(repo: &git2::Repository, remote_branch: &str, force: bool) -> Result<CheckoutRemoteResult> {
@@ -1918,6 +1931,72 @@ mod tests {
             cfg.set_str("user.email", "test@example.com").unwrap();
         }
         (dir, repo)
+    }
+
+    fn commit_wt_file(repo: &Repository, name: &str, content: &str, msg: &str) -> git2::Oid {
+        std::fs::write(repo.workdir().unwrap().join(name), content).unwrap();
+        let mut index = repo.index().unwrap();
+        index.add_path(std::path::Path::new(name)).unwrap();
+        index.write().unwrap();
+        let tree = repo.find_tree(index.write_tree().unwrap()).unwrap();
+        let sig = repo.signature().unwrap();
+        let parents: Vec<git2::Commit> = repo.head().ok().and_then(|h| h.peel_to_commit().ok()).into_iter().collect();
+        let refs: Vec<&git2::Commit> = parents.iter().collect();
+        repo.commit(Some("HEAD"), &sig, &sig, msg, &tree, &refs).unwrap()
+    }
+
+    #[test]
+    fn reset_head_succeeds_when_the_index_lock_is_released_shortly() {
+        let (dir, repo) = make_repo();
+        let first = commit_wt_file(&repo, "a.txt", "one", "first");
+        commit_wt_file(&repo, "b.txt", "two", "second");
+        let lock = dir.join(".git").join("index.lock");
+        std::fs::write(&lock, "").unwrap();
+        let l2 = lock.clone();
+        let h = std::thread::spawn(move || {
+            std::thread::sleep(std::time::Duration::from_millis(30));
+            std::fs::remove_file(l2).unwrap();
+        });
+        reset_head_for(std::time::Duration::from_millis(500), &repo, &first.to_string(), "hard").unwrap();
+        h.join().unwrap();
+        assert_eq!(repo.head().unwrap().target(), Some(first));
+        assert!(!dir.join("b.txt").exists());
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn reset_head_reports_a_lock_held_past_the_budget() {
+        let (dir, repo) = make_repo();
+        let first = commit_wt_file(&repo, "a.txt", "one", "first");
+        let second = commit_wt_file(&repo, "b.txt", "two", "second");
+        let lock = dir.join(".git").join("index.lock");
+        std::fs::write(&lock, "").unwrap();
+        let r = reset_head_for(std::time::Duration::from_millis(30), &repo, &first.to_string(), "hard");
+        std::fs::remove_file(&lock).unwrap();
+        assert!(matches!(r, Err(Error::Git(ref e)) if e.code() == git2::ErrorCode::Locked), "{r:?}");
+        assert_eq!(repo.head().unwrap().target(), Some(second), "HEAD must not move on a failed reset");
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn checkout_retries_a_briefly_held_index_lock() {
+        let (dir, repo) = make_repo();
+        let first = commit_wt_file(&repo, "a.txt", "one", "first");
+        let branch = repo.branch("other", &repo.find_commit(first).unwrap(), false).unwrap();
+        let other = branch.get().name().unwrap().to_owned();
+        commit_wt_file(&repo, "b.txt", "two", "second on default");
+        let lock = dir.join(".git").join("index.lock");
+        std::fs::write(&lock, "").unwrap();
+        let l2 = lock.clone();
+        let h = std::thread::spawn(move || {
+            std::thread::sleep(std::time::Duration::from_millis(30));
+            std::fs::remove_file(l2).unwrap();
+        });
+        do_checkout_for(std::time::Duration::from_millis(500), &repo, &other, false).unwrap();
+        h.join().unwrap();
+        assert_eq!(repo.head().unwrap().name(), Ok(other.as_str()));
+        assert!(!dir.join("b.txt").exists());
+        let _ = std::fs::remove_dir_all(dir);
     }
 
     /// A freshly initialized repo has an unborn HEAD; head_info must report the

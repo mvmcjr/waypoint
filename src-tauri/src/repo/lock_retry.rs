@@ -49,39 +49,91 @@ pub(crate) fn retry_on_locked_for<T>(
     }
 }
 
-/// Write `index` to disk, retrying while the index is locked. If the write still
-/// fails, the in-memory index (which libgit2 shares with every handle of the cached
-/// `Repository`) is reloaded from disk so a later write cannot persist half-applied
-/// changes. The original write error is returned.
+/// The repo's index, freshly re-read from disk.
+///
+/// libgit2 shares one in-memory index between every handle of a cached
+/// `Repository`. A command that mutates it and then fails part-way (a path that
+/// does not exist, a held lock, ...) leaves that half-applied state behind, and
+/// the next command would write it to disk. Every command that reads-then-writes
+/// the index therefore starts here, so stale state can never leak between commands.
+pub(crate) fn fresh_index(repo: &git2::Repository) -> Result<git2::Index> {
+    let mut index = repo.index()?;
+    index.read(true)?;
+    Ok(index)
+}
+
+/// Write `index` to disk, retrying while the index is locked.
 pub(crate) fn write_index(index: &mut git2::Index) -> Result<()> {
     write_index_for(MAX_WAIT, index)
 }
 
 pub(crate) fn write_index_for(max_wait: Duration, index: &mut git2::Index) -> Result<()> {
-    let r = retry_on_locked_for(max_wait, || Ok(index.write()?));
-    if r.is_err() {
-        let _ = index.read(true);
-    }
-    r
+    retry_on_locked_for(max_wait, || Ok(index.write()?))
 }
 
-/// `git reset --hard <target>`, retrying while the index is locked. A hard reset is
-/// idempotent so re-running it is safe. On final failure the index is reloaded from
-/// disk (see [`write_index`]).
+/// `git reset <target>` of any kind, retrying while the index is locked. Resets
+/// are idempotent, so re-running one is safe.
+pub(crate) fn reset_for(
+    max_wait: Duration,
+    repo: &git2::Repository,
+    target: &git2::Object<'_>,
+    kind: git2::ResetType,
+) -> Result<()> {
+    retry_on_locked_for(max_wait, || Ok(repo.reset(target, kind, None)?))
+}
+
 pub(crate) fn reset_hard_for(
     max_wait: Duration,
     repo: &git2::Repository,
     target: &git2::Object<'_>,
 ) -> Result<()> {
-    let r = retry_on_locked_for(max_wait, || {
-        Ok(repo.reset(target, git2::ResetType::Hard, None)?)
-    });
-    if r.is_err() {
-        if let Ok(mut index) = repo.index() {
-            let _ = index.read(true);
-        }
-    }
-    r
+    reset_for(max_wait, repo, target, git2::ResetType::Hard)
+}
+
+/// `checkout_tree`, retrying while the index is locked (checkout rewrites the
+/// index). Re-running skips files the first attempt already brought up to date.
+pub(crate) fn checkout_tree_for(
+    max_wait: Duration,
+    repo: &git2::Repository,
+    target: &git2::Object<'_>,
+    opts: &mut git2::build::CheckoutBuilder<'_>,
+) -> Result<()> {
+    retry_on_locked_for(max_wait, || Ok(repo.checkout_tree(target, Some(&mut *opts))?))
+}
+
+/// `checkout_head`, retrying while the index is locked.
+pub(crate) fn checkout_head_for(
+    max_wait: Duration,
+    repo: &git2::Repository,
+    opts: &mut git2::build::CheckoutBuilder<'_>,
+) -> Result<()> {
+    retry_on_locked_for(max_wait, || Ok(repo.checkout_head(Some(&mut *opts))?))
+}
+
+/// `checkout_index` (restoring working-tree files from `index`), retrying while locked.
+pub(crate) fn checkout_index_for(
+    max_wait: Duration,
+    repo: &git2::Repository,
+    index: &mut git2::Index,
+    opts: &mut git2::build::CheckoutBuilder<'_>,
+) -> Result<()> {
+    retry_on_locked_for(max_wait, || Ok(repo.checkout_index(Some(&mut *index), Some(&mut *opts))?))
+}
+
+/// Create a commit, retrying while a ref or reflog lock (`refs/heads/<b>.lock`,
+/// `HEAD.lock`, the reflog's `.lock`) is held. A retry writes the identical
+/// object (same tree, parents, signature) and the ref update is atomic, so it is
+/// safe; if HEAD moved meanwhile the failure is not a lock error and is not retried.
+pub(crate) fn commit_for(
+    max_wait: Duration,
+    repo: &git2::Repository,
+    update_ref: Option<&str>,
+    sig: &git2::Signature<'_>,
+    message: &str,
+    tree: &git2::Tree<'_>,
+    parents: &[&git2::Commit<'_>],
+) -> Result<git2::Oid> {
+    retry_on_locked_for(max_wait, || Ok(repo.commit(update_ref, sig, sig, message, tree, parents)?))
 }
 
 #[cfg(test)]

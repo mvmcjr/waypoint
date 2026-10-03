@@ -16,6 +16,39 @@ pub(crate) fn workdir(repo: &git2::Repository) -> Result<std::path::PathBuf> {
         .map(|p| p.to_path_buf())
 }
 
+/// Run `f` against the shared [`RepoState`] on Tauri's blocking pool.
+///
+/// Index-mutating commands may sleep (lock retry, up to ~1 s) and touch the disk, so
+/// they must not run on the main thread. State is reached through the `AppHandle`
+/// inside the closure, as in `commands::worktrees`.
+pub(crate) async fn run_blocking<T, F>(app: tauri::AppHandle, f: F) -> Result<T>
+where
+    T: Send + 'static,
+    F: FnOnce(&RepoState) -> Result<T> + Send + 'static,
+{
+    use tauri::Manager;
+    tauri::async_runtime::spawn_blocking(move || {
+        let state = app.state::<RepoState>();
+        f(&state)
+    })
+    .await
+    .map_err(|e| Error::InvalidArg(e.to_string()))?
+}
+
+/// [`run_blocking`] for the common case: lock the state and hand `f` the repo.
+pub(crate) async fn with_repo_blocking<T, F>(app: tauri::AppHandle, repo_id: String, f: F) -> Result<T>
+where
+    T: Send + 'static,
+    F: FnOnce(&git2::Repository) -> Result<T> + Send + 'static,
+{
+    run_blocking(app, move |state| {
+        let repos = state.0.lock().unwrap();
+        let repo = repos.get(&repo_id).ok_or_else(|| Error::RepoNotFound(repo_id.clone()))?;
+        f(repo)
+    })
+    .await
+}
+
 /// Stable identity for a folder: canonicalized, Windows verbatim prefix stripped,
 /// no trailing separator (a bare root keeps its separator). git2 reports worktree
 /// paths as `E:/x/` while the folder picker yields `E:\x` — both map to one value.
