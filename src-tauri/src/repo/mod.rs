@@ -16,37 +16,45 @@ pub(crate) fn workdir(repo: &git2::Repository) -> Result<std::path::PathBuf> {
         .map(|p| p.to_path_buf())
 }
 
-/// Run `f` against the shared [`RepoState`] on Tauri's blocking pool.
+/// Re-read the repo's index from disk.
 ///
-/// Index-mutating commands may sleep (lock retry, up to ~1 s) and touch the disk, so
-/// they must not run on the main thread. State is reached through the `AppHandle`
-/// inside the closure, as in `commands::worktrees`.
-pub(crate) async fn run_blocking<T, F>(app: tauri::AppHandle, f: F) -> Result<T>
-where
-    T: Send + 'static,
-    F: FnOnce(&RepoState) -> Result<T> + Send + 'static,
-{
-    use tauri::Manager;
-    tauri::async_runtime::spawn_blocking(move || {
-        let state = app.state::<RepoState>();
-        f(&state)
-    })
-    .await
-    .map_err(|e| Error::InvalidArg(e.to_string()))?
+/// libgit2 shares one in-memory index between every handle of a cached
+/// `Repository`. A command that mutates it and then fails part-way (a path that does
+/// not exist, a held lock, ...) leaves that half-applied state behind: readers would
+/// show it and the next writer would persist it.
+pub(crate) fn reload_index(repo: &git2::Repository) -> Result<()> {
+    repo.index()?.read(true)?;
+    Ok(())
 }
 
-/// [`run_blocking`] for the common case: lock the state and hand `f` the repo.
-pub(crate) async fn with_repo_blocking<T, F>(app: tauri::AppHandle, repo_id: String, f: F) -> Result<T>
-where
-    T: Send + 'static,
-    F: FnOnce(&git2::Repository) -> Result<T> + Send + 'static,
-{
-    run_blocking(app, move |state| {
-        let repos = state.0.lock().unwrap();
-        let repo = repos.get(&repo_id).ok_or_else(|| Error::RepoNotFound(repo_id.clone()))?;
-        f(repo)
-    })
-    .await
+/// The single way a command reaches its cached repository.
+///
+/// Locks [`RepoState`], looks up `repo_id` and runs `f` on it, with the index
+/// reloaded from disk before `f` (so it never sees stale in-memory state, e.g. from
+/// edits made by an external `git`) and again after `f` fails (so a half-applied
+/// command is never visible to a reader or written by the next command). Commands
+/// are plain synchronous Tauri commands, so they run one at a time in the order the
+/// UI issued them.
+///
+/// `f` gets `&mut Repository` because libgit2's stash API requires it.
+///
+/// `f` must not call back into `with_repo` (the mutex is not re-entrant) and needs
+/// no index reload of its own, except after it deliberately re-reads mid-command.
+pub(crate) fn with_repo<T>(
+    state: &RepoState,
+    repo_id: &str,
+    f: impl FnOnce(&mut git2::Repository) -> Result<T>,
+) -> Result<T> {
+    let mut repos = state.0.lock().unwrap();
+    let repo = repos.get_mut(repo_id).ok_or_else(|| Error::RepoNotFound(repo_id.to_owned()))?;
+    ensure_present(repo)?;
+    reload_index(repo)?;
+    let result = f(repo);
+    if result.is_err() {
+        // The command's own error wins over a reload failure.
+        let _ = reload_index(repo);
+    }
+    result
 }
 
 /// Stable identity for a folder: canonicalized, Windows verbatim prefix stripped,
@@ -248,6 +256,14 @@ pub(crate) mod test_support {
         repo.reference(&name, oid, true, "test").unwrap();
         repo.checkout_head(Some(git2::build::CheckoutBuilder::new().force())).unwrap();
         oid
+    }
+
+    /// Put `repo` into a fresh [`super::RepoState`] under the id `"t"`, so tests can
+    /// drive commands through [`super::with_repo`] like the real command handlers do.
+    pub(crate) fn state_for(repo: Repository) -> (super::RepoState, String) {
+        let state = super::RepoState::default();
+        state.0.lock().unwrap().insert("t".to_owned(), repo);
+        (state, "t".to_owned())
     }
 
     /// Raw object bytes of `oid` (to assert on headers git2 doesn't expose).

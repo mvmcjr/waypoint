@@ -5,11 +5,8 @@ use tauri::State;
 
 use crate::commands::stash::find_stash_index_by_oid;
 use crate::error::{Error, Result};
-use crate::repo::lock_retry::{
-    commit_for, fresh_index, reset_hard_for, write_index, write_index_for, MAX_WAIT,
-};
-use crate::repo::{run_blocking, with_repo_blocking, RepoState};
-use std::time::Duration;
+use crate::repo::lock_retry;
+use crate::repo::{with_repo, RepoState};
 
 #[derive(Debug, Serialize)]
 pub struct MergeResult {
@@ -145,25 +142,28 @@ fn auto_pop(repo: &mut git2::Repository) {
 /// `label` is the branch name shown in the auto-generated commit message;
 /// pass an empty string if the target is not a branch tip.
 #[tauri::command]
-pub async fn merge_commit(app: tauri::AppHandle, repo_id: String, oid: String, label: String) -> Result<MergeResult> {
-    run_blocking(app, move |state| merge_commit_in(state, repo_id, oid, label)).await
+pub fn merge_commit(repo_id: String, oid: String, label: String, state: State<RepoState>) -> Result<MergeResult> {
+    with_repo(&state, &repo_id, |repo| merge_commit_in(repo, &oid, &label))
 }
 
-fn merge_commit_in(state: &RepoState, repo_id: String, oid: String, label: String) -> Result<MergeResult> {
-    let mut repos = state.0.lock().unwrap();
+fn merge_commit_in(repo: &mut git2::Repository, oid: &str, label: &str) -> Result<MergeResult> {
+    // Phase 1 — auto-stash dirty working tree.
+    let autostashed = auto_stash(repo)?;
 
-    // Phase 1 — auto-stash dirty working tree (needs &mut repo).
-    let autostashed = {
-        let repo = repos.get_mut(&repo_id).ok_or_else(|| Error::RepoNotFound(repo_id.clone()))?;
-        fresh_index(repo)?;
-        auto_stash(repo)?
-    };
+    // Phase 2 — perform the merge.
+    let result = merge_into_head(repo, oid, label)?;
 
-    // Phase 2 — perform the merge (only needs &repo; annotated must be dropped before phase 3).
+    // Phase 3 — pop autostash if the operation completed without conflicts.
+    if autostashed && result.kind != "conflicts" {
+        auto_pop(repo);
+    }
+
+    Ok(result)
+}
+
+fn merge_into_head(repo: &git2::Repository, oid: &str, label: &str) -> Result<MergeResult> {
     let result: MergeResult = {
-        let repo = repos.get(&repo_id).ok_or_else(|| Error::RepoNotFound(repo_id.clone()))?;
-
-        let git_oid = git2::Oid::from_str(&oid).map_err(|_| Error::CommitNotFound(oid.clone()))?;
+        let git_oid = git2::Oid::from_str(oid).map_err(|_| Error::CommitNotFound(oid.to_owned()))?;
         let annotated = repo.find_annotated_commit(git_oid)?;
         let (analysis, _) = repo.merge_analysis(&[&annotated])?;
 
@@ -173,7 +173,7 @@ fn merge_commit_in(state: &RepoState, repo_id: String, oid: String, label: Strin
             // Normal merge.
             repo.merge(&[&annotated], None, None)?;
             let mut index = repo.index()?;
-            write_index(&mut index)?;
+            lock_retry::write_index(&mut index)?;
 
             let merge_msg = if label.is_empty() {
                 format!("Merge commit '{}'", &oid[..8.min(oid.len())])
@@ -195,29 +195,22 @@ fn merge_commit_in(state: &RepoState, repo_id: String, oid: String, label: Strin
                 let other_commit = repo.find_commit(git_oid)?;
                 let tree_oid = index.write_tree()?;
                 let tree = repo.find_tree(tree_oid)?;
-                commit_for(MAX_WAIT, repo, Some("HEAD"), &sig, &merge_msg, &tree, &[&head_commit, &other_commit])?;
+                lock_retry::commit(repo, Some("HEAD"), &sig, &merge_msg, &tree, &[&head_commit, &other_commit])?;
                 cleanup_merge_state(repo);
                 MergeResult { kind: "merged".into(), conflicted: vec![] }
             }
         }
-        // `annotated` (and any other repo-lifetime borrows) dropped at end of this block.
     };
-
-    // Phase 3 — pop autostash if the operation completed without conflicts.
-    if autostashed && result.kind != "conflicts" {
-        let repo = repos.get_mut(&repo_id).ok_or_else(|| Error::RepoNotFound(repo_id.clone()))?;
-        auto_pop(repo);
-    }
-
     Ok(result)
 }
 
 /// Return the current merge/cherry-pick state including any remaining conflicted paths.
 #[tauri::command]
 pub fn get_merge_status(repo_id: String, state: State<RepoState>) -> Result<MergeStatus> {
-    let repos = state.0.lock().unwrap();
-    let repo = repos.get(&repo_id).ok_or_else(|| Error::RepoNotFound(repo_id.clone()))?;
+    with_repo(&state, &repo_id, |repo| merge_status_in(repo))
+}
 
+fn merge_status_in(repo: &git2::Repository) -> Result<MergeStatus> {
     let git_dir = repo.path();
     let merge_head_path = git_dir.join("MERGE_HEAD");
     let cherry_pick_head_path = git_dir.join("CHERRY_PICK_HEAD");
@@ -263,11 +256,7 @@ pub fn get_merge_status(repo_id: String, state: State<RepoState>) -> Result<Merg
 }
 
 fn resolve_with_side(repo: &git2::Repository, path: &str, use_ours: bool) -> Result<()> {
-    resolve_with_side_for(MAX_WAIT, repo, path, use_ours)
-}
-
-fn resolve_with_side_for(max_wait: Duration, repo: &git2::Repository, path: &str, use_ours: bool) -> Result<()> {
-    let mut index = fresh_index(repo)?;
+    let mut index = repo.index()?;
 
     // Collect conflict entries before mutably borrowing the index.
     let chosen_entry: Option<git2::IndexEntry> = {
@@ -303,40 +292,36 @@ fn resolve_with_side_for(max_wait: Duration, repo: &git2::Repository, path: &str
     std::fs::write(&full_path, blob.content()).map_err(io_err)?;
 
     index.add_path(Path::new(path))?;
-    write_index_for(max_wait, &mut index)
+    lock_retry::write_index(&mut index)
 }
 
 /// Stage "our" version of a conflicted file (pre-merge).
 #[tauri::command]
-pub async fn resolve_ours(app: tauri::AppHandle, repo_id: String, path: String) -> Result<()> {
-    with_repo_blocking(app, repo_id, move |repo| resolve_with_side(repo, &path, true)).await
+pub fn resolve_ours(repo_id: String, path: String, state: State<RepoState>) -> Result<()> {
+    with_repo(&state, &repo_id, |repo| resolve_with_side(repo, &path, true))
 }
 
 /// Stage "their" version of a conflicted file (from the merged commit).
 #[tauri::command]
-pub async fn resolve_theirs(app: tauri::AppHandle, repo_id: String, path: String) -> Result<()> {
-    with_repo_blocking(app, repo_id, move |repo| resolve_with_side(repo, &path, false)).await
+pub fn resolve_theirs(repo_id: String, path: String, state: State<RepoState>) -> Result<()> {
+    with_repo(&state, &repo_id, |repo| resolve_with_side(repo, &path, false))
 }
 
 /// Create the merge commit after all conflicts are resolved.
 #[tauri::command]
-pub async fn finish_merge(app: tauri::AppHandle, repo_id: String, message: String) -> Result<()> {
-    run_blocking(app, move |state| finish_merge_in(state, repo_id, message)).await
+pub fn finish_merge(repo_id: String, message: String, state: State<RepoState>) -> Result<()> {
+    with_repo(&state, &repo_id, |repo| finish_merge_in(repo, &message))
 }
 
-fn finish_merge_in(state: &RepoState, repo_id: String, message: String) -> Result<()> {
-    let mut repos = state.0.lock().unwrap();
-
-    // Commit phase (only needs &repo — drop all borrows at end of block).
+fn finish_merge_in(repo: &mut git2::Repository, message: &str) -> Result<()> {
+    // Commit phase.
     {
-        let repo = repos.get(&repo_id).ok_or_else(|| Error::RepoNotFound(repo_id.clone()))?;
-
         let merge_head_path = repo.path().join("MERGE_HEAD");
         let merge_oid_str = std::fs::read_to_string(&merge_head_path)
             .map_err(|_| Error::InvalidArg("No merge in progress".into()))?;
         let merge_oid = git2::Oid::from_str(merge_oid_str.trim())?;
 
-        let mut index = fresh_index(repo)?;
+        let mut index = repo.index()?;
         if index.has_conflicts() {
             return Err(Error::InvalidArg("Cannot commit: there are unresolved conflicts.".into()));
         }
@@ -347,36 +332,28 @@ fn finish_merge_in(state: &RepoState, repo_id: String, message: String) -> Resul
         let tree_oid = index.write_tree()?;
         let tree = repo.find_tree(tree_oid)?;
 
-        commit_for(MAX_WAIT, repo, Some("HEAD"), &sig, message.trim(), &tree, &[&head_commit, &other_commit])?;
+        lock_retry::commit(repo, Some("HEAD"), &sig, message.trim(), &tree, &[&head_commit, &other_commit])?;
         cleanup_merge_state(repo);
     }
 
-    // Pop autostash (needs &mut repo).
-    let repo = repos.get_mut(&repo_id).ok_or_else(|| Error::RepoNotFound(repo_id.clone()))?;
     auto_pop(repo);
     Ok(())
 }
 
 /// Abort the in-progress merge or cherry-pick: hard-reset to HEAD and clean up state files.
 #[tauri::command]
-pub async fn abort_merge(app: tauri::AppHandle, repo_id: String) -> Result<()> {
-    run_blocking(app, move |state| abort_merge_in(state, repo_id)).await
+pub fn abort_merge(repo_id: String, state: State<RepoState>) -> Result<()> {
+    with_repo(&state, &repo_id, abort_merge_in)
 }
 
-fn abort_merge_in(state: &RepoState, repo_id: String) -> Result<()> {
-    let mut repos = state.0.lock().unwrap();
-
+fn abort_merge_in(repo: &mut git2::Repository) -> Result<()> {
     // Reset to HEAD (drop head_commit before auto_pop needs &mut).
     {
-        let repo = repos.get(&repo_id).ok_or_else(|| Error::RepoNotFound(repo_id.clone()))?;
-        fresh_index(repo)?;
         let head_commit = repo.head()?.peel_to_commit()?;
-        reset_hard_for(MAX_WAIT, repo, head_commit.as_object())?;
+        lock_retry::reset_hard(repo, head_commit.as_object())?;
         cleanup_merge_state(repo);
     }
 
-    // Pop autostash (needs &mut repo).
-    let repo = repos.get_mut(&repo_id).ok_or_else(|| Error::RepoNotFound(repo_id.clone()))?;
     auto_pop(repo);
     Ok(())
 }
@@ -385,11 +362,10 @@ fn cherry_pick_impl(repo: &git2::Repository, oid_str: &str) -> Result<CherryPick
     let git_oid = git2::Oid::from_str(oid_str).map_err(|_| Error::CommitNotFound(oid_str.to_string()))?;
     let commit = repo.find_commit(git_oid).map_err(|_| Error::CommitNotFound(oid_str.to_string()))?;
 
-    fresh_index(repo)?;
     repo.cherrypick(&commit, None)?;
 
     let mut index = repo.index()?;
-    write_index(&mut index)?;
+    lock_retry::write_index(&mut index)?;
 
     let msg = CommitDecoder::new(&commit).text(commit.message_bytes());
 
@@ -410,27 +386,17 @@ fn cherry_pick_impl(repo: &git2::Repository, oid_str: &str) -> Result<CherryPick
 /// Apply the given commit onto HEAD (cherry-pick).
 /// Returns `kind = "applied"` on success or `kind = "conflicts"` with the conflicted paths.
 #[tauri::command]
-pub async fn cherry_pick(app: tauri::AppHandle, repo_id: String, oid: String) -> Result<CherryPickResult> {
-    run_blocking(app, move |state| cherry_pick_in(state, repo_id, oid)).await
+pub fn cherry_pick(repo_id: String, oid: String, state: State<RepoState>) -> Result<CherryPickResult> {
+    with_repo(&state, &repo_id, |repo| cherry_pick_in(repo, &oid))
 }
 
-fn cherry_pick_in(state: &RepoState, repo_id: String, oid: String) -> Result<CherryPickResult> {
-    let mut repos = state.0.lock().unwrap();
-
-    let autostashed = {
-        let repo = repos.get_mut(&repo_id).ok_or_else(|| Error::RepoNotFound(repo_id.clone()))?;
-        auto_stash(repo)?
-    };
-
-    let result = {
-        let repo = repos.get(&repo_id).ok_or_else(|| Error::RepoNotFound(repo_id.clone()))?;
-        cherry_pick_impl(repo, &oid)?
-    };
+fn cherry_pick_in(repo: &mut git2::Repository, oid: &str) -> Result<CherryPickResult> {
+    let autostashed = auto_stash(repo)?;
+    let result = cherry_pick_impl(repo, oid)?;
 
     // For a clean apply ("staged"), pop immediately — no merge state to preserve.
     // For conflicts, the stash is popped in finish_cherry_pick after resolving.
     if autostashed && result.kind == "staged" {
-        let repo = repos.get_mut(&repo_id).ok_or_else(|| Error::RepoNotFound(repo_id.clone()))?;
         auto_pop(repo);
     }
 
@@ -440,37 +406,34 @@ fn cherry_pick_in(state: &RepoState, repo_id: String, oid: String) -> Result<Che
 /// Read the raw working-directory content of a conflicted file, including conflict markers.
 #[tauri::command]
 pub fn get_conflict_content(repo_id: String, path: String, state: State<RepoState>) -> Result<String> {
-    let repos = state.0.lock().unwrap();
-    let repo = repos.get(&repo_id).ok_or_else(|| Error::RepoNotFound(repo_id.clone()))?;
-    let full_path = crate::repo::workdir(repo)?.join(&path);
-    std::fs::read_to_string(&full_path).map_err(io_err)
+    with_repo(&state, &repo_id, |repo| {
+        let full_path = crate::repo::workdir(repo)?.join(&path);
+        std::fs::read_to_string(&full_path).map_err(io_err)
+    })
 }
 
 /// Write per-hunk-resolved content to a conflicted file and stage it.
 /// The caller must supply content with no remaining conflict markers.
 #[tauri::command]
-pub async fn resolve_with_content(
-    app: tauri::AppHandle,
+pub fn resolve_with_content(
     repo_id: String,
     path: String,
     content: String,
+    state: State<RepoState>,
 ) -> Result<()> {
-    with_repo_blocking(app, repo_id, move |repo| {
-        resolve_with_content_for(MAX_WAIT, repo, &path, &content)
-    })
-    .await
+    with_repo(&state, &repo_id, |repo| resolve_with_content_in(repo, &path, &content))
 }
 
-fn resolve_with_content_for(max_wait: Duration, repo: &git2::Repository, path: &str, content: &str) -> Result<()> {
-    let mut index = fresh_index(repo)?;
+fn resolve_with_content_in(repo: &git2::Repository, path: &str, content: &str) -> Result<()> {
+    let mut index = repo.index()?;
     let full_path = crate::repo::workdir(repo)?.join(path);
     std::fs::write(&full_path, content.as_bytes()).map_err(io_err)?;
     index.add_path(Path::new(path))?;
-    write_index_for(max_wait, &mut index)
+    lock_retry::write_index(&mut index)
 }
 
 fn finish_cherry_pick_impl(repo: &git2::Repository, message: &str) -> Result<()> {
-    let mut index = fresh_index(repo)?;
+    let mut index = repo.index()?;
     if index.has_conflicts() {
         return Err(Error::InvalidArg("Cannot commit: there are unresolved conflicts.".into()));
     }
@@ -480,27 +443,20 @@ fn finish_cherry_pick_impl(repo: &git2::Repository, message: &str) -> Result<()>
     let tree_oid = index.write_tree()?;
     let tree = repo.find_tree(tree_oid)?;
 
-    commit_for(MAX_WAIT, repo, Some("HEAD"), &sig, message.trim(), &tree, &[&head_commit])?;
+    lock_retry::commit(repo, Some("HEAD"), &sig, message.trim(), &tree, &[&head_commit])?;
     Ok(())
 }
 
 /// Create the cherry-pick commit after all conflicts are resolved (single-parent).
 #[tauri::command]
-pub async fn finish_cherry_pick(app: tauri::AppHandle, repo_id: String, message: String) -> Result<()> {
-    run_blocking(app, move |state| finish_cherry_pick_in(state, repo_id, message)).await
+pub fn finish_cherry_pick(repo_id: String, message: String, state: State<RepoState>) -> Result<()> {
+    with_repo(&state, &repo_id, |repo| finish_cherry_pick_in(repo, &message))
 }
 
-fn finish_cherry_pick_in(state: &RepoState, repo_id: String, message: String) -> Result<()> {
-    let mut repos = state.0.lock().unwrap();
-
-    {
-        let repo = repos.get(&repo_id).ok_or_else(|| Error::RepoNotFound(repo_id.clone()))?;
-        let result = finish_cherry_pick_impl(repo, &message);
-        cleanup_merge_state(repo);
-        result?;
-    }
-
-    let repo = repos.get_mut(&repo_id).ok_or_else(|| Error::RepoNotFound(repo_id.clone()))?;
+fn finish_cherry_pick_in(repo: &mut git2::Repository, message: &str) -> Result<()> {
+    let result = finish_cherry_pick_impl(repo, message);
+    cleanup_merge_state(repo);
+    result?;
     auto_pop(repo);
     Ok(())
 }
@@ -513,11 +469,10 @@ fn revert_impl(repo: &git2::Repository, oid_str: &str) -> Result<CherryPickResul
     if commit.parent_count() > 1 {
         opts.mainline(1);
     }
-    fresh_index(repo)?;
     repo.revert(&commit, Some(&mut opts))?;
 
     let mut index = repo.index()?;
-    write_index(&mut index)?;
+    lock_retry::write_index(&mut index)?;
 
     let summary = CommitDecoder::new(&commit).text(commit.summary_bytes());
     let msg = format!("revert: {}\n\nThis reverts commit {}.", summary, oid_str);
@@ -535,25 +490,15 @@ fn revert_impl(repo: &git2::Repository, oid_str: &str) -> Result<CherryPickResul
 /// Revert the given commit.
 /// Returns `kind = "staged"` on success or `kind = "conflicts"` with the conflicted paths.
 #[tauri::command]
-pub async fn revert_commit(app: tauri::AppHandle, repo_id: String, oid: String) -> Result<CherryPickResult> {
-    run_blocking(app, move |state| revert_commit_in(state, repo_id, oid)).await
+pub fn revert_commit(repo_id: String, oid: String, state: State<RepoState>) -> Result<CherryPickResult> {
+    with_repo(&state, &repo_id, |repo| revert_commit_in(repo, &oid))
 }
 
-fn revert_commit_in(state: &RepoState, repo_id: String, oid: String) -> Result<CherryPickResult> {
-    let mut repos = state.0.lock().unwrap();
-
-    let autostashed = {
-        let repo = repos.get_mut(&repo_id).ok_or_else(|| Error::RepoNotFound(repo_id.clone()))?;
-        auto_stash(repo)?
-    };
-
-    let result = {
-        let repo = repos.get(&repo_id).ok_or_else(|| Error::RepoNotFound(repo_id.clone()))?;
-        revert_impl(repo, &oid)?
-    };
+fn revert_commit_in(repo: &mut git2::Repository, oid: &str) -> Result<CherryPickResult> {
+    let autostashed = auto_stash(repo)?;
+    let result = revert_impl(repo, oid)?;
 
     if autostashed && result.kind == "staged" {
-        let repo = repos.get_mut(&repo_id).ok_or_else(|| Error::RepoNotFound(repo_id.clone()))?;
         auto_pop(repo);
     }
 
@@ -562,30 +507,18 @@ fn revert_commit_in(state: &RepoState, repo_id: String, oid: String) -> Result<C
 
 /// Create the revert commit after all conflicts are resolved (single-parent).
 #[tauri::command]
-pub async fn finish_revert(app: tauri::AppHandle, repo_id: String, message: String) -> Result<()> {
-    run_blocking(app, move |state| finish_revert_in(state, repo_id, message)).await
-}
-
-fn finish_revert_in(state: &RepoState, repo_id: String, message: String) -> Result<()> {
-    let mut repos = state.0.lock().unwrap();
-
-    {
-        let repo = repos.get(&repo_id).ok_or_else(|| Error::RepoNotFound(repo_id.clone()))?;
-        let result = finish_cherry_pick_impl(repo, &message);
-        cleanup_merge_state(repo);
-        result?;
-    }
-
-    let repo = repos.get_mut(&repo_id).ok_or_else(|| Error::RepoNotFound(repo_id.clone()))?;
-    auto_pop(repo);
-    Ok(())
+pub fn finish_revert(repo_id: String, message: String, state: State<RepoState>) -> Result<()> {
+    with_repo(&state, &repo_id, |repo| finish_cherry_pick_in(repo, &message))
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
     use git2::{Repository, build::CheckoutBuilder};
+    use crate::repo::lock_retry::with_budget;
+    use crate::repo::test_support::state_for;
     use std::path::{Path, PathBuf};
+    use std::time::Duration;
 
     fn make_temp_dir() -> PathBuf {
         let id = uuid::Uuid::new_v4();
@@ -801,7 +734,7 @@ mod tests {
             std::thread::sleep(Duration::from_millis(30));
             std::fs::remove_file(l2).unwrap();
         });
-        resolve_with_side_for(Duration::from_millis(500), &repo, "shared.txt", true).unwrap();
+        with_budget(Duration::from_millis(500), || resolve_with_side(&repo, "shared.txt", true)).unwrap();
         h.join().unwrap();
         let fresh = Repository::open(&dir).unwrap();
         assert!(!fresh.index().unwrap().has_conflicts(), "resolution must be persisted");
@@ -813,7 +746,7 @@ mod tests {
         let (dir, repo) = conflicted_repo();
         let lock = repo.path().join("index.lock");
         std::fs::write(&lock, "").unwrap();
-        let r = resolve_with_side_for(Duration::from_millis(30), &repo, "shared.txt", true);
+        let r = with_budget(Duration::from_millis(30), || resolve_with_side(&repo, "shared.txt", true));
         std::fs::remove_file(&lock).unwrap();
         assert!(matches!(r, Err(Error::Git(ref e)) if e.code() == git2::ErrorCode::Locked), "{r:?}");
         let fresh = Repository::open(&dir).unwrap();
@@ -831,7 +764,69 @@ mod tests {
             let mut idx = repo.index().unwrap();
             idx.add_path(Path::new("shared.txt")).unwrap();
         }
-        assert!(finish_cherry_pick_impl(&repo, "msg").is_err(), "conflicts still exist on disk");
+        let (state, id) = state_for(repo);
+        let r = with_repo(&state, &id, |repo| finish_cherry_pick_in(repo, "msg"));
+        assert!(r.is_err(), "conflicts still exist on disk");
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    /// Stage a file in the cached handle's memory only (never written to disk).
+    fn stage_in_memory_only(repo: &Repository, name: &str) {
+        std::fs::write(repo.workdir().unwrap().join(name), "ghost\n").unwrap();
+        repo.index().unwrap().add_path(Path::new(name)).unwrap();
+    }
+
+    fn stash_count(repo: &mut Repository) -> usize {
+        let mut n = 0;
+        repo.stash_foreach(|_, _, _| {
+            n += 1;
+            true
+        })
+        .unwrap();
+        n
+    }
+
+    /// The autostash decision must be made on the on-disk index: a staged entry that
+    /// only exists in stale memory must not be stashed (which would also remove the
+    /// file from the working tree).
+    #[test]
+    fn cherry_pick_autostash_sees_the_on_disk_index_not_stale_memory() {
+        let (dir, repo) = make_repo();
+        let root = write_commit(&repo, "base.txt", "base\n", "initial");
+        let main_ref = repo.head().unwrap().name().unwrap().to_string();
+        repo.branch("feat", &repo.find_commit(root).unwrap(), false).unwrap();
+        checkout(&repo, "refs/heads/feat");
+        let feat_oid = write_commit(&repo, "feature.txt", "feature\n", "feat");
+        checkout(&repo, &main_ref);
+        stage_in_memory_only(&repo, "ghost.txt");
+        let (state, id) = state_for(repo);
+
+        let r = with_repo(&state, &id, |repo| cherry_pick_in(repo, &feat_oid.to_string())).unwrap();
+
+        assert_eq!(r.kind, "staged");
+        let mut repos = state.0.lock().unwrap();
+        let repo = repos.get_mut(&id).unwrap();
+        assert_eq!(stash_count(repo), 0, "nothing on disk was dirty, so nothing may be stashed");
+        assert!(!repo.path().join("WAYPOINT_AUTOSTASH").exists());
+        assert!(dir.join("ghost.txt").exists(), "an untracked file must not be swept into a stash");
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn revert_autostash_sees_the_on_disk_index_not_stale_memory() {
+        let (dir, repo) = make_repo();
+        write_commit(&repo, "base.txt", "base\n", "initial");
+        let second = write_commit(&repo, "second.txt", "second\n", "second");
+        stage_in_memory_only(&repo, "ghost.txt");
+        let (state, id) = state_for(repo);
+
+        let r = with_repo(&state, &id, |repo| revert_commit_in(repo, &second.to_string())).unwrap();
+
+        assert_eq!(r.kind, "staged");
+        let mut repos = state.0.lock().unwrap();
+        let repo = repos.get_mut(&id).unwrap();
+        assert_eq!(stash_count(repo), 0, "nothing on disk was dirty, so nothing may be stashed");
+        assert!(dir.join("ghost.txt").exists(), "an untracked file must not be swept into a stash");
         let _ = std::fs::remove_dir_all(dir);
     }
 

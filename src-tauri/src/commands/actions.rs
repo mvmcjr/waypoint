@@ -3,10 +3,8 @@ use crate::git_text::CommitDecoder;
 use tauri::State;
 
 use crate::error::{Error, Result};
-use crate::repo::lock_retry::{
-    checkout_tree_for, fresh_index, reset_for, reset_hard_for, MAX_WAIT,
-};
-use crate::repo::{with_repo_blocking, RepoState};
+use crate::repo::lock_retry;
+use crate::repo::{with_repo, RepoState};
 
 /// Flatten a crate error back to a `git2::Error` for code paths that still
 /// speak `git2::Error` (the rewrite rollback chain).
@@ -48,9 +46,6 @@ fn replay_onto(
     sig: &git2::Signature,
     conflict_msg: &str,
 ) -> Result<()> {
-    // The cleanliness check below and the final checkout both read the shared
-    // in-memory index; make sure it is not stale state from an earlier command.
-    fresh_index(repo)?;
     ensure_no_operation_in_progress(repo)?;
     ensure_clean_for_rewrite(repo)?;
 
@@ -124,7 +119,7 @@ fn replay_onto(
     //    clean above); if that refuses, undo everything.
     let mut safe = git2::build::CheckoutBuilder::new();
     safe.safe();
-    let checkout = checkout_tree_for(MAX_WAIT, repo, last.as_object(), &mut safe).map_err(into_git);
+    let checkout = lock_retry::checkout_tree(repo, last.as_object(), &mut safe).map_err(into_git);
     if let Err(e) = checkout {
         let (mut steps, branch_stuck) = match rollback_replay(repo, branch_ref, old_tip, new_tip, prior_orig_head) {
             Ok(()) => (Vec::new(), false),
@@ -258,7 +253,7 @@ fn rollback_replay(
     let mut failures = Vec::new();
     let restored = failpoint("reset")
         .and_then(|_| repo.find_object(old_tip, None))
-        .and_then(|old| reset_hard_for(MAX_WAIT, repo, &old).map_err(into_git));
+        .and_then(|old| lock_retry::reset_hard(repo, &old).map_err(into_git));
     if let Err(e) = restored {
         failures.push(format!("index and working tree were not restored: {e}"));
     }
@@ -348,9 +343,7 @@ pub struct StatusInfo {
 /// Return counts of staged and unstaged (including untracked) changes.
 #[tauri::command]
 pub fn get_repo_status(repo_id: String, state: State<RepoState>) -> Result<StatusInfo> {
-    let repos = state.0.lock().unwrap();
-    let repo = repos.get(&repo_id).ok_or_else(|| Error::RepoNotFound(repo_id.clone()))?;
-    repo_status_impl(repo)
+    with_repo(&state, &repo_id, |repo| repo_status_impl(repo))
 }
 
 fn repo_status_impl(repo: &git2::Repository) -> Result<StatusInfo> {
@@ -398,9 +391,7 @@ pub struct HeadInfo {
 
 #[tauri::command]
 pub fn get_head_info(repo_id: String, state: State<RepoState>) -> Result<HeadInfo> {
-    let repos = state.0.lock().unwrap();
-    let repo = repos.get(&repo_id).ok_or_else(|| Error::RepoNotFound(repo_id.clone()))?;
-    head_info(repo)
+    with_repo(&state, &repo_id, |repo| head_info(repo))
 }
 
 fn head_info(repo: &git2::Repository) -> Result<HeadInfo> {
@@ -438,26 +429,17 @@ fn head_info(repo: &git2::Repository) -> Result<HeadInfo> {
 
 /// Checkout a local branch by short name (e.g. "main").
 #[tauri::command]
-pub async fn checkout_branch(app: tauri::AppHandle, repo_id: String, branch_name: String, force: bool) -> Result<()> {
-    with_repo_blocking(app, repo_id, move |repo| {
-        let refspec = format!("refs/heads/{}", branch_name);
-        do_checkout(repo, &refspec, force)
-    })
-    .await
+pub fn checkout_branch(repo_id: String, branch_name: String, force: bool, state: State<RepoState>) -> Result<()> {
+    with_repo(&state, &repo_id, |repo| do_checkout(repo, &format!("refs/heads/{branch_name}"), force))
 }
 
 /// Checkout a specific commit by OID (creates detached HEAD).
 #[tauri::command]
-pub async fn checkout_commit(app: tauri::AppHandle, repo_id: String, oid: String, force: bool) -> Result<()> {
-    with_repo_blocking(app, repo_id, move |repo| do_checkout(repo, &oid, force)).await
+pub fn checkout_commit(repo_id: String, oid: String, force: bool, state: State<RepoState>) -> Result<()> {
+    with_repo(&state, &repo_id, |repo| do_checkout(repo, &oid, force))
 }
 
 fn do_checkout(repo: &git2::Repository, refspec: &str, force: bool) -> Result<()> {
-    do_checkout_for(MAX_WAIT, repo, refspec, force)
-}
-
-fn do_checkout_for(max_wait: std::time::Duration, repo: &git2::Repository, refspec: &str, force: bool) -> Result<()> {
-    fresh_index(repo)?;
     let (obj, reference) = repo.revparse_ext(refspec)?;
 
     // Refuse BEFORE any mutation if this resolves to a local branch checked out in
@@ -498,7 +480,7 @@ fn do_checkout_for(max_wait: std::time::Duration, repo: &git2::Repository, refsp
         opts.safe();
     }
 
-    checkout_tree_for(max_wait, repo, &obj, &mut opts)?;
+    lock_retry::checkout_tree(repo, &obj, &mut opts)?;
 
     match reference {
         Some(gref) => repo.set_head(gref.name().unwrap_or(refspec))?,
@@ -513,14 +495,14 @@ fn do_checkout_for(max_wait: std::time::Duration, repo: &git2::Repository, refsp
 
 /// Create a new branch pointing at the given commit OID.
 #[tauri::command]
-pub async fn create_branch_at(
-    app: tauri::AppHandle,
+pub fn create_branch_at(
     repo_id: String,
     name: String,
     oid: String,
     checkout: bool,
+    state: State<RepoState>,
 ) -> Result<()> {
-    with_repo_blocking(app, repo_id, move |repo| create_branch_in(repo, &name, &oid, checkout)).await
+    with_repo(&state, &repo_id, |repo| create_branch_in(repo, &name, &oid, checkout))
 }
 
 fn create_branch_in(repo: &git2::Repository, name: &str, oid: &str, checkout: bool) -> Result<()> {
@@ -539,12 +521,11 @@ fn create_branch_in(repo: &git2::Repository, name: &str, oid: &str, checkout: bo
 /// Reset the current HEAD to the given commit OID.
 /// kind: "soft" | "mixed" | "hard"
 #[tauri::command]
-pub async fn reset_head(app: tauri::AppHandle, repo_id: String, oid: String, kind: String) -> Result<()> {
-    with_repo_blocking(app, repo_id, move |repo| reset_head_for(MAX_WAIT, repo, &oid, &kind)).await
+pub fn reset_head(repo_id: String, oid: String, kind: String, state: State<RepoState>) -> Result<()> {
+    with_repo(&state, &repo_id, |repo| reset_head_in(repo, &oid, &kind))
 }
 
-fn reset_head_for(max_wait: std::time::Duration, repo: &git2::Repository, oid: &str, kind: &str) -> Result<()> {
-    fresh_index(repo)?;
+fn reset_head_in(repo: &git2::Repository, oid: &str, kind: &str) -> Result<()> {
     let git_oid = git2::Oid::from_str(oid).map_err(|_| Error::CommitNotFound(oid.to_owned()))?;
     let obj = repo.find_object(git_oid, None)?;
 
@@ -554,14 +535,14 @@ fn reset_head_for(max_wait: std::time::Duration, repo: &git2::Repository, oid: &
         _ => git2::ResetType::Mixed,
     };
 
-    reset_for(max_wait, repo, &obj, reset_type)
+    lock_retry::reset(repo, &obj, reset_type)
 }
 
 /// Rebase the current branch onto the given commit.
 /// Aborts and returns an error if there are merge conflicts.
 #[tauri::command]
-pub async fn rebase_onto(app: tauri::AppHandle, repo_id: String, onto_oid: String) -> Result<()> {
-    with_repo_blocking(app, repo_id, move |repo| rebase_onto_impl(repo, &onto_oid)).await
+pub fn rebase_onto(repo_id: String, onto_oid: String, state: State<RepoState>) -> Result<()> {
+    with_repo(&state, &repo_id, |repo| rebase_onto_impl(repo, &onto_oid))
 }
 
 fn rebase_onto_impl(repo: &git2::Repository, onto_oid: &str) -> Result<()> {
@@ -707,9 +688,10 @@ fn resolve_squash_range<'r>(
 /// message. Validates the selection without mutating anything.
 #[tauri::command]
 pub fn get_squash_preview(repo_id: String, oids: Vec<String>, state: State<RepoState>) -> Result<SquashPreview> {
-    let repos = state.0.lock().unwrap();
-    let repo = repos.get(&repo_id).ok_or_else(|| Error::RepoNotFound(repo_id.clone()))?;
+    with_repo(&state, &repo_id, |repo| squash_preview_in(repo, &oids))
+}
 
+fn squash_preview_in(repo: &git2::Repository, oids: &[String]) -> Result<SquashPreview> {
     let head = repo.head()?;
     if !head.is_branch() {
         return Err(Error::InvalidArg(
@@ -720,7 +702,7 @@ pub fn get_squash_preview(repo_id: String, oids: Vec<String>, state: State<RepoS
         .target()
         .ok_or_else(|| Error::InvalidArg("HEAD has no target".into()))?;
 
-    let range = resolve_squash_range(repo, head_oid, &oids)?;
+    let range = resolve_squash_range(repo, head_oid, oids)?;
 
     // Oldest first: the oldest commit's summary becomes the subject; its body and
     // every later commit's full message become the body.
@@ -751,8 +733,8 @@ pub fn get_squash_preview(repo_id: String, oids: Vec<String>, state: State<RepoS
 /// then replay any descendants up to HEAD. Rewrites history on the current
 /// branch. Aborts and errors on conflict.
 #[tauri::command]
-pub async fn squash_commits(app: tauri::AppHandle, repo_id: String, oids: Vec<String>, message: String) -> Result<()> {
-    with_repo_blocking(app, repo_id, move |repo| squash_in(repo, &oids, &message)).await
+pub fn squash_commits(repo_id: String, oids: Vec<String>, message: String, state: State<RepoState>) -> Result<()> {
+    with_repo(&state, &repo_id, |repo| squash_in(repo, &oids, &message))
 }
 
 fn squash_in(repo: &git2::Repository, oids: &[String], message: &str) -> Result<()> {
@@ -866,8 +848,8 @@ fn assert_first_parent_chain_is_linear(
 /// already reachable from a remote-tracking branch (rewriting those would
 /// need a force-push) and commits behind a merge in the replay range.
 #[tauri::command]
-pub async fn reword_commit(app: tauri::AppHandle, repo_id: String, oid: String, message: String) -> Result<()> {
-    with_repo_blocking(app, repo_id, move |repo| reword_in(repo, &oid, &message)).await
+pub fn reword_commit(repo_id: String, oid: String, message: String, state: State<RepoState>) -> Result<()> {
+    with_repo(&state, &repo_id, |repo| reword_in(repo, &oid, &message))
 }
 
 fn reword_in(repo: &git2::Repository, oid: &str, message: &str) -> Result<()> {
@@ -964,8 +946,8 @@ pub enum CheckoutRemoteResult {
 ///   - behind       → fast-forward the local branch to the remote tip, check out
 ///   - diverged     → check out the remote tip detached, leaving local commits intact
 #[tauri::command]
-pub async fn checkout_remote_branch(app: tauri::AppHandle, repo_id: String, remote_branch: String, force: bool) -> Result<CheckoutRemoteResult> {
-    with_repo_blocking(app, repo_id, move |repo| checkout_remote_branch_impl(repo, &remote_branch, force)).await
+pub fn checkout_remote_branch(repo_id: String, remote_branch: String, force: bool, state: State<RepoState>) -> Result<CheckoutRemoteResult> {
+    with_repo(&state, &repo_id, |repo| checkout_remote_branch_impl(repo, &remote_branch, force))
 }
 
 fn checkout_remote_branch_impl(repo: &git2::Repository, remote_branch: &str, force: bool) -> Result<CheckoutRemoteResult> {
@@ -1035,9 +1017,7 @@ fn checkout_remote_branch_impl(repo: &git2::Repository, remote_branch: &str, for
 /// Destructive — invoked explicitly by the user (e.g. after a remote force-push).
 #[tauri::command]
 pub fn reset_branch_to_remote(repo_id: String, remote_branch: String, state: State<RepoState>) -> Result<()> {
-    let repos = state.0.lock().unwrap();
-    let repo = repos.get(&repo_id).ok_or_else(|| Error::RepoNotFound(repo_id.clone()))?;
-    reset_branch_to_remote_impl(repo, &remote_branch)
+    with_repo(&state, &repo_id, |repo| reset_branch_to_remote_impl(repo, &remote_branch))
 }
 
 fn reset_branch_to_remote_impl(repo: &git2::Repository, remote_branch: &str) -> Result<()> {
@@ -1079,9 +1059,7 @@ fn reset_branch_to_remote_impl(repo: &git2::Repository, remote_branch: &str) -> 
 /// Refuses to delete the currently checked-out branch.
 #[tauri::command]
 pub fn delete_branch(repo_id: String, name: String, state: State<RepoState>) -> Result<()> {
-    let repos = state.0.lock().unwrap();
-    let repo = repos.get(&repo_id).ok_or_else(|| Error::RepoNotFound(repo_id.clone()))?;
-    delete_branch_impl(repo, &name)
+    with_repo(&state, &repo_id, |repo| delete_branch_impl(repo, &name))
 }
 
 fn delete_branch_impl(repo: &git2::Repository, name: &str) -> Result<()> {
@@ -1118,9 +1096,7 @@ pub fn rename_branch(
     new_name: String,
     state: State<RepoState>,
 ) -> Result<()> {
-    let repos = state.0.lock().unwrap();
-    let repo = repos.get(&repo_id).ok_or_else(|| Error::RepoNotFound(repo_id.clone()))?;
-    rename_branch_impl(repo, &old_name, &new_name)
+    with_repo(&state, &repo_id, |repo| rename_branch_impl(repo, &old_name, &new_name))
 }
 
 fn rename_branch_impl(repo: &git2::Repository, old_name: &str, new_name: &str) -> Result<()> {
@@ -1957,7 +1933,7 @@ mod tests {
             std::thread::sleep(std::time::Duration::from_millis(30));
             std::fs::remove_file(l2).unwrap();
         });
-        reset_head_for(std::time::Duration::from_millis(500), &repo, &first.to_string(), "hard").unwrap();
+        lock_retry::with_budget(std::time::Duration::from_millis(500), || reset_head_in(&repo, &first.to_string(), "hard")).unwrap();
         h.join().unwrap();
         assert_eq!(repo.head().unwrap().target(), Some(first));
         assert!(!dir.join("b.txt").exists());
@@ -1971,7 +1947,7 @@ mod tests {
         let second = commit_wt_file(&repo, "b.txt", "two", "second");
         let lock = dir.join(".git").join("index.lock");
         std::fs::write(&lock, "").unwrap();
-        let r = reset_head_for(std::time::Duration::from_millis(30), &repo, &first.to_string(), "hard");
+        let r = lock_retry::with_budget(std::time::Duration::from_millis(30), || reset_head_in(&repo, &first.to_string(), "hard"));
         std::fs::remove_file(&lock).unwrap();
         assert!(matches!(r, Err(Error::Git(ref e)) if e.code() == git2::ErrorCode::Locked), "{r:?}");
         assert_eq!(repo.head().unwrap().target(), Some(second), "HEAD must not move on a failed reset");
@@ -1992,7 +1968,7 @@ mod tests {
             std::thread::sleep(std::time::Duration::from_millis(30));
             std::fs::remove_file(l2).unwrap();
         });
-        do_checkout_for(std::time::Duration::from_millis(500), &repo, &other, false).unwrap();
+        lock_retry::with_budget(std::time::Duration::from_millis(500), || do_checkout(&repo, &other, false)).unwrap();
         h.join().unwrap();
         assert_eq!(repo.head().unwrap().name(), Ok(other.as_str()));
         assert!(!dir.join("b.txt").exists());

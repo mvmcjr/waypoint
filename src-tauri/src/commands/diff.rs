@@ -4,7 +4,8 @@ use serde::Serialize;
 use tauri::State;
 
 use crate::error::{Error, Result};
-use crate::repo::RepoState;
+use crate::repo::lock_retry;
+use crate::repo::{reload_index, with_repo, RepoState};
 
 // Shared helper: walk a git2::Diff and collect FileDiff structs.
 fn collect_diff(diff: git2::Diff) -> Result<Vec<FileDiff>> {
@@ -140,12 +141,11 @@ pub fn get_commit_diff(
     oid: String,
     state: State<RepoState>,
 ) -> Result<Vec<FileDiff>> {
-    let repos = state.0.lock().unwrap();
-    let repo = repos.get(&repo_id).ok_or_else(|| Error::RepoNotFound(repo_id.clone()))?;
-
-    let (commit_tree, parent_tree) = commit_and_parent_tree(repo, &oid)?;
-    let diff = repo.diff_tree_to_tree(parent_tree.as_ref(), Some(&commit_tree), None)?;
-    collect_diff(diff)
+    with_repo(&state, &repo_id, |repo| {
+        let (commit_tree, parent_tree) = commit_and_parent_tree(repo, &oid)?;
+        let diff = repo.diff_tree_to_tree(parent_tree.as_ref(), Some(&commit_tree), None)?;
+        collect_diff(diff)
+    })
 }
 
 /// Same as `get_commit_diff` but scoped to one file and rendered with enough
@@ -158,20 +158,19 @@ pub fn get_commit_file_diff(
     path: String,
     state: State<RepoState>,
 ) -> Result<FileDiff> {
-    let repos = state.0.lock().unwrap();
-    let repo = repos.get(&repo_id).ok_or_else(|| Error::RepoNotFound(repo_id.clone()))?;
+    with_repo(&state, &repo_id, |repo| {
+        let (commit_tree, parent_tree) = commit_and_parent_tree(repo, &oid)?;
+        let mut opts = git2::DiffOptions::new();
+        // Exact match, not fnmatch: pathspec() glob-matches by default, so a
+        // filename containing `[`, `]`, `*`, or `?` (legal, and common via
+        // framework route conventions like `[id].tsx`) could otherwise match
+        // unintended sibling files.
+        opts.pathspec(&path).disable_pathspec_match(true).context_lines(FULL_FILE_CONTEXT_LINES);
+        let diff = repo.diff_tree_to_tree(parent_tree.as_ref(), Some(&commit_tree), Some(&mut opts))?;
 
-    let (commit_tree, parent_tree) = commit_and_parent_tree(repo, &oid)?;
-    let mut opts = git2::DiffOptions::new();
-    // Exact match, not fnmatch: pathspec() glob-matches by default, so a
-    // filename containing `[`, `]`, `*`, or `?` (legal, and common via
-    // framework route conventions like `[id].tsx`) could otherwise match
-    // unintended sibling files.
-    opts.pathspec(&path).disable_pathspec_match(true).context_lines(FULL_FILE_CONTEXT_LINES);
-    let diff = repo.diff_tree_to_tree(parent_tree.as_ref(), Some(&commit_tree), Some(&mut opts))?;
-
-    let files = collect_diff(diff)?;
-    files.into_iter().next().ok_or_else(|| Error::InvalidArg(format!("no diff for {path}")))
+        let files = collect_diff(diff)?;
+        files.into_iter().next().ok_or_else(|| Error::InvalidArg(format!("no diff for {path}")))
+    })
 }
 
 fn commit_and_parent_tree<'a>(
@@ -200,9 +199,7 @@ pub fn get_workdir_diff(
     staged: bool,
     state: State<RepoState>,
 ) -> Result<FileDiff> {
-    let repos = state.0.lock().unwrap();
-    let repo = repos.get(&repo_id).ok_or_else(|| Error::RepoNotFound(repo_id.clone()))?;
-    workdir_file_diff(repo, &path, staged, false)
+    with_repo(&state, &repo_id, |repo| workdir_file_diff(repo, &path, staged, false))
 }
 
 /// Same as `get_workdir_diff` but rendered with enough context to cover the
@@ -214,9 +211,7 @@ pub fn get_workdir_file_full(
     staged: bool,
     state: State<RepoState>,
 ) -> Result<FileDiff> {
-    let repos = state.0.lock().unwrap();
-    let repo = repos.get(&repo_id).ok_or_else(|| Error::RepoNotFound(repo_id.clone()))?;
-    workdir_file_diff(repo, &path, staged, true)
+    with_repo(&state, &repo_id, |repo| workdir_file_diff(repo, &path, staged, true))
 }
 
 fn workdir_file_diff(
@@ -270,9 +265,7 @@ pub fn stage_hunk(
     full_file: bool,
     state: State<RepoState>,
 ) -> Result<()> {
-    let repos = state.0.lock().unwrap();
-    let repo = repos.get(&repo_id).ok_or_else(|| Error::RepoNotFound(repo_id.clone()))?;
-    stage_hunk_impl(repo, &path, hunk_index, full_file)
+    with_repo(&state, &repo_id, |repo| stage_hunk_impl(repo, &path, hunk_index, full_file))
 }
 
 /// Unstage a single hunk (by its index within the file's staged diff) —
@@ -286,9 +279,7 @@ pub fn unstage_hunk(
     full_file: bool,
     state: State<RepoState>,
 ) -> Result<()> {
-    let repos = state.0.lock().unwrap();
-    let repo = repos.get(&repo_id).ok_or_else(|| Error::RepoNotFound(repo_id.clone()))?;
-    unstage_hunk_impl(repo, &path, hunk_index, full_file)
+    with_repo(&state, &repo_id, |repo| unstage_hunk_impl(repo, &path, hunk_index, full_file))
 }
 
 fn stage_hunk_impl(repo: &git2::Repository, path: &str, hunk_index: usize, full_file: bool) -> Result<()> {
@@ -326,6 +317,21 @@ fn unstage_hunk_impl(repo: &git2::Repository, path: &str, hunk_index: usize, ful
     apply_single_hunk(repo, diff, hunk_index, path)
 }
 
+/// One attempt at applying `diff` to the index. libgit2 modifies the shared in-memory
+/// index before writing it, so a write that fails on a held `index.lock` leaves the
+/// change applied in memory only: the index is reloaded first, so a retry (see
+/// `lock_retry::retry_on_locked`) applies to the on-disk state again instead of
+/// failing on already-applied hunks.
+fn apply_to_index(
+    repo: &git2::Repository,
+    diff: &git2::Diff,
+    opts: Option<&mut git2::ApplyOptions<'_>>,
+) -> Result<()> {
+    reload_index(repo)?;
+    repo.apply(diff, git2::ApplyLocation::Index, opts)?;
+    Ok(())
+}
+
 /// Apply only the hunk at `hunk_index` (in file order) from `diff` to the index.
 fn apply_single_hunk(
     repo: &git2::Repository,
@@ -333,19 +339,21 @@ fn apply_single_hunk(
     hunk_index: usize,
     path: &str,
 ) -> Result<()> {
-    let mut seen = 0usize;
     let mut applied = false;
-    let mut apply_opts = git2::ApplyOptions::new();
-    apply_opts.hunk_callback(|_hunk| {
-        let is_target = seen == hunk_index;
-        seen += 1;
-        if is_target {
-            applied = true;
-        }
-        is_target
-    });
-    repo.apply(&diff, git2::ApplyLocation::Index, Some(&mut apply_opts))?;
-    drop(apply_opts);
+    lock_retry::retry_on_locked(|| {
+        applied = false;
+        let mut seen = 0usize;
+        let mut apply_opts = git2::ApplyOptions::new();
+        apply_opts.hunk_callback(|_hunk| {
+            let is_target = seen == hunk_index;
+            seen += 1;
+            if is_target {
+                applied = true;
+            }
+            is_target
+        });
+        apply_to_index(repo, &diff, Some(&mut apply_opts))
+    })?;
 
     if !applied {
         return Err(Error::InvalidArg(format!("hunk {hunk_index} not found for {path}")));
@@ -365,9 +373,7 @@ pub fn stage_line(
     full_file: bool,
     state: State<RepoState>,
 ) -> Result<()> {
-    let repos = state.0.lock().unwrap();
-    let repo = repos.get(&repo_id).ok_or_else(|| Error::RepoNotFound(repo_id.clone()))?;
-    stage_line_impl(repo, &path, hunk_index, line_index, full_file)
+    with_repo(&state, &repo_id, |repo| stage_line_impl(repo, &path, hunk_index, line_index, full_file))
 }
 
 /// Unstage a single line (by its index within one hunk of the file's staged
@@ -381,9 +387,7 @@ pub fn unstage_line(
     full_file: bool,
     state: State<RepoState>,
 ) -> Result<()> {
-    let repos = state.0.lock().unwrap();
-    let repo = repos.get(&repo_id).ok_or_else(|| Error::RepoNotFound(repo_id.clone()))?;
-    unstage_line_impl(repo, &path, hunk_index, line_index, full_file)
+    with_repo(&state, &repo_id, |repo| unstage_line_impl(repo, &path, hunk_index, line_index, full_file))
 }
 
 fn stage_line_impl(
@@ -460,8 +464,7 @@ fn apply_single_line(
 
     let patch_text = build_single_line_patch(&file, &hunk, line_index, reverse_target);
     let patch_diff = git2::Diff::from_buffer(patch_text.as_bytes())?;
-    repo.apply(&patch_diff, git2::ApplyLocation::Index, None)?;
-    Ok(())
+    lock_retry::retry_on_locked(|| apply_to_index(repo, &patch_diff, None))
 }
 
 /// Like `collect_diff`, but only materializes the file's path/status and the
@@ -676,8 +679,11 @@ fn build_single_line_patch(file: &FileDiff, hunk: &Hunk, target_line_index: usiz
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::repo::lock_retry::with_budget;
+    use crate::repo::test_support::state_for;
     use git2::Repository;
     use std::path::{Path, PathBuf};
+    use std::time::Duration;
 
     fn make_temp_dir() -> PathBuf {
         let id = uuid::Uuid::new_v4();
@@ -1051,5 +1057,109 @@ mod tests {
         let diff = workdir_file_diff(&repo, "[id].txt", false, false).unwrap();
         assert_eq!(diff.path, "[id].txt");
         assert_eq!(diff.hunks[0].lines.len(), 2);
+    }
+
+    const TWO_HUNK_BASE: &str = "one\ntwo\nthree\nfour\nfive\nsix\nseven\nEIGHT\nnine\nten\n";
+    const TWO_HUNK_EDITED: &str = "ONE\ntwo\nthree\nfour\nfive\nsix\nseven\nEIGHT\nnine\nTEN\n";
+
+    /// A repo with `file.txt` edited in two separate hunks (nothing staged).
+    fn two_hunk_repo() -> (PathBuf, Repository) {
+        let (dir, repo) = make_repo();
+        write_commit(&repo, "file.txt", TWO_HUNK_BASE, "initial");
+        std::fs::write(dir.join("file.txt"), TWO_HUNK_EDITED).unwrap();
+        (dir, repo)
+    }
+
+    /// Hold `index.lock` for `hold`, then release it.
+    fn hold_index_lock(dir: &Path, hold: Duration) -> std::thread::JoinHandle<()> {
+        let lock = dir.join(".git").join("index.lock");
+        std::fs::write(&lock, "").unwrap();
+        std::thread::spawn(move || {
+            std::thread::sleep(hold);
+            std::fs::remove_file(lock).unwrap();
+        })
+    }
+
+    #[test]
+    fn stage_hunk_succeeds_when_the_index_lock_is_released_shortly() {
+        let (dir, repo) = two_hunk_repo();
+        let h = hold_index_lock(&dir, Duration::from_millis(30));
+
+        with_budget(Duration::from_millis(500), || stage_hunk_impl(&repo, "file.txt", 0, false))
+            .expect("should retry until the lock is released");
+        h.join().unwrap();
+
+        let fresh = Repository::open(&dir).unwrap();
+        let staged = read_index_content(&fresh, "file.txt");
+        assert!(staged.starts_with("ONE\n") && staged.ends_with("nine\nten\n"), "{staged}");
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn stage_line_succeeds_when_the_index_lock_is_released_shortly() {
+        let (dir, repo) = two_hunk_repo();
+        let h = hold_index_lock(&dir, Duration::from_millis(30));
+
+        // Hunk 0, line 0 is the deletion of "one".
+        with_budget(Duration::from_millis(500), || stage_line_impl(&repo, "file.txt", 0, 0, false))
+            .expect("should retry until the lock is released");
+        h.join().unwrap();
+
+        let fresh = Repository::open(&dir).unwrap();
+        assert!(!read_index_content(&fresh, "file.txt").starts_with("one\n"));
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn unstage_hunk_succeeds_when_the_index_lock_is_released_shortly() {
+        let (dir, repo) = two_hunk_repo();
+        let mut index = repo.index().unwrap();
+        index.add_path(Path::new("file.txt")).unwrap();
+        index.write().unwrap();
+        let h = hold_index_lock(&dir, Duration::from_millis(30));
+
+        with_budget(Duration::from_millis(500), || unstage_hunk_impl(&repo, "file.txt", 0, false))
+            .expect("should retry until the lock is released");
+        h.join().unwrap();
+
+        let fresh = Repository::open(&dir).unwrap();
+        let staged = read_index_content(&fresh, "file.txt");
+        assert!(staged.starts_with("one\n") && staged.ends_with("nine\nTEN\n"), "{staged}");
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn stage_hunk_reports_a_lock_held_past_the_budget_and_stages_nothing() {
+        let (dir, repo) = two_hunk_repo();
+        let h = hold_index_lock(&dir, Duration::from_millis(300));
+
+        let r = with_budget(Duration::from_millis(30), || stage_hunk_impl(&repo, "file.txt", 0, false));
+        assert!(matches!(r, Err(Error::Git(ref e)) if e.code() == git2::ErrorCode::Locked), "{r:?}");
+        h.join().unwrap();
+
+        let fresh = Repository::open(&dir).unwrap();
+        assert_eq!(read_index_content(&fresh, "file.txt"), TWO_HUNK_BASE);
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    /// A command that fails after changing the shared in-memory index must not be
+    /// persisted by a later hunk stage (`apply` writes the whole in-memory index).
+    #[test]
+    fn failed_command_does_not_leak_into_a_later_hunk_stage() {
+        let (dir, repo) = two_hunk_repo();
+        std::fs::write(dir.join("ghost.txt"), "g").unwrap();
+        let (state, id) = state_for(repo);
+
+        let failed: Result<()> = with_repo(&state, &id, |repo| {
+            repo.index()?.add_path(Path::new("ghost.txt"))?;
+            Err(Error::InvalidArg("boom".into()))
+        });
+        assert!(failed.is_err());
+
+        with_repo(&state, &id, |repo| stage_hunk_impl(repo, "file.txt", 0, false)).unwrap();
+
+        let fresh = Repository::open(&dir).unwrap();
+        assert!(fresh.index().unwrap().get_path(Path::new("ghost.txt"), 0).is_none(), "ghost.txt was persisted");
+        let _ = std::fs::remove_dir_all(dir);
     }
 }

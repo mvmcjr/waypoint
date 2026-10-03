@@ -3,12 +3,8 @@ use serde::Serialize;
 use tauri::State;
 
 use crate::error::{Error, Result};
-use std::time::Duration;
-
-use crate::repo::lock_retry::{
-    checkout_index_for, commit_for, fresh_index, reset_hard_for, write_index_for, MAX_WAIT,
-};
-use crate::repo::{run_blocking, with_repo_blocking, RepoState};
+use crate::repo::lock_retry;
+use crate::repo::{with_repo, RepoState};
 
 #[derive(Debug, Serialize)]
 pub struct FileStatus {
@@ -21,9 +17,10 @@ pub struct FileStatus {
 
 #[tauri::command]
 pub fn list_status(repo_id: String, state: State<RepoState>) -> Result<Vec<FileStatus>> {
-    let repos = state.0.lock().unwrap();
-    let repo = repos.get(&repo_id).ok_or_else(|| Error::RepoNotFound(repo_id.clone()))?;
+    with_repo(&state, &repo_id, |repo| list_status_in(repo))
+}
 
+fn list_status_in(repo: &git2::Repository) -> Result<Vec<FileStatus>> {
     let mut opts = git2::StatusOptions::new();
     opts.include_untracked(true)
         .include_ignored(false)
@@ -92,39 +89,37 @@ fn head_entry(tree_entry: &git2::TreeEntry<'_>, path: &str) -> git2::IndexEntry 
 
 /// Add a single file to the index (stage it).
 #[tauri::command]
-pub async fn stage_file(app: tauri::AppHandle, repo_id: String, path: String) -> Result<()> {
-    with_repo_blocking(app, repo_id, move |repo| stage_paths_for(MAX_WAIT, repo, &[path])).await
+pub fn stage_file(repo_id: String, path: String, state: State<RepoState>) -> Result<()> {
+    with_repo(&state, &repo_id, |repo| stage_paths_in(repo, &[path]))
 }
 
 /// Remove a single file from the index (unstage it), restoring HEAD's version.
 #[tauri::command]
-pub async fn unstage_file(app: tauri::AppHandle, repo_id: String, path: String) -> Result<()> {
-    with_repo_blocking(app, repo_id, move |repo| unstage_paths_for(MAX_WAIT, repo, &[path])).await
+pub fn unstage_file(repo_id: String, path: String, state: State<RepoState>) -> Result<()> {
+    with_repo(&state, &repo_id, |repo| unstage_paths_in(repo, &[path]))
 }
 
 /// Stage every change in the working tree (equivalent to `git add -A`).
 #[tauri::command]
-pub async fn stage_all(app: tauri::AppHandle, repo_id: String) -> Result<()> {
-    with_repo_blocking(app, repo_id, |repo| stage_all_for(MAX_WAIT, repo)).await
-}
-
-fn stage_all_for(max_wait: Duration, repo: &git2::Repository) -> Result<()> {
-    let mut index = fresh_index(repo)?;
-    // add_all handles new + modified files; update_all handles modifications + deletions.
-    index.add_all(["*"].iter(), git2::IndexAddOption::DEFAULT, None)?;
-    index.update_all(["*"].iter(), None)?;
-    write_index_for(max_wait, &mut index)
+pub fn stage_all(repo_id: String, state: State<RepoState>) -> Result<()> {
+    with_repo(&state, &repo_id, |repo| {
+        let mut index = repo.index()?;
+        // add_all handles new + modified files; update_all handles modifications + deletions.
+        index.add_all(["*"].iter(), git2::IndexAddOption::DEFAULT, None)?;
+        index.update_all(["*"].iter(), None)?;
+        lock_retry::write_index(&mut index)
+    })
 }
 
 /// Stage multiple files at once.
 #[tauri::command]
-pub async fn stage_paths(app: tauri::AppHandle, repo_id: String, paths: Vec<String>) -> Result<()> {
-    with_repo_blocking(app, repo_id, move |repo| stage_paths_for(MAX_WAIT, repo, &paths)).await
+pub fn stage_paths(repo_id: String, paths: Vec<String>, state: State<RepoState>) -> Result<()> {
+    with_repo(&state, &repo_id, |repo| stage_paths_in(repo, &paths))
 }
 
-fn stage_paths_for(max_wait: Duration, repo: &git2::Repository, paths: &[String]) -> Result<()> {
+fn stage_paths_in(repo: &git2::Repository, paths: &[String]) -> Result<()> {
     let workdir = crate::repo::workdir(repo)?;
-    let mut index = fresh_index(repo)?;
+    let mut index = repo.index()?;
     for path in paths {
         if workdir.join(path).exists() {
             index.add_path(Path::new(path))?;
@@ -133,17 +128,17 @@ fn stage_paths_for(max_wait: Duration, repo: &git2::Repository, paths: &[String]
             index.remove_path(Path::new(path))?;
         }
     }
-    write_index_for(max_wait, &mut index)
+    lock_retry::write_index(&mut index)
 }
 
 /// Unstage multiple files at once, restoring HEAD versions.
 #[tauri::command]
-pub async fn unstage_paths(app: tauri::AppHandle, repo_id: String, paths: Vec<String>) -> Result<()> {
-    with_repo_blocking(app, repo_id, move |repo| unstage_paths_for(MAX_WAIT, repo, &paths)).await
+pub fn unstage_paths(repo_id: String, paths: Vec<String>, state: State<RepoState>) -> Result<()> {
+    with_repo(&state, &repo_id, |repo| unstage_paths_in(repo, &paths))
 }
 
-fn unstage_paths_for(max_wait: Duration, repo: &git2::Repository, paths: &[String]) -> Result<()> {
-    let mut index = fresh_index(repo)?;
+fn unstage_paths_in(repo: &git2::Repository, paths: &[String]) -> Result<()> {
+    let mut index = repo.index()?;
 
     // No HEAD yet (empty repo): everything staged is new, so unstaging removes it.
     let head_tree: Option<git2::Tree> = match repo.head() {
@@ -160,7 +155,7 @@ fn unstage_paths_for(max_wait: Duration, repo: &git2::Repository, paths: &[Strin
         }
     }
 
-    write_index_for(max_wait, &mut index)
+    lock_retry::write_index(&mut index)
 }
 
 /// Discard all changes (staged and unstaged) for a single file.
@@ -168,20 +163,20 @@ fn unstage_paths_for(max_wait: Duration, repo: &git2::Repository, paths: &[Strin
 /// - Tracked file (exists in HEAD): restores index entry and working-tree file to HEAD.
 /// - New/untracked file (not in HEAD): removes the file from disk and from the index.
 #[tauri::command]
-pub async fn discard_file(app: tauri::AppHandle, repo_id: String, path: String) -> Result<()> {
-    with_repo_blocking(app, repo_id, move |repo| discard_paths_for(MAX_WAIT, repo, &[path])).await
+pub fn discard_file(repo_id: String, path: String, state: State<RepoState>) -> Result<()> {
+    with_repo(&state, &repo_id, |repo| discard_paths_in(repo, &[path]))
 }
 
 /// Discard all changes for a set of paths at once (e.g. a whole directory).
 /// Same rules as `discard_file` applied per-path in one index write.
 #[tauri::command]
-pub async fn discard_paths(app: tauri::AppHandle, repo_id: String, paths: Vec<String>) -> Result<()> {
-    with_repo_blocking(app, repo_id, move |repo| discard_paths_for(MAX_WAIT, repo, &paths)).await
+pub fn discard_paths(repo_id: String, paths: Vec<String>, state: State<RepoState>) -> Result<()> {
+    with_repo(&state, &repo_id, |repo| discard_paths_in(repo, &paths))
 }
 
-fn discard_paths_for(max_wait: Duration, repo: &git2::Repository, paths: &[String]) -> Result<()> {
+fn discard_paths_in(repo: &git2::Repository, paths: &[String]) -> Result<()> {
     let workdir = crate::repo::workdir(repo)?;
-    let mut index = fresh_index(repo)?;
+    let mut index = repo.index()?;
 
     let head_tree = match repo.head() {
         Ok(head) => Some(head.peel_to_tree()?),
@@ -206,7 +201,7 @@ fn discard_paths_for(max_wait: Duration, repo: &git2::Repository, paths: &[Strin
         }
     }
 
-    write_index_for(max_wait, &mut index)?;
+    lock_retry::write_index(&mut index)?;
 
     // Deleting from disk is irreversible, so it only happens after the index write
     // succeeded: a failed write leaves the files in place.
@@ -221,7 +216,7 @@ fn discard_paths_for(max_wait: Duration, repo: &git2::Repository, paths: &[Strin
         let mut co = git2::build::CheckoutBuilder::new();
         for p in &tracked { co.path(*p); }
         co.force().update_index(false);
-        checkout_index_for(max_wait, repo, &mut index, &mut co)?;
+        lock_retry::checkout_index(repo, &mut index, &mut co)?;
     }
 
     Ok(())
@@ -234,22 +229,14 @@ fn discard_paths_for(max_wait: Duration, repo: &git2::Repository, paths: &[Strin
 /// files that were already untracked are deleted, so previously-staged files survive
 /// on disk (unstaged) rather than being destroyed.
 #[tauri::command]
-pub async fn discard_all(app: tauri::AppHandle, repo_id: String) -> Result<()> {
-    run_blocking(app, move |state| {
-        let result = {
-            let repos = state.0.lock().unwrap();
-            let repo = repos.get(&repo_id).ok_or_else(|| Error::RepoNotFound(repo_id.clone()))?;
-            discard_all_in(repo)
-        };
-        reopen_cached(state, repo_id, result)
-    })
-    .await
+pub fn discard_all(repo_id: String, state: State<RepoState>) -> Result<()> {
+    let result = with_repo(&state, &repo_id, |repo| discard_all_in(repo));
+    reopen_cached(&state, repo_id, result)
 }
 
 /// Re-open with a fresh handle so libgit2's internal cache reflects the on-disk state.
-/// This also runs after a failed discard: a half-applied one may have left the cached
-/// handle's in-memory index differing from disk, and a later stage/commit would write
-/// that. The original error wins over a reopen failure.
+/// This also runs after a failed discard, whose half-applied work may have left the
+/// cached handle out of step with disk. The original error wins over a reopen failure.
 fn reopen_cached(state: &RepoState, repo_id: String, result: Result<()>) -> Result<()> {
     match git2::Repository::open(&repo_id) {
         Ok(fresh) => {
@@ -262,11 +249,6 @@ fn reopen_cached(state: &RepoState, repo_id: String, result: Result<()>) -> Resu
 }
 
 fn discard_all_in(repo: &git2::Repository) -> Result<()> {
-    discard_all_in_for(MAX_WAIT, repo)
-}
-
-/// [`discard_all_in`] with an explicit lock-retry budget (short in tests).
-fn discard_all_in_for(max_wait: Duration, repo: &git2::Repository) -> Result<()> {
     {
         // On an unborn HEAD the sweep below is restricted to the paths that were
         // already untracked before the index was emptied. Without that snapshot,
@@ -277,7 +259,7 @@ fn discard_all_in_for(max_wait: Duration, repo: &git2::Repository) -> Result<()>
             Ok(head) => {
                 let commit = head.peel_to_commit()?;
                 // Hard reset is idempotent, so it is safe to retry if index.lock is held.
-                reset_hard_for(max_wait, repo, commit.as_object())?;
+                lock_retry::reset_hard(repo, commit.as_object())?;
                 None
             }
             Err(e) if e.code() == git2::ErrorCode::UnbornBranch => {
@@ -298,7 +280,7 @@ fn discard_all_in_for(max_wait: Duration, repo: &git2::Repository) -> Result<()>
                 index.clear()?;
                 // Only the write is retried: the untracked snapshot above must not
                 // be retaken once the in-memory index has been cleared.
-                write_index_for(max_wait, &mut index)?;
+                lock_retry::write_index(&mut index)?;
                 Some(untracked)
             }
             Err(e) => return Err(e.into()),
@@ -373,13 +355,13 @@ fn contains_git_entry(dir: &std::path::Path) -> bool {
 
 /// Create a commit from the current index with the given message.
 #[tauri::command]
-pub async fn do_commit(app: tauri::AppHandle, repo_id: String, message: String) -> Result<()> {
-    with_repo_blocking(app, repo_id, move |repo| commit_in_for(MAX_WAIT, repo, &message)).await
+pub fn do_commit(repo_id: String, message: String, state: State<RepoState>) -> Result<()> {
+    with_repo(&state, &repo_id, |repo| commit_in(repo, &message))
 }
 
-fn commit_in_for(max_wait: Duration, repo: &git2::Repository, message: &str) -> Result<()> {
+fn commit_in(repo: &git2::Repository, message: &str) -> Result<()> {
     let sig = repo.signature()?;
-    let mut index = fresh_index(repo)?;
+    let mut index = repo.index()?;
     let tree_oid = index.write_tree()?;
     let tree = repo.find_tree(tree_oid)?;
 
@@ -390,14 +372,14 @@ fn commit_in_for(max_wait: Duration, repo: &git2::Repository, message: &str) -> 
     };
     let parents: Vec<&git2::Commit> = parent_commits.iter().collect();
 
-    commit_for(max_wait, repo, Some("HEAD"), &sig, message, &tree, &parents)?;
+    lock_retry::commit(repo, Some("HEAD"), &sig, message, &tree, &parents)?;
     Ok(())
 }
 
 /// Amend the HEAD commit: replace its tree with the current index and update the message.
 #[tauri::command]
-pub async fn amend_commit(app: tauri::AppHandle, repo_id: String, message: String) -> Result<()> {
-    with_repo_blocking(app, repo_id, move |repo| amend_in(repo, &message)).await
+pub fn amend_commit(repo_id: String, message: String, state: State<RepoState>) -> Result<()> {
+    with_repo(&state, &repo_id, |repo| amend_in(repo, &message))
 }
 
 /// Core of `amend_commit`, matching `git commit --amend`: the new message is
@@ -418,7 +400,7 @@ fn amend_in(repo: &git2::Repository, message: &str) -> Result<()> {
 /// user. The branch (or detached HEAD) only moves if it still points at `old`,
 /// so a concurrent change is refused instead of overwritten.
 fn amend_from(repo: &git2::Repository, old: &git2::Commit, branch_ref: Option<&str>, message: &str) -> Result<()> {
-    let mut index = fresh_index(repo)?;
+    let mut index = repo.index()?;
     let tree_oid = index.write_tree()?;
 
     let sig = repo.signature()?;
@@ -448,8 +430,11 @@ fn amend_from(repo: &git2::Repository, old: &git2::Commit, branch_ref: Option<&s
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::repo::lock_retry::with_budget;
+    use crate::repo::test_support::state_for;
     use git2::Repository;
     use std::path::{Path, PathBuf};
+    use std::time::Duration;
 
     #[test]
     fn amend_over_latin1_commit_transcodes_author_like_git() {
@@ -693,7 +678,7 @@ mod tests {
         let (dir, repo) = crate::repo::test_support::make_repo_with_commit();
         let lock = dir.join(".git").join("index.lock");
         std::fs::write(&lock, "").unwrap();
-        let err = discard_all_in_for(Duration::from_millis(30), &repo).expect_err("must fail while locked");
+        let err = with_budget(Duration::from_millis(30), || discard_all_in(&repo)).expect_err("must fail while locked");
         match err {
             Error::Git(e) => {
                 assert_eq!(e.code(), git2::ErrorCode::Locked);
@@ -718,7 +703,7 @@ mod tests {
             std::thread::sleep(Duration::from_millis(30));
             std::fs::remove_file(l2).unwrap();
         });
-        discard_all_in_for(Duration::from_millis(500), &repo).expect("should retry until the lock is released");
+        with_budget(Duration::from_millis(500), || discard_all_in(&repo)).expect("should retry until the lock is released");
         h.join().unwrap();
         assert_eq!(std::fs::read_to_string(dir.join("a.txt")).unwrap(), "hello");
         assert!(!dir.join("junk.txt").exists());
@@ -731,46 +716,85 @@ mod tests {
     }
 
     /// A failed discard on an unborn HEAD clears the cached handle's in-memory index
-    /// before the write fails. The next index-writing command starts from a freshly
-    /// reloaded index, so the stale (empty) state is never persisted.
+    /// before the write fails. The accessor reloads after the failure, so the stale
+    /// (empty) state is never persisted by the next command.
     #[test]
     fn failed_discard_on_unborn_head_does_not_poison_the_next_command() {
         let (dir, repo) = make_repo();
         stage(&repo, "one.txt", "1");
         stage(&repo, "two.txt", "2");
+        let (state, id) = state_for(repo);
         let lock = dir.join(".git").join("index.lock");
         std::fs::write(&lock, "").unwrap();
 
-        discard_all_in_for(Duration::from_millis(30), &repo).expect_err("lock outlasts the budget");
+        with_budget(Duration::from_millis(30), || with_repo(&state, &id, |repo| discard_all_in(repo)))
+            .expect_err("lock outlasts the budget");
         std::fs::remove_file(&lock).unwrap();
 
         std::fs::write(dir.join("three.txt"), "3").unwrap();
-        stage_paths_for(MAX_WAIT, &repo, &["three.txt".to_string()]).unwrap();
+        with_repo(&state, &id, |r| stage_paths_in(r, &["three.txt".to_string()])).unwrap();
         let fresh = Repository::open(&dir).unwrap();
         assert_eq!(staged_paths(&fresh), ["one.txt", "three.txt", "two.txt"]);
         let _ = std::fs::remove_dir_all(dir);
     }
 
     /// A command that fails after mutating the shared in-memory index must not leak
-    /// the partial change into a later command's write.
+    /// the partial change into a later reader or writer.
     #[test]
-    fn failed_stage_paths_does_not_leak_into_the_next_command() {
+    fn failed_stage_paths_does_not_leak_into_readers_or_the_next_writer() {
         let (dir, repo) = crate::repo::test_support::make_repo_with_commit();
         std::fs::write(dir.join("a_new.txt"), "x").unwrap();
         std::fs::write(dir.join("b_new.txt"), "y").unwrap();
+        std::fs::create_dir(dir.join("adir")).unwrap();
+        let (state, id) = state_for(repo);
 
         // 2nd path is a directory: add_path fails mid-command, after a_new.txt was added.
-        std::fs::create_dir(dir.join("adir")).unwrap();
-        let r = stage_paths_for(
-            MAX_WAIT,
-            &repo,
-            &["a_new.txt".to_string(), "adir".to_string()],
-        );
+        let r = with_repo(&state, &id, |r| stage_paths_in(r, &["a_new.txt".to_string(), "adir".to_string()]));
         assert!(r.is_err());
 
-        stage_paths_for(MAX_WAIT, &repo, &["b_new.txt".to_string()]).unwrap();
+        // A reader must not see the half-applied change. Read the cached handle
+        // directly (not through `with_repo`, whose own up-front reload would mask a
+        // missing reload-on-error), as any code outside the accessor would.
+        {
+            let repos = state.0.lock().unwrap();
+            let files = list_status_in(repos.get(&id).unwrap()).unwrap();
+            let a_new = files.iter().find(|f| f.path == "a_new.txt").expect("untracked file listed");
+            assert_eq!(a_new.staged, None, "reader saw a half-applied stage");
+        }
+
+        // ...and the next writer must not persist it.
+        with_repo(&state, &id, |r| stage_paths_in(r, &["b_new.txt".to_string()])).unwrap();
         let fresh = Repository::open(&dir).unwrap();
         assert_eq!(staged_paths(&fresh), ["a.txt", "b_new.txt"], "a_new.txt must not be persisted");
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    /// A failed unstage leaves paths missing from the cached in-memory index. A later
+    /// `discard_all` on an unborn HEAD would treat them as untracked and delete files
+    /// that are still staged on disk.
+    #[test]
+    fn discard_all_after_a_failed_unstage_keeps_files_staged_on_disk() {
+        let (dir, repo) = make_repo();
+        stage(&repo, "one.txt", "1");
+        stage(&repo, "two.txt", "2");
+        std::fs::write(dir.join("loose.txt"), "l").unwrap();
+        let (state, id) = state_for(repo);
+
+        // Both paths are dropped from the in-memory index, then the write fails on a
+        // held index.lock.
+        let lock = dir.join(".git").join("index.lock");
+        std::fs::write(&lock, "").unwrap();
+        let r = with_budget(Duration::from_millis(30), || {
+            with_repo(&state, &id, |r| unstage_paths_in(r, &["one.txt".to_string(), "two.txt".to_string()]))
+        });
+        std::fs::remove_file(&lock).unwrap();
+        assert!(r.is_err());
+
+        with_repo(&state, &id, |repo| discard_all_in(repo)).unwrap();
+
+        assert!(dir.join("one.txt").exists(), "file staged on disk must survive");
+        assert!(dir.join("two.txt").exists(), "file staged on disk must survive");
+        assert!(!dir.join("loose.txt").exists(), "untracked file is still swept");
         let _ = std::fs::remove_dir_all(dir);
     }
 
@@ -782,9 +806,11 @@ mod tests {
         std::fs::write(dir.join("ghost.txt"), "boo").unwrap();
         let mut idx = repo.index().unwrap();
         idx.add_path(Path::new("ghost.txt")).unwrap(); // in memory only, never written
+        let (state, id) = state_for(repo);
 
-        commit_in_for(MAX_WAIT, &repo, "second").unwrap();
+        with_repo(&state, &id, |r| commit_in(r, "second")).unwrap();
 
+        let repo = Repository::open(&dir).unwrap();
         let tree = repo.head().unwrap().peel_to_tree().unwrap();
         assert!(tree.get_name("ghost.txt").is_none(), "stale in-memory entry leaked into the commit");
         let _ = std::fs::remove_dir_all(dir);
@@ -794,16 +820,14 @@ mod tests {
     fn discard_paths_keeps_untracked_files_when_the_index_write_fails() {
         let (dir, repo) = crate::repo::test_support::make_repo_with_commit();
         std::fs::write(dir.join("new.txt"), "keep me").unwrap();
-        stage_paths_for(MAX_WAIT, &repo, &["new.txt".to_string()]).unwrap();
+        stage_paths_in(&repo, &["new.txt".to_string()]).unwrap();
         std::fs::write(dir.join("loose.txt"), "untracked").unwrap();
         let lock = dir.join(".git").join("index.lock");
         std::fs::write(&lock, "").unwrap();
 
-        let r = discard_paths_for(
-            Duration::from_millis(30),
-            &repo,
-            &["new.txt".to_string(), "loose.txt".to_string()],
-        );
+        let r = with_budget(Duration::from_millis(30), || {
+            discard_paths_in(&repo, &["new.txt".to_string(), "loose.txt".to_string()])
+        });
         std::fs::remove_file(&lock).unwrap();
 
         assert!(matches!(r, Err(Error::Git(ref e)) if e.code() == git2::ErrorCode::Locked), "{r:?}");
@@ -818,7 +842,7 @@ mod tests {
     fn discard_paths_deletes_files_once_the_lock_is_released() {
         let (dir, repo) = crate::repo::test_support::make_repo_with_commit();
         std::fs::write(dir.join("new.txt"), "x").unwrap();
-        stage_paths_for(MAX_WAIT, &repo, &["new.txt".to_string()]).unwrap();
+        stage_paths_in(&repo, &["new.txt".to_string()]).unwrap();
         std::fs::write(dir.join("a.txt"), "changed and longer").unwrap();
         let lock = dir.join(".git").join("index.lock");
         std::fs::write(&lock, "").unwrap();
@@ -827,11 +851,9 @@ mod tests {
             std::thread::sleep(Duration::from_millis(30));
             std::fs::remove_file(l2).unwrap();
         });
-        discard_paths_for(
-            Duration::from_millis(500),
-            &repo,
-            &["new.txt".to_string(), "a.txt".to_string()],
-        )
+        with_budget(Duration::from_millis(500), || {
+            discard_paths_in(&repo, &["new.txt".to_string(), "a.txt".to_string()])
+        })
         .unwrap();
         h.join().unwrap();
         assert!(!dir.join("new.txt").exists());
@@ -843,13 +865,13 @@ mod tests {
     fn commit_retries_a_held_branch_ref_lock() {
         let (dir, repo) = crate::repo::test_support::make_repo_with_commit();
         std::fs::write(dir.join("b.txt"), "b").unwrap();
-        stage_paths_for(MAX_WAIT, &repo, &["b.txt".to_string()]).unwrap();
+        stage_paths_in(&repo, &["b.txt".to_string()]).unwrap();
         let branch = repo.head().unwrap().name().unwrap().to_owned();
         let lock = dir.join(".git").join(format!("{branch}.lock"));
         std::fs::write(&lock, "").unwrap();
 
         // Held past the budget: reported as a lock error, nothing committed.
-        let r = commit_in_for(Duration::from_millis(30), &repo, "two");
+        let r = with_budget(Duration::from_millis(30), || commit_in(&repo, "two"));
         assert!(matches!(r, Err(Error::Git(ref e)) if e.code() == git2::ErrorCode::Locked), "{r:?}");
 
         // Released shortly: the retry succeeds.
@@ -858,7 +880,7 @@ mod tests {
             std::thread::sleep(Duration::from_millis(30));
             std::fs::remove_file(l2).unwrap();
         });
-        commit_in_for(Duration::from_millis(500), &repo, "two").unwrap();
+        with_budget(Duration::from_millis(500), || commit_in(&repo, "two")).unwrap();
         h.join().unwrap();
         assert_eq!(repo.head().unwrap().peel_to_commit().unwrap().summary(), Ok(Some("two")));
         let _ = std::fs::remove_dir_all(dir);

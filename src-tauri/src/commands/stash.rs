@@ -3,7 +3,16 @@ use crate::git_text::{lossy, CommitDecoder};
 use tauri::State;
 
 use crate::error::{Error, Result};
-use crate::repo::RepoState;
+use crate::repo::{with_repo, RepoState};
+
+// Lock retry (see `repo::lock_retry`) is deliberately NOT applied to the stash
+// writes below. libgit2 updates `refs/stash` and its reflog *before* it touches the
+// index/working tree, so a lock error that surfaces from the later index write
+// leaves a half-done operation behind: re-running `stash_save` would create a
+// second stash of the same changes, re-running `stash_drop` would drop the next
+// entry, and re-running `stash_apply` would collide with the files the first attempt
+// already wrote. They are not idempotent, so a lock error is reported instead.
+// `with_repo` still reloads the index after such a failure.
 
 #[derive(Debug, Serialize)]
 pub struct StashEntry {
@@ -42,9 +51,10 @@ fn default_stash_message(repo: &git2::Repository) -> Result<String> {
 /// If `message` is blank an automatic message is generated from the branch and HEAD commit.
 #[tauri::command]
 pub fn stash_push(repo_id: String, message: String, state: State<RepoState>) -> Result<()> {
-    let mut repos = state.0.lock().unwrap();
-    let repo = repos.get_mut(&repo_id).ok_or_else(|| Error::RepoNotFound(repo_id.clone()))?;
+    with_repo(&state, &repo_id, |repo| stash_push_in(repo, message))
+}
 
+fn stash_push_in(repo: &mut git2::Repository, message: String) -> Result<()> {
     let sig = repo.signature()?;
 
     let msg = if message.trim().is_empty() {
@@ -60,9 +70,7 @@ pub fn stash_push(repo_id: String, message: String, state: State<RepoState>) -> 
 /// Return all stash entries, newest first (index 0 = most recent).
 #[tauri::command]
 pub fn list_stashes(repo_id: String, state: State<RepoState>) -> Result<Vec<StashEntry>> {
-    let repos = state.0.lock().unwrap();
-    let repo = repos.get(&repo_id).ok_or_else(|| Error::RepoNotFound(repo_id.clone()))?;
-    stash_entries(repo)
+    with_repo(&state, &repo_id, |repo| stash_entries(repo))
 }
 
 /// All stash entries, newest first (index 0 = stash@{0}). Reads the
@@ -116,34 +124,34 @@ fn resolve_stash_index(repo: &mut git2::Repository, oid: Option<String>, index: 
 /// or `index` (fallback for callers without an OID).
 #[tauri::command]
 pub fn pop_stash(repo_id: String, oid: Option<String>, index: Option<usize>, state: State<RepoState>) -> Result<()> {
-    let mut repos = state.0.lock().unwrap();
-    let repo = repos.get_mut(&repo_id).ok_or_else(|| Error::RepoNotFound(repo_id.clone()))?;
-    let idx = resolve_stash_index(repo, oid, index)?;
-    repo.stash_apply(idx, None)?;
-    repo.stash_drop(idx)?;
-    Ok(())
+    with_repo(&state, &repo_id, |repo| {
+        let idx = resolve_stash_index(repo, oid, index)?;
+        repo.stash_apply(idx, None)?;
+        repo.stash_drop(idx)?;
+        Ok(())
+    })
 }
 
 /// Apply a stash but keep it in the stash list. Addressed by `oid` (preferred)
 /// or `index` (fallback for callers without an OID).
 #[tauri::command]
 pub fn apply_stash(repo_id: String, oid: Option<String>, index: Option<usize>, state: State<RepoState>) -> Result<()> {
-    let mut repos = state.0.lock().unwrap();
-    let repo = repos.get_mut(&repo_id).ok_or_else(|| Error::RepoNotFound(repo_id.clone()))?;
-    let idx = resolve_stash_index(repo, oid, index)?;
-    repo.stash_apply(idx, None)?;
-    Ok(())
+    with_repo(&state, &repo_id, |repo| {
+        let idx = resolve_stash_index(repo, oid, index)?;
+        repo.stash_apply(idx, None)?;
+        Ok(())
+    })
 }
 
 /// Remove a stash without applying it. Addressed by `oid` (preferred) or
 /// `index` (fallback for callers without an OID).
 #[tauri::command]
 pub fn drop_stash(repo_id: String, oid: Option<String>, index: Option<usize>, state: State<RepoState>) -> Result<()> {
-    let mut repos = state.0.lock().unwrap();
-    let repo = repos.get_mut(&repo_id).ok_or_else(|| Error::RepoNotFound(repo_id.clone()))?;
-    let idx = resolve_stash_index(repo, oid, index)?;
-    repo.stash_drop(idx)?;
-    Ok(())
+    with_repo(&state, &repo_id, |repo| {
+        let idx = resolve_stash_index(repo, oid, index)?;
+        repo.stash_drop(idx)?;
+        Ok(())
+    })
 }
 
 /// Rename the stash at `index` by rewriting its message in the refs/stash reflog.
@@ -151,9 +159,10 @@ pub fn drop_stash(repo_id: String, oid: Option<String>, index: Option<usize>, st
 /// (preserving the stash's oids, order, and index).
 #[tauri::command]
 pub fn rename_stash(repo_id: String, index: usize, message: String, state: State<RepoState>) -> Result<()> {
-    let repos = state.0.lock().unwrap();
-    let repo = repos.get(&repo_id).ok_or_else(|| Error::RepoNotFound(repo_id.clone()))?;
+    with_repo(&state, &repo_id, |repo| rename_stash_in(repo, index, &message))
+}
 
+fn rename_stash_in(repo: &git2::Repository, index: usize, message: &str) -> Result<()> {
     let new_message = message.trim();
     if new_message.is_empty() {
         return Err(Error::InvalidArg("Stash name cannot be empty.".into()));

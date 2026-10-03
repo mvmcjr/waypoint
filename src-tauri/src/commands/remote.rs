@@ -1,9 +1,9 @@
 use serde::{Deserialize, Serialize};
-use tauri::State;
+use tauri::{Manager, State};
 
 use crate::error::{Error, Result};
-use crate::repo::lock_retry::{checkout_head_for, commit_for, fresh_index, write_index, MAX_WAIT};
-use crate::repo::RepoState;
+use crate::repo::lock_retry;
+use crate::repo::{with_repo, RepoState};
 
 #[derive(Debug, Serialize)]
 pub struct RemoteInfo {
@@ -611,15 +611,14 @@ fn plan_pull(repo: &git2::Repository, requested: Option<&str>, branch_name: &str
 
 #[tauri::command]
 pub async fn pull_branch(
+    app: tauri::AppHandle,
     repo_id: String,
     remote_name: Option<String>,
     state: State<'_, RepoState>,
 ) -> Result<PullResult> {
     // Get branch name and workdir, then release the lock before the async network call.
     // git2::Repository is not Sync, so we must not hold the MutexGuard across .await.
-    let (plan, workdir) = {
-        let repos = state.0.lock().unwrap();
-        let repo = repos.get(&repo_id).ok_or_else(|| Error::RepoNotFound(repo_id.clone()))?;
+    let (plan, workdir) = with_repo(&state, &repo_id, |repo| {
         let head = repo.head()?;
         if !head.is_branch() {
             return Err(Error::InvalidArg(
@@ -627,20 +626,27 @@ pub async fn pull_branch(
             ));
         }
         let branch_name = head.shorthand()?.to_string();
-        (plan_pull(repo, remote_name.as_deref(), &branch_name)?, crate::repo::workdir(repo)?)
-    }; // MutexGuard dropped here — safe to .await below
-    let (branch_name, remote_name, remote_branch, tracking_ref_name) =
-        (plan.branch_name.as_str(), plan.remote.as_str(), plan.remote_branch.as_str(), plan.tracking_ref.as_str());
+        Ok((plan_pull(repo, remote_name.as_deref(), &branch_name)?, crate::repo::workdir(repo)?))
+    })?;
 
     // Full ref name: a bare branch name lets git DWIM it to a same-named tag.
-    let fetch_ref = format!("refs/heads/{}", remote_branch);
-    run_git(&workdir, &["fetch", remote_name, &fetch_ref]).await?;
+    let fetch_ref = format!("refs/heads/{}", plan.remote_branch);
+    run_git(&workdir, &["fetch", &plan.remote, &fetch_ref]).await?;
 
-    // Re-acquire the lock for the merge logic (no more .await points after this).
-    let repos = state.0.lock().unwrap();
-    let repo = repos.get(&repo_id).ok_or_else(|| Error::RepoNotFound(repo_id.clone()))?;
-    // Drop any stale in-memory index state before reading or writing it below.
-    fresh_index(repo)?;
+    // The merge/fast-forward may sleep in the lock-retry helpers while holding the
+    // repo mutex, so it runs on the blocking pool rather than on a tokio worker.
+    tauri::async_runtime::spawn_blocking(move || {
+        let state = app.state::<RepoState>();
+        with_repo(&state, &repo_id, |repo| pull_merge_in(repo, &plan))
+    })
+    .await
+    .map_err(|e| Error::InvalidArg(e.to_string()))?
+}
+
+/// The post-fetch half of `pull_branch`: fast-forward or merge `plan`'s tracking ref.
+fn pull_merge_in(repo: &git2::Repository, plan: &PullPlan) -> Result<PullResult> {
+    let (branch_name, remote_name, remote_branch, tracking_ref_name) =
+        (plan.branch_name.as_str(), plan.remote.as_str(), plan.remote_branch.as_str(), plan.tracking_ref.as_str());
 
     // Guard against a concurrent checkout that happened while we were fetching.
     let current_head = repo.head()?;
@@ -691,14 +697,14 @@ pub async fn pull_branch(
         repo.set_head(&refname)?;
         // No .force() — libgit2 will protect unstaged working-tree changes
         // that would be overwritten by the fast-forward.
-        checkout_head_for(MAX_WAIT, repo, &mut git2::build::CheckoutBuilder::new())?;
+        lock_retry::checkout_head(repo, &mut git2::build::CheckoutBuilder::new())?;
         return Ok(plan.result("fast_forward", vec![]));
     }
 
     // Normal merge.
     repo.merge(&[&annotated], None, None)?;
     let mut index = repo.index()?;
-    write_index(&mut index)?;
+    lock_retry::write_index(&mut index)?;
 
     let merge_msg = format!("Merge remote-tracking branch '{}/{}'", remote_name, remote_branch);
 
@@ -717,7 +723,7 @@ pub async fn pull_branch(
     let other_commit = repo.find_commit(tracking_oid)?;
     let tree_oid = index.write_tree()?;
     let tree = repo.find_tree(tree_oid)?;
-    commit_for(MAX_WAIT, repo, Some("HEAD"), &sig, &merge_msg, &tree, &[&head_commit, &other_commit])?;
+    lock_retry::commit(repo, Some("HEAD"), &sig, &merge_msg, &tree, &[&head_commit, &other_commit])?;
     crate::commands::merge::cleanup_merge_state(repo);
 
     Ok(plan.result("merged", vec![]))
