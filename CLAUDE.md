@@ -166,7 +166,7 @@ Waypoint supports third-party plugins: small JS packages (local folder or GitHub
 1. **Backend** (`src-tauri/src/commands/`):
    - Add a new command function in the appropriate module (e.g., `actions.rs` for branch ops)
    - Accept `repoId: String` and `state: State<RepoState>` as parameters
-   - Reach the repo only through `repo::with_repo(&state, &repo_id, |repo| ...)` (reloads the index before the closure and again if it fails); keep the command a plain synchronous `pub fn` so commands run serialized in arrival order. Use `lock_retry::*` helpers for index/ref writes
+   - Commands that read or write the index or the working tree go through `repo::with_repo(&state, &repo_id, |repo| ...)` (refreshes the index if it changed on disk before the closure, force-reloads it if the closure fails); modules that only touch refs/config/worktree metadata (`tags.rs`, `worktrees.rs`, `history.rs`, `repo.rs`, parts of `remote.rs`) lock `RepoState` directly. Keep the command a plain synchronous `pub fn` so commands run serialized in arrival order. Index/ref writes that can contend with an external `git` (index.lock, ref locks) go through the `lock_retry::*` helpers (`commit` retries only a never-acquired lock, so it cannot duplicate reflog entries)
    - Return `Result<T>` (will be serialized to frontend)
    - Register the command in `lib.rs` in the `invoke_handler!` macro
 

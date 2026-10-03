@@ -16,7 +16,9 @@ pub(crate) fn workdir(repo: &git2::Repository) -> Result<std::path::PathBuf> {
         .map(|p| p.to_path_buf())
 }
 
-/// Re-read the repo's index from disk.
+/// Re-read the repo's index from disk, unconditionally (`force`). Use after a failure,
+/// which may have left half-applied in-memory changes; before a command, `with_repo`
+/// uses the stamp-checked [`refresh_index`] instead.
 ///
 /// libgit2 shares one in-memory index between every handle of a cached
 /// `Repository`. A command that mutates it and then fails part-way (a path that does
@@ -27,10 +29,19 @@ pub(crate) fn reload_index(repo: &git2::Repository) -> Result<()> {
     Ok(())
 }
 
+/// Re-read the index only if the file changed on disk (libgit2 compares its stamp).
+/// In-memory state never survives between commands (a writer either persists its
+/// changes or fails, which forces a reload), so this is enough before a command and
+/// spares polled readers a full index parse.
+fn refresh_index(repo: &git2::Repository) -> Result<()> {
+    repo.index()?.read(false)?;
+    Ok(())
+}
+
 /// The single way a command reaches its cached repository.
 ///
 /// Locks [`RepoState`], looks up `repo_id` and runs `f` on it, with the index
-/// reloaded from disk before `f` (so it never sees stale in-memory state, e.g. from
+/// refreshed from disk before `f` if it changed (so it never sees stale in-memory state, e.g. from
 /// edits made by an external `git`) and again after `f` fails (so a half-applied
 /// command is never visible to a reader or written by the next command). Commands
 /// are plain synchronous Tauri commands, so they run one at a time in the order the
@@ -48,7 +59,7 @@ pub(crate) fn with_repo<T>(
     let mut repos = state.0.lock().unwrap();
     let repo = repos.get_mut(repo_id).ok_or_else(|| Error::RepoNotFound(repo_id.to_owned()))?;
     ensure_present(repo)?;
-    reload_index(repo)?;
+    refresh_index(repo)?;
     let result = f(repo);
     if result.is_err() {
         // The command's own error wins over a reload failure.
@@ -304,6 +315,25 @@ pub(crate) mod test_support {
 mod tests {
     use super::test_support::*;
     use super::*;
+
+    /// `with_repo` refreshes with a stamp check (`read(false)`): an index written by
+    /// another process since the last command must still be picked up.
+    #[test]
+    fn with_repo_sees_an_index_written_by_another_handle() {
+        let (dir, repo) = make_repo_with_commit();
+        let (state, id) = state_for(repo);
+        with_repo(&state, &id, |_| Ok(())).unwrap();
+
+        std::fs::write(dir.join("ext.txt"), "x").unwrap();
+        let other = git2::Repository::open(&dir).unwrap();
+        let mut idx = other.index().unwrap();
+        idx.add_path(Path::new("ext.txt")).unwrap();
+        idx.write().unwrap();
+
+        let staged = with_repo(&state, &id, |r| Ok(r.index()?.get_path(Path::new("ext.txt"), 0).is_some())).unwrap();
+        assert!(staged, "external index write not picked up");
+        let _ = std::fs::remove_dir_all(dir);
+    }
 
     #[test]
     fn main_sees_linked_worktree_branch() {

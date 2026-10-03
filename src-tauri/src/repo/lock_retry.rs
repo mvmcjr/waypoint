@@ -28,6 +28,14 @@ fn is_locked(e: &Error) -> bool {
             || (g.class() == git2::ErrorClass::Os && g.message().contains("rename lockfile")))
 }
 
+/// True only when the lock was never acquired (`ErrorCode::Locked`), so the failed
+/// operation wrote nothing and re-running it cannot duplicate side effects.
+/// [`is_locked`] also accepts the Windows rename failure, which happens at the very
+/// end of a write, after other files may already have been appended to.
+fn is_lock_held(e: &Error) -> bool {
+    matches!(e, Error::Git(g) if g.code() == git2::ErrorCode::Locked)
+}
+
 /// The retry budget for the current call: [`MAX_WAIT`], except in tests, which can
 /// shorten it for the running thread with [`with_budget`].
 fn budget() -> Duration {
@@ -68,13 +76,17 @@ pub(crate) use test_budget::with_budget;
 /// Run `op`, retrying with short backoff for up to the budget ([`MAX_WAIT`]) while
 /// it fails with a git lock error. Other errors, and the last lock error, are
 /// returned unchanged. `op` must be safe to run again after a failed attempt.
-pub(crate) fn retry_on_locked<T>(mut op: impl FnMut() -> Result<T>) -> Result<T> {
+pub(crate) fn retry_on_locked<T>(op: impl FnMut() -> Result<T>) -> Result<T> {
+    retry_while(is_locked, op)
+}
+
+fn retry_while<T>(retryable: fn(&Error) -> bool, mut op: impl FnMut() -> Result<T>) -> Result<T> {
     let max_wait = budget();
     let start = Instant::now();
     let mut backoff = FIRST_BACKOFF;
     loop {
         match op() {
-            Err(e) if is_locked(&e) && start.elapsed() + backoff <= max_wait => {
+            Err(e) if retryable(&e) && start.elapsed() + backoff <= max_wait => {
                 std::thread::sleep(backoff);
                 backoff = (backoff * 2).min(MAX_BACKOFF);
             }
@@ -116,19 +128,12 @@ pub(crate) fn checkout_head(
     retry_on_locked(|| Ok(repo.checkout_head(Some(&mut *opts))?))
 }
 
-/// `checkout_index` (restoring working-tree files from `index`), retrying while locked.
-pub(crate) fn checkout_index(
-    repo: &git2::Repository,
-    index: &mut git2::Index,
-    opts: &mut git2::build::CheckoutBuilder<'_>,
-) -> Result<()> {
-    retry_on_locked(|| Ok(repo.checkout_index(Some(&mut *index), Some(&mut *opts))?))
-}
-
 /// Create a commit, retrying while a ref or reflog lock (`refs/heads/<b>.lock`,
-/// `HEAD.lock`, the reflog's `.lock`) is held. A retry writes the identical
-/// object (same tree, parents, signature) and the ref update is atomic, so it is
-/// safe; if HEAD moved meanwhile the failure is not a lock error and is not retried.
+/// `HEAD.lock`, the reflog's `.lock`) is held. Only `ErrorCode::Locked` is retried:
+/// the lock was not acquired, so nothing was written. libgit2 appends the branch and
+/// HEAD reflog entries before renaming the ref lockfile, so retrying a failed rename
+/// would append them twice. If HEAD moved meanwhile the failure is not a lock error
+/// and is not retried.
 pub(crate) fn commit(
     repo: &git2::Repository,
     update_ref: Option<&str>,
@@ -137,7 +142,7 @@ pub(crate) fn commit(
     tree: &git2::Tree<'_>,
     parents: &[&git2::Commit<'_>],
 ) -> Result<git2::Oid> {
-    retry_on_locked(|| Ok(repo.commit(update_ref, sig, sig, message, tree, parents)?))
+    retry_while(is_lock_held, || Ok(repo.commit(update_ref, sig, sig, message, tree, parents)?))
 }
 
 #[cfg(test)]
@@ -181,6 +186,24 @@ mod tests {
 
     fn git_err(code: git2::ErrorCode, class: git2::ErrorClass, msg: &str) -> Error {
         Error::Git(git2::Error::new(code, class, msg))
+    }
+
+    #[test]
+    fn commit_predicate_retries_only_a_lock_that_was_never_acquired() {
+        use git2::{ErrorClass as C, ErrorCode as K};
+        let rename = || git_err(K::GenericError, C::Os, "failed to rename lockfile to 'x': Access is denied.");
+        assert!(is_locked(&rename()), "index writes still retry the rename failure");
+        assert!(!is_lock_held(&rename()), "commit must not retry after the reflog was appended");
+        assert!(is_lock_held(&git_err(K::Locked, C::Reference, "locked")));
+        assert!(!is_lock_held(&Error::InvalidArg("x".into())));
+
+        let mut n = 0;
+        let r: Result<()> = retry_while(is_lock_held, || {
+            n += 1;
+            Err(rename())
+        });
+        assert!(r.is_err());
+        assert_eq!(n, 1);
     }
 
     #[test]

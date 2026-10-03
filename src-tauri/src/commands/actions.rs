@@ -347,8 +347,6 @@ pub fn get_repo_status(repo_id: String, state: State<RepoState>) -> Result<Statu
 }
 
 fn repo_status_impl(repo: &git2::Repository) -> Result<StatusInfo> {
-    crate::repo::ensure_present(repo)?;
-
     let mut opts = git2::StatusOptions::new();
     opts.include_untracked(true).include_ignored(false);
 
@@ -2215,7 +2213,8 @@ mod tests {
         let (main_dir, main) = crate::repo::test_support::make_repo_with_commit();
         let (wt_dir, wt) = crate::repo::test_support::add_worktree(&main, "stgone2", "feat");
         std::fs::remove_dir_all(&wt_dir).unwrap();
-        let err = repo_status_impl(&wt).unwrap_err();
+        let (state, id) = crate::repo::test_support::state_for(wt);
+        let err = with_repo(&state, &id, |r| repo_status_impl(r)).unwrap_err();
         assert!(err.to_string().starts_with("repo gone:"), "{err}");
         let _ = std::fs::remove_dir_all(main_dir);
     }

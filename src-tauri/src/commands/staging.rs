@@ -184,7 +184,7 @@ fn discard_paths_in(repo: &git2::Repository, paths: &[String]) -> Result<()> {
     };
 
     let mut tracked: Vec<&str> = Vec::new();
-    let mut to_delete: Vec<std::path::PathBuf> = Vec::new();
+    let mut to_delete: Vec<(&str, std::path::PathBuf)> = Vec::new();
 
     for path in paths {
         match head_tree.as_ref().and_then(|t| t.get_path(Path::new(path)).ok()) {
@@ -196,27 +196,39 @@ fn discard_paths_in(repo: &git2::Repository, paths: &[String]) -> Result<()> {
                 // New file with no HEAD version: drop it from the index and, once
                 // that is persisted, from disk.
                 let _ = index.remove_path(Path::new(path));
-                to_delete.push(workdir.join(path));
+                to_delete.push((path, workdir.join(path)));
             }
         }
     }
 
     lock_retry::write_index(&mut index)?;
 
-    // Deleting from disk is irreversible, so it only happens after the index write
-    // succeeded: a failed write leaves the files in place.
-    for full in &to_delete {
-        if full.exists() {
-            std::fs::remove_file(full).map_err(|e| Error::InvalidArg(e.to_string()))?;
-        }
-    }
-
     if !tracked.is_empty() {
-        // Restore working-tree files from the now-updated index.
+        // Restore working-tree files from the now-updated index. `update_index(false)`
+        // means libgit2 never writes the index here, so there is no lock to retry.
         let mut co = git2::build::CheckoutBuilder::new();
         for p in &tracked { co.path(*p); }
         co.force().update_index(false);
-        lock_retry::checkout_index(repo, &mut index, &mut co)?;
+        repo.checkout_index(Some(&mut index), Some(&mut co))?;
+    }
+
+    // Deleting from disk is irreversible, so it happens last: only after the index
+    // write succeeded (a failed write leaves the files in place), and after the
+    // tracked files are restored, so a removal failure never leaves index and working
+    // tree disagreeing about them. Every removal is attempted; failures are reported.
+    let mut failed: Vec<String> = Vec::new();
+    for (path, full) in &to_delete {
+        if full.exists() {
+            if let Err(e) = std::fs::remove_file(full) {
+                failed.push(format!("{path} ({e})"));
+            }
+        }
+    }
+    if !failed.is_empty() {
+        return Err(Error::InvalidArg(format!(
+            "could not remove untracked file(s): {}",
+            failed.join(", ")
+        )));
     }
 
     Ok(())
@@ -230,17 +242,30 @@ fn discard_paths_in(repo: &git2::Repository, paths: &[String]) -> Result<()> {
 /// on disk (unstaged) rather than being destroyed.
 #[tauri::command]
 pub fn discard_all(repo_id: String, state: State<RepoState>) -> Result<()> {
-    let result = with_repo(&state, &repo_id, |repo| discard_all_in(repo));
-    reopen_cached(&state, repo_id, result)
+    discard_all_with(&state, repo_id)
+}
+
+fn discard_all_with(state: &RepoState, repo_id: String) -> Result<()> {
+    let result = with_repo(state, &repo_id, |repo| discard_all_in(repo));
+    reopen_cached(state, repo_id, result)
 }
 
 /// Re-open with a fresh handle so libgit2's internal cache reflects the on-disk state.
 /// This also runs after a failed discard, whose half-applied work may have left the
 /// cached handle out of step with disk. The original error wins over a reopen failure.
+/// An unknown or vanished repo is never (re)registered: reopening it would resurrect a
+/// handle for a repo the user already closed.
 fn reopen_cached(state: &RepoState, repo_id: String, result: Result<()>) -> Result<()> {
+    if matches!(result, Err(Error::RepoNotFound(_) | Error::RepoGone(_))) {
+        return result;
+    }
     match git2::Repository::open(&repo_id) {
         Ok(fresh) => {
-            state.0.lock().unwrap().insert(repo_id, fresh);
+            // Replace only a handle that is still registered (it may have been closed
+            // since `with_repo` released the lock).
+            if let Some(slot) = state.0.lock().unwrap().get_mut(&repo_id) {
+                *slot = fresh;
+            }
         }
         Err(e) if result.is_ok() => return Err(e.into()),
         Err(_) => {}
@@ -798,15 +823,18 @@ mod tests {
         let _ = std::fs::remove_dir_all(dir);
     }
 
-    /// Staged state that only exists in the cached handle's memory (e.g. left by an
+    /// Staged state that only exists in the cached handle's memory (left by an
     /// earlier failed command) must not end up in a commit.
     #[test]
     fn commit_ignores_stale_in_memory_index() {
         let (dir, repo) = crate::repo::test_support::make_repo_with_commit();
         std::fs::write(dir.join("ghost.txt"), "boo").unwrap();
-        let mut idx = repo.index().unwrap();
-        idx.add_path(Path::new("ghost.txt")).unwrap(); // in memory only, never written
         let (state, id) = state_for(repo);
+        with_repo(&state, &id, |r| {
+            r.index()?.add_path(Path::new("ghost.txt"))?; // in memory only, never written
+            Err::<(), _>(Error::InvalidArg("boom".into()))
+        })
+        .unwrap_err();
 
         with_repo(&state, &id, |r| commit_in(r, "second")).unwrap();
 
@@ -883,6 +911,44 @@ mod tests {
         with_budget(Duration::from_millis(500), || commit_in(&repo, "two")).unwrap();
         h.join().unwrap();
         assert_eq!(repo.head().unwrap().peel_to_commit().unwrap().summary(), Ok(Some("two")));
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    /// A repo the user closed (or never opened) must not come back to life just
+    /// because `discard_all` re-opens by path after the lookup failed.
+    #[test]
+    fn discard_all_on_an_unknown_id_does_not_register_a_handle() {
+        let (dir, _repo) = crate::repo::test_support::make_repo_with_commit();
+        // The id is a real repo path that is not (or no longer) in the state map.
+        let id = dir.to_string_lossy().to_string();
+        let state = RepoState::default();
+
+        let r = discard_all_with(&state, id.clone());
+        assert!(matches!(r, Err(Error::RepoNotFound(_))), "{r:?}");
+        assert!(!state.0.lock().unwrap().contains_key(&id), "closed repo was resurrected");
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    /// If removing an untracked file fails, the tracked files named in the same call
+    /// are already restored in both the index and the working tree, and the error
+    /// names what could not be removed.
+    #[test]
+    fn discard_paths_restores_tracked_files_even_when_an_untracked_removal_fails() {
+        let (dir, repo) = crate::repo::test_support::make_repo_with_commit();
+        std::fs::write(dir.join("a.txt"), "changed and longer").unwrap();
+        // `remove_file` cannot remove a directory: a deterministic removal failure.
+        std::fs::create_dir(dir.join("stuck")).unwrap();
+        std::fs::write(dir.join("stuck").join("f.txt"), "x").unwrap();
+
+        let r = discard_paths_in(&repo, &["stuck".to_string(), "a.txt".to_string()]);
+
+        let msg = r.expect_err("removal of a directory must fail").to_string();
+        assert!(msg.contains("stuck"), "{msg}");
+        assert_eq!(std::fs::read_to_string(dir.join("a.txt")).unwrap(), "hello", "worktree restored");
+        let fresh = Repository::open(&dir).unwrap();
+        let head = fresh.head().unwrap().peel_to_tree().unwrap();
+        let entry = fresh.index().unwrap().get_path(Path::new("a.txt"), 0).unwrap();
+        assert_eq!(entry.id, head.get_name("a.txt").unwrap().id(), "index restored");
         let _ = std::fs::remove_dir_all(dir);
     }
 

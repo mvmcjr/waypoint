@@ -321,13 +321,17 @@ fn unstage_hunk_impl(repo: &git2::Repository, path: &str, hunk_index: usize, ful
 /// index before writing it, so a write that fails on a held `index.lock` leaves the
 /// change applied in memory only: the index is reloaded first, so a retry (see
 /// `lock_retry::retry_on_locked`) applies to the on-disk state again instead of
-/// failing on already-applied hunks.
+/// failing on already-applied hunks. The first attempt skips the reload: `with_repo`
+/// just did it.
 fn apply_to_index(
     repo: &git2::Repository,
     diff: &git2::Diff,
     opts: Option<&mut git2::ApplyOptions<'_>>,
+    is_retry: bool,
 ) -> Result<()> {
-    reload_index(repo)?;
+    if is_retry {
+        reload_index(repo)?;
+    }
     repo.apply(diff, git2::ApplyLocation::Index, opts)?;
     Ok(())
 }
@@ -340,8 +344,10 @@ fn apply_single_hunk(
     path: &str,
 ) -> Result<()> {
     let mut applied = false;
+    let mut attempts = 0u32;
     lock_retry::retry_on_locked(|| {
         applied = false;
+        attempts += 1;
         let mut seen = 0usize;
         let mut apply_opts = git2::ApplyOptions::new();
         apply_opts.hunk_callback(|_hunk| {
@@ -352,7 +358,7 @@ fn apply_single_hunk(
             }
             is_target
         });
-        apply_to_index(repo, &diff, Some(&mut apply_opts))
+        apply_to_index(repo, &diff, Some(&mut apply_opts), attempts > 1)
     })?;
 
     if !applied {
@@ -464,7 +470,11 @@ fn apply_single_line(
 
     let patch_text = build_single_line_patch(&file, &hunk, line_index, reverse_target);
     let patch_diff = git2::Diff::from_buffer(patch_text.as_bytes())?;
-    lock_retry::retry_on_locked(|| apply_to_index(repo, &patch_diff, None))
+    let mut attempts = 0u32;
+    lock_retry::retry_on_locked(|| {
+        attempts += 1;
+        apply_to_index(repo, &patch_diff, None, attempts > 1)
+    })
 }
 
 /// Like `collect_diff`, but only materializes the file's path/status and the
