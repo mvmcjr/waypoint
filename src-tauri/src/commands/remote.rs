@@ -372,7 +372,9 @@ fn classify_push(success: bool, stdout: &str, stderr: &str) -> Result<PushVerdic
         let e = stderr.trim();
         if e.is_empty() { fallback.trim().to_owned() } else { e.to_owned() }
     };
-    let summary = |line: &str| line.split('\t').nth(2).unwrap_or("").to_owned();
+    fn summary(line: &str) -> &str {
+        line.split('\t').nth(2).unwrap_or("")
+    }
     let overridable = |line: &str| {
         let summary = summary(line);
         summary.starts_with("[rejected]") && (summary.contains("(non-fast-forward)") || summary.contains("(fetch first)"))
@@ -430,7 +432,12 @@ fn ensure_lease_known(target: &PushTarget, force: bool) -> Result<()> {
 fn push_outcome(target: PushTarget, planned_oid: Option<String>, verdict: PushVerdict) -> PushOutcome {
     let (kind, reason, detail, expected_remote_oid) = match verdict {
         PushVerdict::Pushed => ("pushed", None, None, None),
-        PushVerdict::Rejected { reason, detail } => ("rejected", Some(reason.to_owned()), Some(detail), planned_oid),
+        // For fetch-first the planned tracking oid is known stale (the remote has
+        // commits we never fetched): hand out no lease a force push could use.
+        PushVerdict::Rejected { reason, detail } => {
+            let lease = if reason == "fetch_first" { None } else { planned_oid };
+            ("rejected", Some(reason.to_owned()), Some(detail), lease)
+        }
         PushVerdict::Stale { detail } => ("stale", None, Some(detail), None),
     };
     PushOutcome {
@@ -1080,7 +1087,7 @@ mod tests {
 
     #[test]
     fn porcelain_stale_info_is_a_stale_outcome_not_force_pushable() {
-        let got = outcome_of(false, STALE, "error: failed to push some refs to '/tmp/r.git'").unwrap();
+        let got = classify_push(false, STALE, "error: failed to push some refs to '/tmp/r.git'").unwrap();
         let PushVerdict::Stale { detail } = got else { panic!("expected stale, got {got:?}") };
         assert!(detail.contains("fetch and review"), "{detail}");
         let (_dir, repo) = make_repo();
@@ -1088,10 +1095,6 @@ mod tests {
         let out = push_outcome(target, Some("abc".into()), PushVerdict::Stale { detail });
         assert_eq!((out.kind.as_str(), out.reason), ("stale", None));
         assert_eq!(out.expected_remote_oid, None);
-    }
-
-    fn outcome_of(success: bool, stdout: &str, stderr: &str) -> Result<PushVerdict> {
-        classify_push(success, stdout, stderr)
     }
 
     fn rejected(v: PushVerdict) -> (&'static str, String) {
@@ -1109,32 +1112,34 @@ mod tests {
     #[test]
     fn porcelain_non_fast_forward_and_fetch_first_are_rejections_with_their_reason() {
         let stderr = "error: failed to push some refs\nhint: Updates were rejected";
-        let (reason, detail) = rejected(outcome_of(false, NON_FF, stderr).unwrap());
+        let (reason, detail) = rejected(classify_push(false, NON_FF, stderr).unwrap());
         assert_eq!(reason, "non_fast_forward");
         assert!(detail.contains("Updates were rejected"));
-        let (reason, detail) = rejected(outcome_of(false, FETCH_FIRST, stderr).unwrap());
+        let (reason, detail) = rejected(classify_push(false, FETCH_FIRST, stderr).unwrap());
         assert_eq!(reason, "fetch_first");
         assert!(detail.contains("Updates were rejected"));
         // Falls back to the status line when stderr is empty.
-        assert!(rejected(outcome_of(false, NON_FF, "").unwrap()).1.contains("non-fast-forward"));
+        assert!(rejected(classify_push(false, NON_FF, "").unwrap()).1.contains("non-fast-forward"));
     }
 
     #[test]
     fn rejection_reason_is_exposed_on_the_outcome() {
         let (_dir, repo) = make_repo();
         for (out, want) in [(NON_FF, "non_fast_forward"), (FETCH_FIRST, "fetch_first")] {
-            let verdict = outcome_of(false, out, "").unwrap();
+            let verdict = classify_push(false, out, "").unwrap();
             let target = plan_push(&repo, Some("origin"), None, "main").unwrap();
             let o = push_outcome(target, Some("abc".into()), verdict);
             assert_eq!((o.kind.as_str(), o.reason.as_deref()), ("rejected", Some(want)));
-            assert_eq!(o.expected_remote_oid.as_deref(), Some("abc"));
+            // The planned tracking oid is known stale for fetch-first: no lease at all.
+            let lease = if want == "fetch_first" { None } else { Some("abc") };
+            assert_eq!(o.expected_remote_oid.as_deref(), lease, "{want}");
         }
     }
 
     #[test]
     fn porcelain_remote_rejected_is_an_error_not_force_pushable() {
         for out in [HOOK, DENY_NFF] {
-            let err = outcome_of(false, out, " ! [remote rejected] main -> main (hook)").unwrap_err();
+            let err = classify_push(false, out, " ! [remote rejected] main -> main (hook)").unwrap_err();
             assert!(err.to_string().contains("remote rejected"), "{err}");
         }
     }
@@ -1143,23 +1148,23 @@ mod tests {
     fn porcelain_success_flags_are_pushed() {
         for flag in [" ", "*", "+", "=", "-"] {
             let out = format!("To u\n{flag}\trefs/heads/main:refs/heads/main\t[new branch]\nDone\n");
-            assert_eq!(outcome_of(true, &out, "").unwrap(), PushVerdict::Pushed, "flag {flag:?}");
+            assert_eq!(classify_push(true, &out, "").unwrap(), PushVerdict::Pushed, "flag {flag:?}");
         }
-        assert_eq!(outcome_of(true, "To u\n=\trefs/heads/main:refs/heads/main\t[up to date]\nDone\n", "").unwrap(), PushVerdict::Pushed);
+        assert_eq!(classify_push(true, "To u\n=\trefs/heads/main:refs/heads/main\t[up to date]\nDone\n", "").unwrap(), PushVerdict::Pushed);
     }
 
     #[test]
     fn push_failure_without_a_status_line_is_an_error() {
-        let err = outcome_of(false, "", "fatal: Authentication failed for 'https://example.invalid/'").unwrap_err();
+        let err = classify_push(false, "", "fatal: Authentication failed for 'https://example.invalid/'").unwrap_err();
         assert!(err.to_string().contains("Authentication failed"));
         // A bare "non-fast-forward" in stderr alone no longer means rejection.
-        assert!(outcome_of(false, "", "remote: hook said non-fast-forward, fetch first").is_err());
+        assert!(classify_push(false, "", "remote: hook said non-fast-forward, fetch first").is_err());
     }
 
     #[test]
     fn other_rejected_reasons_are_errors() {
         let out = "To u\n!\trefs/tags/v1:refs/tags/v1\t[rejected] (already exists)\nDone\n";
-        assert!(outcome_of(false, out, "error: failed to push").is_err());
+        assert!(classify_push(false, out, "error: failed to push").is_err());
     }
 
     #[test]

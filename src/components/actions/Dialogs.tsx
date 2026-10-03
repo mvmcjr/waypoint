@@ -166,7 +166,8 @@ export function PushRejectedDialog({ repoId, branchName, target, reason, onClose
   const [stale, setStale] = useState(false);
   // Without the remote-tracking oid we can't say what a force push would overwrite.
   // A fetch-first rejection means the remote tip isn't known locally at all.
-  const unknownRemote = !target.expected_remote_oid || reason === "fetch_first";
+  const fetchFirst = reason === "fetch_first";
+  const unknownRemote = !target.expected_remote_oid;
 
   function fail(message: string, isStale = false) {
     if (isStale) {
@@ -198,21 +199,33 @@ export function PushRejectedDialog({ repoId, branchName, target, reason, onClose
         <DialogHeader>
           <DialogTitle>Push rejected</DialogTitle>
           <DialogDescription>
-            <code className="font-mono">{target.remote}/{target.branch}</code> has diverged from your local branch. You can force push to overwrite it.
+            {fetchFirst ? (
+              <>
+                <code className="font-mono">{target.remote}/{target.branch}</code> has commits you haven't fetched. Fetch, review, then push again.
+              </>
+            ) : (
+              <>
+                <code className="font-mono">{target.remote}/{target.branch}</code> has diverged from your local branch. You can force push to overwrite it.
+              </>
+            )}
           </DialogDescription>
         </DialogHeader>
-        <RiskBanner level="danger">
-          Force push will overwrite the remote branch and may cause data loss for collaborators.
-        </RiskBanner>
-        {unknownRemote && (
+        {!fetchFirst && (
+          <RiskBanner level="danger">
+            Force push will overwrite the remote branch and may cause data loss for collaborators.
+          </RiskBanner>
+        )}
+        {!fetchFirst && unknownRemote && (
           <ErrorNote msg="Fetch first so Waypoint can show what you'd overwrite, then push again." />
         )}
         {error && <ErrorNote msg={error} />}
         <DialogFooter>
-          <Button variant="outline" onClick={onClose} disabled={loading}>Cancel</Button>
-          <Button variant="destructive" onClick={handleForcePush} disabled={loading || stale || unknownRemote}>
-            {loading ? "Pushing…" : "Force push"}
-          </Button>
+          <Button variant="outline" onClick={onClose} disabled={loading}>{fetchFirst ? "Close" : "Cancel"}</Button>
+          {!fetchFirst && (
+            <Button variant="destructive" onClick={handleForcePush} disabled={loading || stale || unknownRemote}>
+              {loading ? "Pushing…" : "Force push"}
+            </Button>
+          )}
         </DialogFooter>
       </DialogContent>
     </Dialog>

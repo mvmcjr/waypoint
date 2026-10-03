@@ -472,16 +472,24 @@ describe("Dialogs", () => {
       expect(ipc.pushBranch).toHaveBeenCalledTimes(1);
     });
 
-    it("offers no force push for a fetch-first rejection and says to fetch first", () => {
+    it("tells a fetch-first rejection to fetch, review and push again, with no force push offered", () => {
       vi.mocked(ipc.pushBranch).mockClear();
-      // A fetch-first rejection can still carry a (stale) tracking oid.
+      // The backend's real fetch-first shape: no lease (expected_remote_oid null).
+      const target = { remote: "origin", branch: "main", set_upstream: false, expected_remote_oid: null };
+      render(<PushRejectedDialog repoId="repo1" branchName="main" target={target} reason="fetch_first" onClose={mockOnClose} onSuccess={mockOnSuccess} />);
+      expect(screen.getByText(/commits you haven't fetched/)).toBeInTheDocument();
+      expect(screen.getByText(/fetch, review, then push again/i)).toBeInTheDocument();
+      expect(screen.queryByText(/diverged/)).not.toBeInTheDocument();
+      expect(screen.queryByText(/You can force push/)).not.toBeInTheDocument();
+      expect(screen.queryByText(/Force push will overwrite/)).not.toBeInTheDocument();
+      expect(screen.queryByRole("button", { name: "Force push" })).not.toBeInTheDocument();
+      expect(ipc.pushBranch).not.toHaveBeenCalled();
+    });
+
+    it("never offers force push for a fetch-first rejection even if a tracking oid is present", () => {
       const target = { remote: "origin", branch: "main", set_upstream: false, expected_remote_oid: "abc123" };
       render(<PushRejectedDialog repoId="repo1" branchName="main" target={target} reason="fetch_first" onClose={mockOnClose} onSuccess={mockOnSuccess} />);
-      expect(screen.getByText(/Fetch first/)).toBeInTheDocument();
-      const button = screen.getByRole("button", { name: "Force push" });
-      expect(button).toBeDisabled();
-      fireEvent.click(button);
-      expect(ipc.pushBranch).not.toHaveBeenCalled();
+      expect(screen.queryByRole("button", { name: "Force push" })).not.toBeInTheDocument();
     });
 
     it("keeps Force push available for a non-fast-forward rejection", () => {

@@ -36,6 +36,7 @@ fn replay_onto(
     sig: &git2::Signature,
     conflict_msg: &str,
 ) -> Result<()> {
+    ensure_no_operation_in_progress(repo)?;
     ensure_clean_for_rewrite(repo)?;
 
     let mut walk = repo.revwalk()?;
@@ -87,8 +88,10 @@ fn replay_onto(
     //    (as git rebase does): libgit2's `set_head*` would log
     //    `checkout: moving from X to Y`, which `git checkout -` / `@{-N}` read.
     repo.reference("HEAD", old_tip, true, &format!("rebase (start): detach at {old_tip}"))?;
-    let reattach = || {
+    let reattach = || -> std::result::Result<(), git2::Error> {
+        failpoint("reattach")?;
         repo.reference_symbolic("HEAD", branch_ref, true, &format!("rebase (finish): returning to {branch_ref}"))
+            .map(|_| ())
     };
     // 2. Move the ref (guarded): if the branch moved meanwhile this fails having
     //    touched nothing, so index and working tree still match the branch.
@@ -106,23 +109,101 @@ fn replay_onto(
     //    clean above); if that refuses, undo everything.
     let checkout = repo.checkout_tree(last.as_object(), Some(git2::build::CheckoutBuilder::new().safe()));
     if let Err(e) = checkout {
-        let mut failures = match rollback_replay(repo, branch_ref, old_tip, new_tip, prior_orig_head) {
-            Ok(()) => Vec::new(),
-            Err(f) => vec![f],
+        let (mut steps, branch_stuck) = match rollback_replay(repo, branch_ref, old_tip, new_tip, prior_orig_head) {
+            Ok(()) => (Vec::new(), false),
+            Err(f) => (f.steps, f.branch_not_moved_back),
         };
-        if let Err(r) = reattach() {
-            failures.push(format!("HEAD could not be re-attached to {branch_ref}: {r}"));
+        // Re-attaching to a branch still at the new tip would contradict the
+        // tree just reset to the old tip: leave HEAD detached there instead.
+        if !branch_stuck {
+            if let Err(r) = reattach() {
+                steps.push(format!("HEAD could not be re-attached to {branch_ref}: {r}"));
+            }
         }
-        if failures.is_empty() {
+        if steps.is_empty() {
             return Err(Error::Git(e));
         }
         return Err(Error::Git(git2::Error::from_str(&format!(
-            "{e}; the rewrite could not be fully rolled back ({}); {branch_ref} may still point at {new_tip}",
-            failures.join("; ")
+            "{e}; the rewrite could not be fully rolled back ({})",
+            steps.join("; ")
         ))));
     }
-    // 4. Re-attach HEAD to the (already moved) branch.
-    reattach()?;
+    // 4. Re-attach HEAD to the (already moved) branch; retry once before
+    //    reporting, since the rewrite itself is already complete.
+    if reattach().is_err() {
+        if let Err(r) = reattach() {
+            return Err(Error::Git(git2::Error::from_str(&reattach_failed_message(branch_ref, old_tip, &r))));
+        }
+    }
+    Ok(())
+}
+
+fn reattach_failed_message(branch_ref: &str, old_tip: git2::Oid, err: &git2::Error) -> String {
+    format!(
+        "The rewrite succeeded, but HEAD is detached at {old_tip} and could not be re-attached ({err}); \
+         it should be re-attached to {branch_ref}."
+    )
+}
+
+/// What [`rollback_replay`] could not undo.
+#[derive(Debug)]
+struct RollbackFailure {
+    /// The branch still isn't back at the old tip, so HEAD must stay detached.
+    branch_not_moved_back: bool,
+    steps: Vec<String>,
+}
+
+impl std::fmt::Display for RollbackFailure {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(&self.steps.join("; "))
+    }
+}
+
+/// Refuse to rewrite while a merge, revert, cherry-pick, rebase, ... is in
+/// progress (as git does): the rewrite's rollback hard-resets, which would
+/// delete MERGE_HEAD/REVERT_HEAD/sequencer state.
+fn ensure_no_operation_in_progress(repo: &git2::Repository) -> Result<()> {
+    use git2::RepositoryState as S;
+    let what = match repo.state() {
+        S::Clean => return Ok(()),
+        S::Merge => "merge",
+        S::Revert | S::RevertSequence => "revert",
+        S::CherryPick | S::CherryPickSequence => "cherry-pick",
+        S::Bisect => "bisect",
+        S::Rebase | S::RebaseInteractive | S::RebaseMerge => "rebase",
+        S::ApplyMailbox | S::ApplyMailboxOrRebase => "mailbox apply",
+    };
+    Err(Error::InvalidArg(format!(
+        "Cannot rewrite history: finish or abort the in-progress {what} first."
+    )))
+}
+
+// Test-only fault injection for the rollback/re-attach steps of
+// [`replay_onto`]: each name queued by a test makes the next matching step
+// fail once. Thread-local, so parallel tests don't interfere. A no-op in
+// production builds.
+#[cfg(test)]
+thread_local! {
+    static FAILPOINTS: std::cell::RefCell<Vec<&'static str>> = const { std::cell::RefCell::new(Vec::new()) };
+}
+
+#[cfg(test)]
+fn failpoint(name: &str) -> std::result::Result<(), git2::Error> {
+    FAILPOINTS.with(|f| {
+        let mut f = f.borrow_mut();
+        match f.iter().position(|n| *n == name) {
+            Some(i) => {
+                f.remove(i);
+                Err(git2::Error::from_str(&format!("injected failure: {name}")))
+            }
+            None => Ok(()),
+        }
+    })
+}
+
+#[cfg(not(test))]
+#[inline(always)]
+fn failpoint(_name: &str) -> std::result::Result<(), git2::Error> {
     Ok(())
 }
 
@@ -156,29 +237,34 @@ fn rollback_replay(
     old_tip: git2::Oid,
     new_tip: git2::Oid,
     prior_orig_head: Option<git2::Oid>,
-) -> std::result::Result<(), String> {
+) -> std::result::Result<(), RollbackFailure> {
     let mut failures = Vec::new();
-    let restored = repo
-        .find_object(old_tip, None)
+    let restored = failpoint("reset")
+        .and_then(|_| repo.find_object(old_tip, None))
         .and_then(|old| repo.reset(&old, git2::ResetType::Hard, None));
     if let Err(e) = restored {
         failures.push(format!("index and working tree were not restored: {e}"));
     }
-    if let Err(e) = repo.reference_matching(branch_ref, old_tip, true, new_tip, "rebase (abort): checkout refused") {
-        failures.push(format!("{branch_ref} was not moved back: {e}"));
+    let moved_back = failpoint("move_back")
+        .and_then(|_| repo.reference_matching(branch_ref, old_tip, true, new_tip, "rebase (abort): checkout refused"));
+    let branch_not_moved_back = moved_back.is_err();
+    if let Err(e) = moved_back {
+        failures.push(format!(
+            "{branch_ref} was not moved back from {new_tip} to {old_tip}: {e}; HEAD is left detached at {old_tip}"
+        ));
     }
-    let orig = match prior_orig_head {
+    let orig = failpoint("orig_head").and_then(|_| match prior_orig_head {
         Some(oid) => repo.reference("ORIG_HEAD", oid, true, "rebase (abort): restoring ORIG_HEAD").map(|_| ()),
         None => match repo.find_reference("ORIG_HEAD") {
             Ok(mut r) => r.delete(),
             Err(e) if e.code() == git2::ErrorCode::NotFound => Ok(()),
             Err(e) => Err(e),
         },
-    };
+    });
     if let Err(e) = orig {
         failures.push(format!("ORIG_HEAD was not restored: {e}"));
     }
-    if failures.is_empty() { Ok(()) } else { Err(failures.join("; ")) }
+    if failures.is_empty() { Ok(()) } else { Err(RollbackFailure { branch_not_moved_back, steps: failures }) }
 }
 
 /// Refuse to rewrite history under uncommitted tracked changes (what
@@ -653,6 +739,7 @@ pub fn squash_commits(repo_id: String, oids: Vec<String>, message: String, state
 }
 
 fn squash_in(repo: &git2::Repository, oids: &[String], message: &str) -> Result<()> {
+    ensure_no_operation_in_progress(repo)?;
     let head = repo.head()?;
     if !head.is_branch() {
         return Err(Error::InvalidArg(
@@ -683,8 +770,9 @@ fn squash_in(repo: &git2::Repository, oids: &[String], message: &str) -> Result<
     // No descendants beyond the range — just point the branch at the squash.
     // Working dir/index already match (squash tree == old HEAD tree == tip tree).
     if tip_oid == head_oid {
+        // HEAD is already symbolic to `branch_ref` (checked above); `set_head`
+        // would log a `checkout: moving from` entry that `@{-1}` reads.
         move_branch_recording_orig_head(repo, &branch_ref, squashed_oid, head_oid, "squash commits")?;
-        repo.set_head(&branch_ref)?;
         return Ok(());
     }
 
@@ -768,6 +856,7 @@ pub fn reword_commit(repo_id: String, oid: String, message: String, state: State
 }
 
 fn reword_in(repo: &git2::Repository, oid: &str, message: &str) -> Result<()> {
+    ensure_no_operation_in_progress(repo)?;
     let head = repo.head()?;
     if !head.is_branch() {
         return Err(Error::InvalidArg(
@@ -816,8 +905,9 @@ fn reword_in(repo: &git2::Repository, oid: &str, message: &str) -> Result<()> {
 
     // Target was HEAD — no descendants to replay, just move the branch tip.
     if target_oid == head_oid {
+        // HEAD is already symbolic to `branch_ref` (checked above); no `set_head`
+        // (it would log a `checkout: moving from` entry that `@{-1}` reads).
         repo.reference_matching(&branch_ref, new_oid, true, head_oid, "reword commit")?;
-        repo.set_head(&branch_ref)?;
         return Ok(());
     }
 
@@ -1512,7 +1602,148 @@ mod tests {
         let (dir, repo, branch_ref, mine, base, theirs) = collision_setup();
         // The branch is not at `new_tip`, so moving it back is refused.
         let err = rollback_replay(&repo, &branch_ref, mine, theirs, Some(base)).unwrap_err();
-        assert!(err.contains(&branch_ref), "{err}");
+        assert!(err.to_string().contains(&branch_ref), "{err}");
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    fn inject(names: &[&'static str]) {
+        FAILPOINTS.with(|f| f.borrow_mut().extend(names.iter().copied()));
+    }
+
+    /// `feature` checked out from `main` (the HEAD reflog says so, as git
+    /// writes it), with `target` and `tip` commits on `feature`.
+    fn feature_after_main() -> (PathBuf, Repository, git2::Oid, git2::Oid, git2::Oid) {
+        use crate::repo::test_support::*;
+        let (dir, repo) = make_repo_with_commit();
+        let main_tip = push_raw_commit(&repo, "m.txt", T, T, b"", b"main\n");
+        repo.branch("feature", &repo.find_commit(main_tip).unwrap(), false).unwrap();
+        repo.set_head("refs/heads/feature").unwrap();
+        let target = push_raw_commit(&repo, "b.txt", T, T, b"", b"target\n");
+        let tip = push_raw_commit(&repo, "c.txt", T, T, b"", b"tip\n");
+        assert_eq!(repo.revparse_single("@{-1}").unwrap().id(), main_tip, "sanity");
+        (dir, repo, main_tip, target, tip)
+    }
+
+    #[test]
+    fn reword_at_tip_keeps_checkout_history() {
+        let (dir, repo, main_tip, _target, tip) = feature_after_main();
+        let before = checkout_entries(&repo);
+        reword_in(&repo, &tip.to_string(), "reworded").unwrap();
+        assert_eq!(checkout_entries(&repo), before);
+        assert_eq!(repo.revparse_single("@{-1}").unwrap().id(), main_tip);
+        assert_eq!(repo.head().unwrap().name(), Ok("refs/heads/feature"));
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn squash_at_tip_keeps_checkout_history() {
+        let (dir, repo, main_tip, target, tip) = feature_after_main();
+        let before = checkout_entries(&repo);
+        squash_in(&repo, &[target.to_string(), tip.to_string()], "squashed").unwrap();
+        assert_eq!(checkout_entries(&repo), before);
+        assert_eq!(repo.revparse_single("@{-1}").unwrap().id(), main_tip);
+        assert_eq!(repo.head().unwrap().name(), Ok("refs/heads/feature"));
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    /// Every history rewrite refuses to start while a merge/revert/cherry-pick/
+    /// rebase is in progress, and leaves its state files alone.
+    #[test]
+    fn rewrites_are_refused_during_an_in_progress_operation() {
+        for (file, word) in [
+            ("MERGE_HEAD", "merge"),
+            ("REVERT_HEAD", "revert"),
+            ("CHERRY_PICK_HEAD", "cherry-pick"),
+        ] {
+            let (dir, repo, main_tip, target, tip) = feature_after_main();
+            let marker = repo.path().join(file);
+            std::fs::write(&marker, format!("{main_tip}\n")).unwrap();
+            assert_ne!(repo.state(), git2::RepositoryState::Clean, "{file}");
+            let attempts = [
+                reword_in(&repo, &target.to_string(), "interior"),
+                reword_in(&repo, &tip.to_string(), "tip"),
+                squash_in(&repo, &[target.to_string()], "interior squash").and(Ok(())),
+                squash_in(&repo, &[target.to_string(), tip.to_string()], "tip squash"),
+                rebase_onto_impl(&repo, &main_tip.to_string()),
+            ];
+            for r in attempts {
+                let err = r.unwrap_err().to_string();
+                assert!(err.contains(&format!("in-progress {word}")), "{file}: {err}");
+            }
+            assert!(marker.exists(), "{file} was deleted");
+            assert_eq!(repo.refname_to_id("refs/heads/feature").unwrap(), tip);
+            let _ = std::fs::remove_dir_all(dir);
+        }
+    }
+
+    /// The branch can't be moved back: HEAD must stay detached at the old tip
+    /// (matching the reset tree), not be re-attached to a branch at the new tip.
+    #[test]
+    fn rollback_that_cannot_move_the_branch_back_leaves_head_detached_at_old_tip() {
+        let (dir, repo, branch_ref, mine, base, theirs) = collision_setup();
+        let sig = repo.signature().unwrap();
+        inject(&["move_back"]);
+        let err = replay_onto(&repo, &branch_ref, mine, base, theirs, &sig, "conflict").unwrap_err().to_string();
+        assert!(repo.head_detached().unwrap(), "{err}");
+        assert_eq!(repo.head().unwrap().target(), Some(mine));
+        assert!(err.contains("was not moved back"), "{err}");
+        assert!(err.contains(&format!("HEAD is left detached at {mine}")), "{err}");
+        // Tree is the old tip's (only the user's untracked file differs).
+        let mut opts = git2::StatusOptions::new();
+        opts.include_untracked(true);
+        let statuses = repo.statuses(Some(&mut opts)).unwrap();
+        let all: Vec<_> = statuses.iter().map(|s| (s.path().unwrap().to_owned(), s.status())).collect();
+        assert_eq!(all, vec![("x.txt".to_owned(), git2::Status::WT_NEW)]);
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    /// The error only claims what actually failed: the branch is not reported as
+    /// "still at the new tip" when it was moved back fine.
+    #[test]
+    fn rollback_error_lists_only_the_steps_that_failed() {
+        for (step, wording) in [
+            ("orig_head", "ORIG_HEAD was not restored"),
+            ("reset", "index and working tree were not restored"),
+        ] {
+            let (dir, repo, branch_ref, mine, base, theirs) = collision_setup();
+            let sig = repo.signature().unwrap();
+            inject(&[step]);
+            let err = replay_onto(&repo, &branch_ref, mine, base, theirs, &sig, "conflict").unwrap_err().to_string();
+            assert!(err.contains(wording), "{err}");
+            assert!(!err.contains("may still point"), "{err}");
+            assert!(!err.contains("was not moved back"), "{err}");
+            assert!(!err.contains("could not be re-attached"), "{err}");
+            assert_eq!(repo.refname_to_id(&branch_ref).unwrap(), mine);
+            assert_eq!(repo.head().unwrap().name(), Ok(branch_ref.as_str()));
+            let _ = std::fs::remove_dir_all(dir);
+        }
+        // A re-attach failure during rollback is named too.
+        let (dir, repo, branch_ref, mine, base, theirs) = collision_setup();
+        let sig = repo.signature().unwrap();
+        inject(&["reattach"]);
+        let err = replay_onto(&repo, &branch_ref, mine, base, theirs, &sig, "conflict").unwrap_err().to_string();
+        assert!(err.contains("could not be re-attached"), "{err}");
+        assert!(!err.contains("may still point"), "{err}");
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn final_reattach_failure_says_the_rewrite_succeeded() {
+        let (dir, repo, _main, target, tip) = feature_after_main();
+        inject(&["reattach", "reattach"]);
+        let err = reword_in(&repo, &target.to_string(), "reworded").unwrap_err().to_string();
+        assert!(err.contains("rewrite succeeded"), "{err}");
+        assert!(err.contains(&format!("HEAD is detached at {tip}")), "{err}");
+        assert!(err.contains("re-attached to refs/heads/feature"), "{err}");
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn final_reattach_is_retried_once() {
+        let (dir, repo, _main, target, _tip) = feature_after_main();
+        inject(&["reattach"]);
+        reword_in(&repo, &target.to_string(), "reworded").unwrap();
+        assert_eq!(repo.head().unwrap().name(), Ok("refs/heads/feature"));
         let _ = std::fs::remove_dir_all(dir);
     }
 
