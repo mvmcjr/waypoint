@@ -25,8 +25,13 @@ pub struct PullResult {
 /// normal outcome the UI offers to force, not an error.
 #[derive(Debug, Serialize)]
 pub struct PushOutcome {
-    /// "pushed" | "rejected"
+    /// "pushed" | "rejected" (the remote has work we lack; see `reason`) |
+    /// "stale" (a leased force push found the remote moved since it was shown)
     pub kind: String,
+    /// For a rejected push: "non_fast_forward" (a lease-based force push can
+    /// overwrite it) | "fetch_first" (the remote tip isn't known locally, so no
+    /// lease can succeed until the user fetches).
+    pub reason: Option<String>,
     pub remote: String,
     /// Destination branch name on `remote`.
     pub branch: String,
@@ -339,15 +344,25 @@ fn push_args(target: &PushTarget, branch_name: &str, force: bool) -> Vec<String>
     args
 }
 
-/// Classifies a finished `git push --porcelain`. `Ok(None)` is success;
-/// `Ok(Some(detail))` is a rejection the user can override with a force push
-/// (the remote has work we lack: `[rejected]` with `non-fast-forward` / `fetch
-/// first`); anything else — auth/network failures, `[remote rejected]` (server
-/// policy or hooks, which a force push can't fix) — is an error carrying git's
-/// message. Porcelain lines are `<flag>\t<from>:<to>\t<summary> (<reason>)`.
-fn classify_push(success: bool, stdout: &str, stderr: &str) -> Result<Option<String>> {
+/// What a finished `git push --porcelain` amounted to.
+#[derive(Debug, PartialEq)]
+enum PushVerdict {
+    Pushed,
+    /// The remote has work we lack. `reason` is `non_fast_forward` or `fetch_first`.
+    Rejected { reason: &'static str, detail: String },
+    /// A `--force-with-lease` whose expected oid no longer matches the remote.
+    Stale { detail: String },
+}
+
+/// Classifies a finished `git push --porcelain`. A `[rejected]` line with
+/// `non-fast-forward` / `fetch first` is a [`PushVerdict::Rejected`] the user
+/// can act on, a failed lease is [`PushVerdict::Stale`]; anything else —
+/// auth/network failures, `[remote rejected]` (server policy or hooks, which a
+/// force push can't fix) — is an error carrying git's message. Porcelain lines
+/// are `<flag>\t<from>:<to>\t<summary> (<reason>)`.
+fn classify_push(success: bool, stdout: &str, stderr: &str) -> Result<PushVerdict> {
     if success {
-        return Ok(None);
+        return Ok(PushVerdict::Pushed);
     }
     let failed: Vec<&str> = stdout
         .lines()
@@ -357,18 +372,21 @@ fn classify_push(success: bool, stdout: &str, stderr: &str) -> Result<Option<Str
         let e = stderr.trim();
         if e.is_empty() { fallback.trim().to_owned() } else { e.to_owned() }
     };
+    let summary = |line: &str| line.split('\t').nth(2).unwrap_or("").to_owned();
     let overridable = |line: &str| {
-        let summary = line.split('\t').nth(2).unwrap_or("");
+        let summary = summary(line);
         summary.starts_with("[rejected]") && (summary.contains("(non-fast-forward)") || summary.contains("(fetch first)"))
     };
     if !failed.is_empty() && failed.iter().all(|l| overridable(l)) {
-        return Ok(Some(message(&failed.join("\n"))));
+        // Any "fetch first" ref means the remote tip is unknown locally.
+        let reason = if failed.iter().any(|l| summary(l).contains("(fetch first)")) { "fetch_first" } else { "non_fast_forward" };
+        return Ok(PushVerdict::Rejected { reason, detail: message(&failed.join("\n")) });
     }
     // A failed --force-with-lease: not overridable again without a fresh look.
-    if failed.iter().any(|l| l.split('\t').nth(2).unwrap_or("").contains("(stale info)")) {
-        return Err(Error::InvalidArg(
-            "The remote changed since you were shown it; fetch and review before force pushing.".into(),
-        ));
+    if failed.iter().any(|l| summary(l).contains("(stale info)")) {
+        return Ok(PushVerdict::Stale {
+            detail: "The remote changed since you were shown it; fetch and review before force pushing.".into(),
+        });
     }
     // Keep the per-ref status in the message: stderr alone may be empty or vague.
     let detail = if failed.is_empty() { message("push failed") } else { format!("{}\n{}", message(""), failed.join("\n")).trim().to_owned() };
@@ -409,12 +427,18 @@ fn ensure_lease_known(target: &PushTarget, force: bool) -> Result<()> {
 /// The outcome of a finished push. `planned_oid` is the tracking ref as it was
 /// when the push was planned: a background fetch during the push may already
 /// have advanced it to the remote's new tip, which a lease must not be set to.
-fn push_outcome(target: PushTarget, planned_oid: Option<String>, detail: Option<String>) -> PushOutcome {
+fn push_outcome(target: PushTarget, planned_oid: Option<String>, verdict: PushVerdict) -> PushOutcome {
+    let (kind, reason, detail, expected_remote_oid) = match verdict {
+        PushVerdict::Pushed => ("pushed", None, None, None),
+        PushVerdict::Rejected { reason, detail } => ("rejected", Some(reason.to_owned()), Some(detail), planned_oid),
+        PushVerdict::Stale { detail } => ("stale", None, Some(detail), None),
+    };
     PushOutcome {
-        kind: if detail.is_some() { "rejected" } else { "pushed" }.into(),
+        kind: kind.into(),
+        reason,
         remote: target.remote,
         branch: target.branch,
-        expected_remote_oid: if detail.is_some() { planned_oid } else { None },
+        expected_remote_oid,
         detail,
         set_upstream: target.set_upstream,
     }
@@ -470,12 +494,12 @@ pub async fn push_branch(
     };
     let args: Vec<&str> = args.iter().map(String::as_str).collect();
     let output = git_output(&workdir, &args, &[]).await?;
-    let detail = classify_push(
+    let verdict = classify_push(
         output.status.success(),
         &String::from_utf8_lossy(&output.stdout),
         &String::from_utf8_lossy(&output.stderr),
     )?;
-    Ok(push_outcome(target, planned_oid, detail))
+    Ok(push_outcome(target, planned_oid, verdict))
 }
 
 /// Push a local tag to a remote.
@@ -1011,11 +1035,15 @@ mod tests {
         // A background fetch lands during the push.
         let parent = repo.find_commit(old).unwrap();
         repo.commit(Some("refs/remotes/fork/release"), &sig, &sig, "new", &tree, &[&parent]).unwrap();
-        let out = push_outcome(target, planned.clone(), Some("rejected".into()));
+        let out = push_outcome(
+            target,
+            planned.clone(),
+            PushVerdict::Rejected { reason: "non_fast_forward", detail: "rejected".into() },
+        );
         assert_eq!(out.kind, "rejected");
         assert_eq!(out.expected_remote_oid, Some(old.to_string()));
         let target = plan_push(&repo, None, Some(&dest), "feature").unwrap();
-        let ok = push_outcome(target, planned, None);
+        let ok = push_outcome(target, planned, PushVerdict::Pushed);
         assert_eq!((ok.kind.as_str(), ok.expected_remote_oid), ("pushed", None));
         let _ = std::fs::remove_dir_all(dir);
     }
@@ -1051,13 +1079,26 @@ mod tests {
     const STALE: &str = "To /tmp/r.git\n!\trefs/heads/main:refs/heads/main\t[rejected] (stale info)\nDone\n";
 
     #[test]
-    fn porcelain_stale_info_is_an_error_not_force_pushable() {
-        let err = outcome_of(false, STALE, "error: failed to push some refs to '/tmp/r.git'").unwrap_err();
-        assert!(err.to_string().contains("fetch and review"), "{err}");
+    fn porcelain_stale_info_is_a_stale_outcome_not_force_pushable() {
+        let got = outcome_of(false, STALE, "error: failed to push some refs to '/tmp/r.git'").unwrap();
+        let PushVerdict::Stale { detail } = got else { panic!("expected stale, got {got:?}") };
+        assert!(detail.contains("fetch and review"), "{detail}");
+        let (_dir, repo) = make_repo();
+        let target = plan_push(&repo, Some("origin"), None, "main").unwrap();
+        let out = push_outcome(target, Some("abc".into()), PushVerdict::Stale { detail });
+        assert_eq!((out.kind.as_str(), out.reason), ("stale", None));
+        assert_eq!(out.expected_remote_oid, None);
     }
 
-    fn outcome_of(success: bool, stdout: &str, stderr: &str) -> Result<Option<String>> {
+    fn outcome_of(success: bool, stdout: &str, stderr: &str) -> Result<PushVerdict> {
         classify_push(success, stdout, stderr)
+    }
+
+    fn rejected(v: PushVerdict) -> (&'static str, String) {
+        match v {
+            PushVerdict::Rejected { reason, detail } => (reason, detail),
+            other => panic!("expected rejected, got {other:?}"),
+        }
     }
 
     const NON_FF: &str = "To https://example.invalid/r.git\n!\trefs/heads/main:refs/heads/main\t[rejected] (non-fast-forward)\nDone\n";
@@ -1066,13 +1107,28 @@ mod tests {
     const DENY_NFF: &str = "To https://example.invalid/r.git\n!\trefs/heads/main:refs/heads/main\t[remote rejected] (non-fast-forward)\nDone\n";
 
     #[test]
-    fn porcelain_non_fast_forward_and_fetch_first_are_force_pushable() {
-        for out in [NON_FF, FETCH_FIRST] {
-            let got = outcome_of(false, out, "error: failed to push some refs\nhint: Updates were rejected").unwrap();
-            assert!(got.is_some_and(|d| d.contains("Updates were rejected")));
-        }
+    fn porcelain_non_fast_forward_and_fetch_first_are_rejections_with_their_reason() {
+        let stderr = "error: failed to push some refs\nhint: Updates were rejected";
+        let (reason, detail) = rejected(outcome_of(false, NON_FF, stderr).unwrap());
+        assert_eq!(reason, "non_fast_forward");
+        assert!(detail.contains("Updates were rejected"));
+        let (reason, detail) = rejected(outcome_of(false, FETCH_FIRST, stderr).unwrap());
+        assert_eq!(reason, "fetch_first");
+        assert!(detail.contains("Updates were rejected"));
         // Falls back to the status line when stderr is empty.
-        assert!(outcome_of(false, NON_FF, "").unwrap().is_some_and(|d| d.contains("non-fast-forward")));
+        assert!(rejected(outcome_of(false, NON_FF, "").unwrap()).1.contains("non-fast-forward"));
+    }
+
+    #[test]
+    fn rejection_reason_is_exposed_on_the_outcome() {
+        let (_dir, repo) = make_repo();
+        for (out, want) in [(NON_FF, "non_fast_forward"), (FETCH_FIRST, "fetch_first")] {
+            let verdict = outcome_of(false, out, "").unwrap();
+            let target = plan_push(&repo, Some("origin"), None, "main").unwrap();
+            let o = push_outcome(target, Some("abc".into()), verdict);
+            assert_eq!((o.kind.as_str(), o.reason.as_deref()), ("rejected", Some(want)));
+            assert_eq!(o.expected_remote_oid.as_deref(), Some("abc"));
+        }
     }
 
     #[test]
@@ -1087,9 +1143,9 @@ mod tests {
     fn porcelain_success_flags_are_pushed() {
         for flag in [" ", "*", "+", "=", "-"] {
             let out = format!("To u\n{flag}\trefs/heads/main:refs/heads/main\t[new branch]\nDone\n");
-            assert_eq!(outcome_of(true, &out, "").unwrap(), None, "flag {flag:?}");
+            assert_eq!(outcome_of(true, &out, "").unwrap(), PushVerdict::Pushed, "flag {flag:?}");
         }
-        assert_eq!(outcome_of(true, "To u\n=\trefs/heads/main:refs/heads/main\t[up to date]\nDone\n", "").unwrap(), None);
+        assert_eq!(outcome_of(true, "To u\n=\trefs/heads/main:refs/heads/main\t[up to date]\nDone\n", "").unwrap(), PushVerdict::Pushed);
     }
 
     #[test]

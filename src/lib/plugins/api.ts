@@ -34,7 +34,7 @@ export function buildApiHandlers(
     commit: (message: string) => ipc.doCommit(repoId, message),
     push: async (remote: string, branch: string, force = false) => {
       const outcome = await ipc.pushBranch(repoId, remote, branch, force);
-      if (outcome.kind === "rejected") throw new Error(outcome.detail ?? "push rejected");
+      if (outcome.kind !== "pushed") throw new Error(outcome.detail ?? "push rejected");
     },
     merge: (oid: string, label = "") => ipc.mergeCommit(repoId, oid, label),
     rebase: (ontoOid: string) => ipc.rebaseOnto(repoId, ontoOid),

@@ -80,22 +80,49 @@ fn replay_onto(
     if new_tip == old_tip {
         return Ok(());
     }
-    // Move the ref first (guarded): if the branch moved meanwhile this fails
-    // having touched nothing, so index and working tree still match the branch.
-    // Only then bring index and working tree to the new tip (the tree was
-    // verified clean above); if that refuses, put the ref back.
+    // 1. Detach HEAD at the old tip, so while the branch moves HEAD never
+    //    resolves to the new tip over old files, and the checkout below has
+    //    HEAD (= old tip) as its baseline: collisions with untracked files are
+    //    refused. HEAD is written directly with `rebase (...)` reflog messages
+    //    (as git rebase does): libgit2's `set_head*` would log
+    //    `checkout: moving from X to Y`, which `git checkout -` / `@{-N}` read.
+    repo.reference("HEAD", old_tip, true, &format!("rebase (start): detach at {old_tip}"))?;
+    let reattach = || {
+        repo.reference_symbolic("HEAD", branch_ref, true, &format!("rebase (finish): returning to {branch_ref}"))
+    };
+    // 2. Move the ref (guarded): if the branch moved meanwhile this fails having
+    //    touched nothing, so index and working tree still match the branch.
     let reflog = format!("rebase (finish): {branch_ref} onto {onto}");
-    move_branch_recording_orig_head(repo, branch_ref, new_tip, old_tip, &reflog)?;
-    // The checkout must be relative to the OLD tip: detach HEAD there while it runs.
-    let checkout = repo.set_head_detached(old_tip).and_then(|()| {
-        repo.checkout_tree(last.as_object(), Some(git2::build::CheckoutBuilder::new().safe()))
-    });
+    let prior_orig_head = match move_branch_recording_orig_head(repo, branch_ref, new_tip, old_tip, &reflog) {
+        Ok(prior) => prior,
+        Err(e) => {
+            return Err(match reattach() {
+                Ok(_) => Error::Git(e),
+                Err(r) => Error::Git(git2::Error::from_str(&format!("{e}; HEAD could not be re-attached to {branch_ref}: {r}"))),
+            });
+        }
+    };
+    // 3. Bring index and working tree to the new tip (the tree was verified
+    //    clean above); if that refuses, undo everything.
+    let checkout = repo.checkout_tree(last.as_object(), Some(git2::build::CheckoutBuilder::new().safe()));
     if let Err(e) = checkout {
-        let _ = repo.reference_matching(branch_ref, old_tip, true, new_tip, "rebase (abort): checkout refused");
-        let _ = repo.set_head(branch_ref);
-        return Err(Error::Git(e));
+        let mut failures = match rollback_replay(repo, branch_ref, old_tip, new_tip, prior_orig_head) {
+            Ok(()) => Vec::new(),
+            Err(f) => vec![f],
+        };
+        if let Err(r) = reattach() {
+            failures.push(format!("HEAD could not be re-attached to {branch_ref}: {r}"));
+        }
+        if failures.is_empty() {
+            return Err(Error::Git(e));
+        }
+        return Err(Error::Git(git2::Error::from_str(&format!(
+            "{e}; the rewrite could not be fully rolled back ({}); {branch_ref} may still point at {new_tip}",
+            failures.join("; ")
+        ))));
     }
-    repo.set_head(branch_ref)?;
+    // 4. Re-attach HEAD to the (already moved) branch.
+    reattach()?;
     Ok(())
 }
 
@@ -103,16 +130,55 @@ fn replay_onto(
 /// having moved meanwhile, and only then records `old_tip` as ORIG_HEAD (what
 /// `reset ORIG_HEAD` expects after a rewrite). A refused update must not
 /// clobber the user's ORIG_HEAD; failing to write it never blocks the rewrite.
+/// Returns ORIG_HEAD's previous value (`None` if it didn't exist) so a rollback
+/// can restore it.
 fn move_branch_recording_orig_head(
     repo: &git2::Repository,
     branch_ref: &str,
     new_tip: git2::Oid,
     old_tip: git2::Oid,
     reflog: &str,
-) -> std::result::Result<(), git2::Error> {
+) -> std::result::Result<Option<git2::Oid>, git2::Error> {
+    let prior = repo.refname_to_id("ORIG_HEAD").ok();
     repo.reference_matching(branch_ref, new_tip, true, old_tip, reflog)?;
     let _ = repo.reference("ORIG_HEAD", old_tip, true, "rewrite: updating ORIG_HEAD");
-    Ok(())
+    Ok(prior)
+}
+
+/// Undoes a replay whose checkout failed: puts index and working tree back to
+/// `old_tip` (HEAD is detached there; a hard reset only touches tracked files,
+/// untracked ones are kept), moves `branch_ref` back from `new_tip`, and
+/// restores ORIG_HEAD to `prior_orig_head` (removing it if it didn't exist).
+/// Every step is attempted; the `Err` lists the ones that failed.
+fn rollback_replay(
+    repo: &git2::Repository,
+    branch_ref: &str,
+    old_tip: git2::Oid,
+    new_tip: git2::Oid,
+    prior_orig_head: Option<git2::Oid>,
+) -> std::result::Result<(), String> {
+    let mut failures = Vec::new();
+    let restored = repo
+        .find_object(old_tip, None)
+        .and_then(|old| repo.reset(&old, git2::ResetType::Hard, None));
+    if let Err(e) = restored {
+        failures.push(format!("index and working tree were not restored: {e}"));
+    }
+    if let Err(e) = repo.reference_matching(branch_ref, old_tip, true, new_tip, "rebase (abort): checkout refused") {
+        failures.push(format!("{branch_ref} was not moved back: {e}"));
+    }
+    let orig = match prior_orig_head {
+        Some(oid) => repo.reference("ORIG_HEAD", oid, true, "rebase (abort): restoring ORIG_HEAD").map(|_| ()),
+        None => match repo.find_reference("ORIG_HEAD") {
+            Ok(mut r) => r.delete(),
+            Err(e) if e.code() == git2::ErrorCode::NotFound => Ok(()),
+            Err(e) => Err(e),
+        },
+    };
+    if let Err(e) = orig {
+        failures.push(format!("ORIG_HEAD was not restored: {e}"));
+    }
+    if failures.is_empty() { Ok(()) } else { Err(failures.join("; ")) }
 }
 
 /// Refuse to rewrite history under uncommitted tracked changes (what
@@ -121,9 +187,10 @@ fn move_branch_recording_orig_head(
 ///
 /// Untracked files inside a submodule don't count (git rebase and libgit2's
 /// `rebase_ensure_not_dirty` use `ignore=untracked` for submodules). git2's
-/// `DiffOptions` only exposes an all-or-nothing `ignore_submodules`, so
-/// submodules are skipped in the diffs and checked one by one with
-/// [`submodule_is_dirty`].
+/// `DiffOptions` only exposes an all-or-nothing `ignore_submodules`, so the
+/// index-to-workdir diff skips submodules and each gitlink in the index is
+/// checked by path with [`submodule_path_is_dirty`]. The tree-to-index diff
+/// compares object ids only, so staged gitlink changes are seen there.
 fn ensure_clean_for_rewrite(repo: &git2::Repository) -> Result<()> {
     let head_tree = repo.head()?.peel_to_tree()?;
     // Index vs HEAD only compares object ids (no submodule inspection), so a
@@ -155,7 +222,8 @@ fn ensure_clean_for_rewrite(repo: &git2::Repository) -> Result<()> {
 /// from the index/HEAD.
 fn submodule_path_is_dirty(repo: &git2::Repository, path: &str) -> bool {
     use git2::SubmoduleStatus as S;
-    let Ok(status) = repo.submodule_status(path, git2::SubmoduleIgnore::Untracked) else { return false };    status.intersects(
+    let Ok(status) = repo.submodule_status(path, git2::SubmoduleIgnore::Untracked) else { return false };
+    status.intersects(
         S::INDEX_ADDED
             | S::INDEX_DELETED
             | S::INDEX_MODIFIED
@@ -1320,6 +1388,131 @@ mod tests {
         assert_eq!(repo.statuses(Some(&mut opts)).unwrap().len(), 0);
         assert!(dir.join("c.txt").exists());
         assert!(!dir.join("t.txt").exists());
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    /// `mine` (b.txt) and `theirs` (x.txt, based on the same `base`) with the
+    /// branch at `mine` and an UNTRACKED x.txt in the working tree: replaying
+    /// `mine` onto `theirs` works in memory, but checking out the new tip must be
+    /// refused (it would overwrite the untracked file).
+    fn collision_setup() -> (PathBuf, Repository, String, git2::Oid, git2::Oid, git2::Oid) {
+        use crate::repo::test_support::*;
+        let (dir, repo) = make_repo_with_commit();
+        let base = repo.head().unwrap().peel_to_commit().unwrap().id();
+        let mine = push_raw_commit(&repo, "b.txt", T, T, b"", b"mine\n");
+        move_branch(&repo, base);
+        let theirs = commit_file(&repo, "x.txt", "theirs", "theirs");
+        move_branch(&repo, mine);
+        std::fs::write(dir.join("x.txt"), "precious untracked").unwrap();
+        let branch_ref = repo.head().unwrap().name().unwrap().to_owned();
+        (dir, repo, branch_ref, mine, base, theirs)
+    }
+
+    fn checkout_entries(repo: &Repository) -> usize {
+        let log = repo.reflog("HEAD").unwrap();
+        log.iter().filter(|e| e.message().ok().flatten().is_some_and(|m| m.starts_with("checkout: moving from"))).count()
+    }
+
+    /// `git checkout -` (`@{-1}`) is derived from the HEAD reflog's
+    /// "checkout: moving from X to Y" entries: a rewrite must not add any.
+    #[test]
+    fn rewrite_does_not_pollute_the_checkout_history() {
+        use crate::repo::test_support::*;
+        let (dir, repo) = make_repo_with_commit();
+        let main_tip = push_raw_commit(&repo, "m.txt", T, T, b"", b"main\n");
+        let main_ref = repo.head().unwrap().name().unwrap().to_owned();
+        repo.branch("feature", &repo.find_commit(main_tip).unwrap(), false).unwrap();
+        // What a checkout of `feature` leaves in the HEAD reflog.
+        repo.set_head("refs/heads/feature").unwrap();
+        let target = push_raw_commit(&repo, "b.txt", T, T, b"", b"target\n");
+        push_raw_commit(&repo, "c.txt", T, T, b"", b"tip\n");
+        assert_eq!(repo.revparse_single("@{-1}").unwrap().id(), main_tip, "sanity: {main_ref}");
+        let before = checkout_entries(&repo);
+        reword_in(&repo, &target.to_string(), "reworded").unwrap();
+        assert_eq!(checkout_entries(&repo), before);
+        assert_eq!(repo.revparse_single("@{-1}").unwrap().id(), main_tip);
+        // HEAD is back on the branch, not detached.
+        assert!(!repo.head_detached().unwrap());
+        assert_eq!(repo.head().unwrap().name(), Ok("refs/heads/feature"));
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn refused_checkout_rolls_back_the_ref_and_orig_head() {
+        let (dir, repo, branch_ref, mine, base, theirs) = collision_setup();
+        let sig = repo.signature().unwrap();
+        // A known ORIG_HEAD from some earlier operation is left as it was.
+        repo.reference("ORIG_HEAD", base, true, "test").unwrap();
+        assert!(replay_onto(&repo, &branch_ref, mine, base, theirs, &sig, "conflict").is_err());
+        assert_eq!(repo.refname_to_id(&branch_ref).unwrap(), mine);
+        assert_eq!(orig_head(&repo), Some(base));
+        // No ORIG_HEAD before means none after.
+        repo.find_reference("ORIG_HEAD").unwrap().delete().unwrap();
+        assert!(replay_onto(&repo, &branch_ref, mine, base, theirs, &sig, "conflict").is_err());
+        assert_eq!(repo.refname_to_id(&branch_ref).unwrap(), mine);
+        assert_eq!(orig_head(&repo), None);
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn refused_checkout_leaves_tree_and_head_as_before() {
+        let (dir, repo, branch_ref, mine, base, theirs) = collision_setup();
+        let sig = repo.signature().unwrap();
+        let before = checkout_entries(&repo);
+        let err = replay_onto(&repo, &branch_ref, mine, base, theirs, &sig, "conflict").unwrap_err();
+        assert!(!err.to_string().contains("rolled back"), "{err}");
+        // Only the user's untracked file differs from the old tip.
+        let mut opts = git2::StatusOptions::new();
+        opts.include_untracked(true);
+        let statuses = repo.statuses(Some(&mut opts)).unwrap();
+        let all: Vec<_> = statuses.iter().map(|s| (s.path().unwrap().to_owned(), s.status())).collect();
+        assert_eq!(all, vec![("x.txt".to_owned(), git2::Status::WT_NEW)]);
+        assert_eq!(std::fs::read_to_string(dir.join("x.txt")).unwrap(), "precious untracked");
+        assert!(dir.join("b.txt").exists());
+        assert!(!repo.head_detached().unwrap());
+        assert_eq!(repo.head().unwrap().name(), Ok(branch_ref.as_str()));
+        assert_eq!(checkout_entries(&repo), before);
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    /// A checkout that died half way leaves new-tip files in the index and
+    /// working tree: rolling back puts both back to the old tip (and keeps
+    /// untracked files).
+    #[test]
+    fn rollback_restores_a_half_checked_out_tree() {
+        let (dir, repo, branch_ref, mine, base, theirs) = collision_setup();
+        std::fs::remove_file(dir.join("x.txt")).unwrap();
+        // Half way: x.txt checked out and staged, b.txt (old tip's) gone.
+        std::fs::write(dir.join("x.txt"), "theirs").unwrap();
+        std::fs::remove_file(dir.join("b.txt")).unwrap();
+        let mut index = repo.index().unwrap();
+        index.add_path(Path::new("x.txt")).unwrap();
+        index.remove_path(Path::new("b.txt")).unwrap();
+        index.write().unwrap();
+        std::fs::write(dir.join("keep.txt"), "untracked").unwrap();
+        // The ref was already moved to the new tip.
+        repo.reference(&branch_ref, theirs, true, "test").unwrap();
+        repo.set_head_detached(mine).unwrap();
+        rollback_replay(&repo, &branch_ref, mine, theirs, Some(base)).unwrap();
+        repo.set_head(&branch_ref).unwrap();
+        assert_eq!(repo.refname_to_id(&branch_ref).unwrap(), mine);
+        assert_eq!(orig_head(&repo), Some(base));
+        let mut opts = git2::StatusOptions::new();
+        opts.include_untracked(true);
+        let statuses = repo.statuses(Some(&mut opts)).unwrap();
+        let all: Vec<_> = statuses.iter().map(|s| (s.path().unwrap().to_owned(), s.status())).collect();
+        assert_eq!(all, vec![("keep.txt".to_owned(), git2::Status::WT_NEW)]);
+        assert!(!dir.join("x.txt").exists());
+        assert!(dir.join("b.txt").exists());
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn rollback_that_fails_is_reported_not_swallowed() {
+        let (dir, repo, branch_ref, mine, base, theirs) = collision_setup();
+        // The branch is not at `new_tip`, so moving it back is refused.
+        let err = rollback_replay(&repo, &branch_ref, mine, theirs, Some(base)).unwrap_err();
+        assert!(err.contains(&branch_ref), "{err}");
         let _ = std::fs::remove_dir_all(dir);
     }
 

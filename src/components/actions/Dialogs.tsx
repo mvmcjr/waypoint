@@ -20,7 +20,7 @@ import {
   SelectTrigger,
   SelectValue,
 } from "@/components/ui/select";
-import { ipc, type CheckoutRemoteResult, type PushDest, type RemoteInfo } from "@/lib/ipc";
+import { ipc, type CheckoutRemoteResult, type PushDest, type PushRejectReason, type RemoteInfo } from "@/lib/ipc";
 import { useRefs, useCommitInRef, useWorktreeStatus } from "@/lib/queries";
 
 // ─── Shared helpers ────────────────────────────────────────────────────────
@@ -152,23 +152,26 @@ interface PushRejectedProps {
   branchName: string;
   /** Where the rejected push went, as reported by the backend; the force push hits exactly this. */
   target: PushDest;
+  /** Why the push was rejected; `fetch_first` can't be force pushed (the remote tip is unknown locally). */
+  reason?: PushRejectReason | null;
   onClose: () => void;
   onSuccess: () => void;
 }
 
-export function PushRejectedDialog({ repoId, branchName, target, onClose, onSuccess }: PushRejectedProps) {
+export function PushRejectedDialog({ repoId, branchName, target, reason, onClose, onSuccess }: PushRejectedProps) {
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
   // The lease went stale (the remote moved since the rejection): resending the
   // same oid can only fail again, so Force push stays off until a fresh push.
   const [stale, setStale] = useState(false);
   // Without the remote-tracking oid we can't say what a force push would overwrite.
-  const unknownRemote = !target.expected_remote_oid;
+  // A fetch-first rejection means the remote tip isn't known locally at all.
+  const unknownRemote = !target.expected_remote_oid || reason === "fetch_first";
 
-  function fail(message: string) {
-    if (message.includes("stale info")) {
+  function fail(message: string, isStale = false) {
+    if (isStale) {
       setStale(true);
-      setError(`${message} The remote changed since this was shown: close this dialog and push again.`);
+      setError(`${message} Close this dialog and push again.`);
     } else {
       setError(message);
     }
@@ -179,7 +182,8 @@ export function PushRejectedDialog({ repoId, branchName, target, onClose, onSucc
     setError(null);
     try {
       const outcome = await ipc.pushBranch(repoId, undefined, branchName, true, target);
-      if (outcome.kind === "rejected") fail(outcome.detail ?? "Push rejected");
+      if (outcome.kind === "stale") fail(outcome.detail ?? "The remote changed since it was shown.", true);
+      else if (outcome.kind === "rejected") fail(outcome.detail ?? "Push rejected");
       else onSuccess();
     } catch (e) {
       fail(String(e));

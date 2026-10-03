@@ -38,7 +38,7 @@ import {
 import { RemoveWorktreeDialog } from "@/components/actions/RemoveWorktreeDialog";
 import type { CommitAction } from "@/components/timeline/CommitContextMenu";
 import type { RefAction } from "@/components/sidebar/RefTree";
-import { ipc, type PushDest, type RefInfo, type WorktreeInfo } from "@/lib/ipc";
+import { ipc, type PushDest, type PushRejectReason, type RefInfo, type WorktreeInfo } from "@/lib/ipc";
 import { RefreshCw, ArrowDown, ArrowUp, Puzzle } from "lucide-react";
 import { usePluginRegistry, commandsForSurface } from "@/lib/plugins/registry";
 import { usePluginRunner } from "@/components/plugins/PluginRunnerProvider";
@@ -71,7 +71,7 @@ type DialogState =
   | { kind: "revert"; oid: string; summary: string }
   | { kind: "check-in-branch"; oid: string; summary: string }
   | { kind: "pull-conflicts" }
-  | { kind: "push-rejected"; branchName: string; target: PushDest }
+  | { kind: "push-rejected"; branchName: string; target: PushDest; reason?: PushRejectReason | null }
   | { kind: "remote-error"; message: string }
   | { kind: "create-tag"; oid: string }
   | { kind: "delete-tag"; tagName: string }
@@ -246,15 +246,18 @@ export function RepoView() {
     const toastId = toast.loading(`Pushing ${branchName}…`);
     try {
       const outcome = await ipc.pushBranch(repoId, undefined, branchName, false);
-      if (outcome.kind === "rejected") {
-        // The danger dialog is the feedback for a rejection: no success toast.
+      if (outcome.kind !== "pushed") {
+        // The dialog is the feedback for a rejection: no success toast.
         toast.dismiss(toastId);
       } else {
         toast.success(`Pushed ${branchName} to ${outcome.remote}/${outcome.branch}`, { id: toastId });
       }
       if (repoIdRef.current !== myRepoId) return; // user switched repos mid-flight
-      if (outcome.kind === "rejected") {
-        setDialog({ kind: "push-rejected", branchName, target: { remote: outcome.remote, branch: outcome.branch, set_upstream: outcome.set_upstream, expected_remote_oid: outcome.expected_remote_oid ?? null } });
+      if (outcome.kind === "stale") {
+        // Only a leased force push can go stale; surface it like any remote error.
+        setDialog({ kind: "remote-error", message: outcome.detail ?? "The remote changed since it was shown." });
+      } else if (outcome.kind === "rejected") {
+        setDialog({ kind: "push-rejected", branchName, reason: outcome.reason ?? null, target: { remote: outcome.remote, branch: outcome.branch, set_upstream: outcome.set_upstream, expected_remote_oid: outcome.expected_remote_oid ?? null } });
       } else {
         refresh();
       }
@@ -1022,6 +1025,7 @@ export function RepoView() {
           repoId={repoId}
           branchName={dialog.branchName}
           target={dialog.target}
+          reason={dialog.reason}
           onClose={() => setDialog({ kind: "none" })}
           onSuccess={() => { setDialog({ kind: "none" }); refresh(); }}
         />

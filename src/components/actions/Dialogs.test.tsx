@@ -443,7 +443,7 @@ describe("Dialogs", () => {
     });
 
     it("shows the error instead of closing when the force push is rejected again", async () => {
-      vi.mocked(ipc.pushBranch).mockResolvedValue({ kind: "rejected", remote: "origin", branch: "main", detail: "! [rejected] stale info", set_upstream: false, expected_remote_oid: "abc123" });
+      vi.mocked(ipc.pushBranch).mockResolvedValue({ kind: "rejected", remote: "origin", branch: "main", detail: "error: failed to push some refs\n!\trefs/heads/main:refs/heads/main\t[rejected] (non-fast-forward)", reason: "non_fast_forward", set_upstream: false, expected_remote_oid: "abc123" });
       render(
         <PushRejectedDialog
           repoId="repo1"
@@ -454,20 +454,41 @@ describe("Dialogs", () => {
         />
       );
       fireEvent.click(screen.getByRole("button", { name: "Force push" }));
-      expect(await screen.findByText(/stale info/)).toBeInTheDocument();
+      expect(await screen.findByText(/non-fast-forward/)).toBeInTheDocument();
       expect(mockOnSuccess).not.toHaveBeenCalled();
     });
 
-    it("disables Force push after a stale-lease error so the same oid is never resent", async () => {
+    it("disables Force push after a stale outcome so the same oid is never resent", async () => {
       vi.mocked(ipc.pushBranch).mockClear();
-      vi.mocked(ipc.pushBranch).mockRejectedValue("Push rejected: ! refs/heads/main:refs/heads/main [rejected] (stale info)");
+      // The backend's real stale shape: kind "stale" with its fixed message (never the porcelain text).
+      vi.mocked(ipc.pushBranch).mockResolvedValue({ kind: "stale", reason: null, remote: "origin", branch: "main", detail: "The remote changed since you were shown it; fetch and review before force pushing.", set_upstream: false, expected_remote_oid: null });
       const target = { remote: "origin", branch: "main", set_upstream: false, expected_remote_oid: "abc123" };
-      render(<PushRejectedDialog repoId="repo1" branchName="main" target={target} onClose={mockOnClose} onSuccess={mockOnSuccess} />);
+      render(<PushRejectedDialog repoId="repo1" branchName="main" target={target} reason="non_fast_forward" onClose={mockOnClose} onSuccess={mockOnSuccess} />);
       fireEvent.click(screen.getByRole("button", { name: "Force push" }));
-      expect(await screen.findByText(/stale info/)).toBeInTheDocument();
+      expect(await screen.findByText(/fetch and review before force pushing/)).toBeInTheDocument();
       expect(screen.getByText(/push again/)).toBeInTheDocument();
       expect(screen.getByRole("button", { name: "Force push" })).toBeDisabled();
+      expect(mockOnSuccess).not.toHaveBeenCalled();
       expect(ipc.pushBranch).toHaveBeenCalledTimes(1);
+    });
+
+    it("offers no force push for a fetch-first rejection and says to fetch first", () => {
+      vi.mocked(ipc.pushBranch).mockClear();
+      // A fetch-first rejection can still carry a (stale) tracking oid.
+      const target = { remote: "origin", branch: "main", set_upstream: false, expected_remote_oid: "abc123" };
+      render(<PushRejectedDialog repoId="repo1" branchName="main" target={target} reason="fetch_first" onClose={mockOnClose} onSuccess={mockOnSuccess} />);
+      expect(screen.getByText(/Fetch first/)).toBeInTheDocument();
+      const button = screen.getByRole("button", { name: "Force push" });
+      expect(button).toBeDisabled();
+      fireEvent.click(button);
+      expect(ipc.pushBranch).not.toHaveBeenCalled();
+    });
+
+    it("keeps Force push available for a non-fast-forward rejection", () => {
+      const target = { remote: "origin", branch: "main", set_upstream: false, expected_remote_oid: "abc123" };
+      render(<PushRejectedDialog repoId="repo1" branchName="main" target={target} reason="non_fast_forward" onClose={mockOnClose} onSuccess={mockOnSuccess} />);
+      expect(screen.getByRole("button", { name: "Force push" })).toBeEnabled();
+      expect(screen.queryByText(/Fetch first/)).not.toBeInTheDocument();
     });
 
     it("refuses to force push when the remote tip is unknown (no tracking ref)", () => {

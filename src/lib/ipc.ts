@@ -159,9 +159,18 @@ export interface PushDest {
   expected_remote_oid?: string | null;
 }
 
-/** A rejected push (remote has commits we lack) is an outcome, not an error. */
+/** Why a push was rejected: `non_fast_forward` can be force pushed with a lease; for `fetch_first` the remote tip isn't known locally, so the user must fetch first. */
+export type PushRejectReason = "non_fast_forward" | "fetch_first";
+
+/**
+ * A rejected push (remote has commits we lack) is an outcome, not an error;
+ * so is a stale lease (`stale`: a leased force push found the remote moved
+ * since it was shown).
+ */
 export interface PushOutcome {
-  kind: "pushed" | "rejected";
+  kind: "pushed" | "rejected" | "stale";
+  /** For a rejected push, why. */
+  reason?: PushRejectReason | null;
   remote: string;
   /** Destination branch name on `remote`. */
   branch: string;
