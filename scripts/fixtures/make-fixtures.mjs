@@ -805,6 +805,50 @@ function makeAheadOfRemote(reposDir) {
 }
 
 /**
+ * BEHIND REMOTE
+ * A clean clone whose main is 1 commit behind the remote, which has moved on
+ * with a plain continuation (no rewrite) that modifies, adds and deletes files.
+ * The clone has NOT fetched it yet, so a Pull fetches and fast-forwards.
+ * Tests that a fast-forward pull leaves no local changes behind.
+ * ⚠ Open the `local/` subdirectory in Waypoint, not the parent folder.
+ */
+function makeBehindRemote(reposDir) {
+  const baseDir = join(reposDir, 'behind-remote');
+  if (existsSync(baseDir)) rmSync(baseDir, { recursive: true, force: true });
+
+  const remoteDir   = join(baseDir, 'remote.git');
+  const localDir    = join(baseDir, 'local');
+  const upstreamDir = join(baseDir, 'upstream');
+  mkdirSync(remoteDir, { recursive: true });
+
+  run('git init --bare -b main', remoteDir);
+
+  // The clone Waypoint opens: one pushed commit, tracking origin/main
+  run(`git clone "${remoteDir}" "${localDir}"`, baseDir);
+  run('git config user.name "Fixture User"', localDir);
+  run('git config user.email "fixture@example.com"', localDir);
+  write(localDir, 'README.md', '# Behind Remote\n');
+  write(localDir, 'src/old.js', 'export const old = true;\n');
+  run('git add .', localDir);
+  run('git commit -m "Initial commit"', localDir);
+  run('git push -u origin main', localDir);
+
+  // Someone else moves the remote on from a second clone
+  run(`git clone "${remoteDir}" "${upstreamDir}"`, baseDir);
+  run('git config user.name "Upstream User"', upstreamDir);
+  run('git config user.email "upstream@example.com"', upstreamDir);
+  write(upstreamDir, 'README.md', '# Behind Remote\n\nUpdated upstream.\n');
+  write(upstreamDir, 'src/new.js', 'export const added = true;\n');
+  run('git rm -q src/old.js', upstreamDir);
+  run('git add .', upstreamDir);
+  run('git commit -m "Upstream continues"', upstreamDir);
+  run('git push origin main', upstreamDir);
+
+  log('behind-remote', localDir, '(open the local/ subfolder in Waypoint)', reposDir);
+  return localDir;
+}
+
+/**
  * STASH
  * One stash entry; partially staged working tree.
  * Tests the stash list panel.
@@ -1360,6 +1404,7 @@ const SCENARIOS = new Map([
   ['many-refs',            makeManyRefs],
   ['detached-head',        makeDetachedHead],
   ['ahead-of-remote',      makeAheadOfRemote],
+  ['behind-remote',        makeBehindRemote],
   ['stash',                makeStash],
   ['worktrees',            makeWorktrees],
   ['tags',                 makeTags],

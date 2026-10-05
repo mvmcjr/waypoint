@@ -26,6 +26,19 @@ test('worktrees returns main/ and ahead-of-remote returns local/', () => {
   } finally { rmSync(root, { recursive: true, force: true }); }
 });
 
+test('behind-remote: local is one unfetched commit behind the remote, and clean', () => {
+  const root = mkdtempSync(join(tmpdir(), 'wpfx-'));
+  try {
+    const dir = buildScenario('behind-remote', root);
+    assert.equal(dir, join(root, 'behind-remote', 'local'));
+    assert.equal(git(dir, 'status', '--porcelain'), '');
+    assert.equal(git(dir, 'rev-parse', 'HEAD'), git(dir, 'rev-parse', 'origin/main'), 'not fetched yet');
+    const remoteTip = git(join(root, 'behind-remote', 'remote.git'), 'rev-parse', 'main');
+    assert.equal(git(join(root, 'behind-remote', 'remote.git'), 'rev-parse', 'main~1'), git(dir, 'rev-parse', 'HEAD'));
+    assert.notEqual(remoteTip, git(dir, 'rev-parse', 'HEAD'));
+  } finally { rmSync(root, { recursive: true, force: true }); }
+});
+
 test('rejects unknown scenarios and lists known ones', () => {
   assert.throws(() => buildScenario('nope', tmpdir()), /Unknown scenario: nope/);
   assert.ok(SCENARIO_NAMES.includes('worktrees'));

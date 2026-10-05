@@ -4,8 +4,8 @@ import { existsSync, readFileSync } from 'node:fs';
 import { makeFixture, disposeFixture, type Fixture } from '../support/fixtures.js';
 import { launch, quit } from '../support/app.js';
 import { saveFailureArtifacts } from '../support/artifacts.js';
-import { byName, rightClick, menuItem, dialog, button } from '../support/ui.js';
-import { git, waitForGit, cachedNames, log1, parents, currentBranch, statusLines, stashList } from '../support/git.js';
+import { byName, rightClick, menuItem, dialog, button, waitForText } from '../support/ui.js';
+import { git, head, waitForGit, cachedNames, log1, parents, currentBranch, statusLines, stashList } from '../support/git.js';
 
 describe('core-git', function () {
   let fx: Fixture | undefined;
@@ -380,6 +380,44 @@ describe('core-git', function () {
     await waitForGit(() => statusLines(fx!.openPath), (l) => l.length === 0, 'status clean');
     // UI: the tree is fully clean now, so the timeline's WIP row (rendered
     // only while the working directory is dirty — WipRow.tsx) is gone too.
+    await app!.$('//span[normalize-space()="// WIP"]').waitForExist({ reverse: true, timeout: 15000 });
+  });
+
+  it('21 pull a fast-forward leaves no local changes', async () => {
+    // local/ is clean and one unfetched commit behind origin, which modified
+    // README.md, added src/new.js and deleted src/old.js. Regression: the
+    // fast-forward used to move the branch but leave the old files on disk,
+    // so the incoming changes showed up reversed as local changes.
+    await open('behind-remote', '21');
+    const remoteTip = git(join(fx!.openPath, '..', 'remote.git'), 'rev-parse', 'main');
+    // Re-queried on every read: rows are keyed by commit, so an element resolved
+    // before the pull would follow "Initial commit" down to row 2.
+    const topRowMessage = async () =>
+      (await app!.$('(//div[@data-testid="commit-row"])[1]/*[3]').getText()).trim();
+    await app!.waitUntil(async () => (await topRowMessage()) === 'Initial commit', {
+      timeout: 15000,
+      timeoutMsg: 'timeline never showed the local tip before pulling',
+    });
+
+    // The toolbar's Pull button (src/routes/repo.tsx) is named by its text.
+    await (await button(app!, 'Pull')).click();
+
+    await waitForGit(() => head(fx!.openPath), (h) => h === remoteTip, 'HEAD at the remote tip');
+    await waitForGit(() => statusLines(fx!.openPath), (l) => l.length === 0, 'status clean after pull');
+    expect(readFileSync(join(fx!.openPath, 'README.md'), 'utf8')).toContain('Updated upstream.');
+    expect(existsSync(join(fx!.openPath, 'src', 'new.js'))).toBe(true);
+    expect(existsSync(join(fx!.openPath, 'src', 'old.js'))).toBe(false);
+
+    // UI: the success toast names a fast-forward, and the timeline's top row
+    // is now the upstream commit (message cell — see test 14).
+    await waitForText(app!, 'Pulled origin/main (fast-forward)');
+    await app!.waitUntil(async () => (await topRowMessage()) === 'Upstream continues', {
+      timeout: 15000,
+      timeoutMsg: 'top commit row never showed the pulled commit',
+    });
+    // The pull's refresh() refetches status together with the commits, so by
+    // the time the new top row renders, a dirty tree (the bug) would already
+    // have mounted the WIP row.
     await app!.$('//span[normalize-space()="// WIP"]').waitForExist({ reverse: true, timeout: 15000 });
   });
 });

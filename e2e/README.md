@@ -14,7 +14,7 @@ explicit, independent session — and full control over failure artifacts —
 without a `wdio.conf.ts` runner config; each test calls `launch()`/`quit()`
 itself rather than sharing a session via `reloadSession`.
 
-21 tests: 1 smoke + 10 worktree flows + 10 core git flows.
+22 tests: 1 smoke + 10 worktree flows + 11 core git flows.
 
 ## Setup
 
