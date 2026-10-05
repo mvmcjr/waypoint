@@ -471,14 +471,7 @@ fn do_checkout(repo: &git2::Repository, refspec: &str, force: bool) -> Result<()
         }
     }
 
-    let mut opts = git2::build::CheckoutBuilder::new();
-    if force {
-        opts.force();
-    } else {
-        opts.safe();
-    }
-
-    lock_retry::checkout_tree(repo, &obj, &mut opts)?;
+    lock_retry::checkout_tree(repo, &obj, &mut checkout_opts(force))?;
 
     match reference {
         Some(gref) => repo.set_head(gref.name().unwrap_or(refspec))?,
@@ -489,6 +482,66 @@ fn do_checkout(repo: &git2::Repository, refspec: &str, force: bool) -> Result<()
     }
 
     Ok(())
+}
+
+/// Forced or safe checkout options, per the user's "discard local changes" choice.
+fn checkout_opts(force: bool) -> git2::build::CheckoutBuilder<'static> {
+    let mut opts = git2::build::CheckoutBuilder::new();
+    if force {
+        opts.force();
+    } else {
+        opts.safe();
+    }
+    opts
+}
+
+/// Fast-forward `branch_ref` from `old` to `new`, bring the working tree and index
+/// to `new`, and (with `attach`) point HEAD at the branch.
+///
+/// The files are checked out before the ref moves: the checkout baseline is HEAD,
+/// so moving a checked-out branch first would make baseline == target and leave
+/// the old files in place (the incoming changes would show up reversed as local
+/// edits). A safe checkout that refuses therefore leaves everything untouched. If
+/// the ref move (or attaching HEAD) then fails, the paths the checkout changed are
+/// put back to HEAD's tree; they had no local edits, or the safe checkout would
+/// have refused them, so restoring them by force loses nothing.
+pub(crate) fn fast_forward_branch(
+    repo: &git2::Repository,
+    branch_ref: &str,
+    old: git2::Oid,
+    new: &git2::Commit<'_>,
+    force: bool,
+    attach: bool,
+    msg: &str,
+) -> Result<()> {
+    let head_tree = repo.head()?.peel_to_tree()?;
+    lock_retry::checkout_tree(repo, new.as_object(), &mut checkout_opts(force))?;
+    let moved = lock_retry::move_ref(repo, branch_ref, new.id(), old, msg)
+        .and_then(|()| if attach { lock_retry::set_head(repo, branch_ref) } else { Ok(()) });
+    if let Err(e) = moved {
+        restore_paths(repo, &head_tree, &new.tree()?);
+        return Err(e);
+    }
+    Ok(())
+}
+
+/// Force the paths that differ between `from` and `to` back to `from`. Best effort:
+/// runs on an error path whose error is the one worth reporting.
+fn restore_paths(repo: &git2::Repository, from: &git2::Tree<'_>, to: &git2::Tree<'_>) {
+    let Ok(diff) = repo.diff_tree_to_tree(Some(from), Some(to), None) else { return };
+    let mut opts = git2::build::CheckoutBuilder::new();
+    opts.force().disable_pathspec_match(true);
+    let mut any = false;
+    for delta in diff.deltas() {
+        for path in [delta.old_file().path(), delta.new_file().path()].into_iter().flatten() {
+            opts.path(path);
+            any = true;
+        }
+    }
+    // No paths means the whole tree to libgit2, which would discard local edits.
+    if any {
+        let _ = lock_retry::checkout_tree(repo, from.as_object(), &mut opts);
+    }
 }
 
 /// Create a new branch pointing at the given commit OID.
@@ -995,9 +1048,9 @@ fn checkout_remote_branch_impl(repo: &git2::Repository, remote_branch: &str, for
                     path.display()
                 )));
             }
-            repo.find_reference(&local_ref)?
-                .set_target(remote_oid, "checkout: fast-forward to remote")?;
-            do_checkout(repo, &local_ref, force)?;
+            fast_forward_branch(
+                repo, &local_ref, local_oid, &remote_commit, force, true, "checkout: fast-forward to remote",
+            )?;
             Ok(CheckoutRemoteResult::FastForward)
         }
         // Ahead or diverged — don't move the local branch over its own commits.
@@ -2098,6 +2151,74 @@ mod tests {
 
         let _ = std::fs::remove_dir_all(&wt_dir);
         let _ = std::fs::remove_dir_all(&main_dir);
+    }
+
+    /// Checking out `origin/<current branch>` when the current branch is behind:
+    /// the fast-forward must bring the working tree along, not leave the old
+    /// files behind as apparent local edits.
+    #[test]
+    fn checkout_remote_branch_fast_forward_of_current_branch_updates_the_working_tree() {
+        let (dir, repo) = crate::repo::test_support::make_repo_with_commit();
+        let (branch, tip) = crate::repo::test_support::remote_moved_on(&repo);
+
+        let res = checkout_remote_branch_impl(&repo, &format!("origin/{branch}"), false).unwrap();
+
+        assert!(matches!(res, CheckoutRemoteResult::FastForward));
+        assert_eq!(repo.head().unwrap().target(), Some(tip));
+        assert_eq!(std::fs::read_to_string(dir.join("a.txt")).unwrap(), "hello, remote");
+        assert_eq!(std::fs::read_to_string(dir.join("b.txt")).unwrap(), "new file");
+        assert!(repo.statuses(None).unwrap().is_empty(), "working tree should be clean");
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    /// An unstaged edit to a file the fast-forward changes: refuse before the
+    /// local branch moves, keeping the edit.
+    #[test]
+    fn checkout_remote_branch_fast_forward_refuses_over_a_conflicting_unstaged_edit() {
+        let (dir, repo) = crate::repo::test_support::make_repo_with_commit();
+        let old_tip = repo.head().unwrap().target();
+        let (branch, _) = crate::repo::test_support::remote_moved_on(&repo);
+        std::fs::write(dir.join("a.txt"), "local edit").unwrap();
+
+        assert!(checkout_remote_branch_impl(&repo, &format!("origin/{branch}"), false).is_err());
+
+        assert_eq!(repo.head().unwrap().target(), old_tip, "branch must not move");
+        assert_eq!(std::fs::read_to_string(dir.join("a.txt")).unwrap(), "local edit");
+        assert!(!dir.join("b.txt").exists());
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    /// The ref move fails after the checkout (here: the branch moved since `old`
+    /// was read): the files the checkout changed go back to HEAD's tree, and an
+    /// unrelated unstaged edit survives.
+    #[test]
+    fn fast_forward_branch_restores_the_working_tree_when_the_ref_move_fails() {
+        let (dir, repo) = crate::repo::test_support::make_repo_with_commit();
+        let head = repo.head().unwrap().peel_to_commit().unwrap();
+        let branch_ref = repo.head().unwrap().name().unwrap().to_owned();
+        // An unrelated tracked file with an unstaged edit.
+        std::fs::write(dir.join("c.txt"), "committed").unwrap();
+        let mut index = repo.index().unwrap();
+        index.add_path(std::path::Path::new("c.txt")).unwrap();
+        index.write().unwrap();
+        let tree = repo.find_tree(index.write_tree().unwrap()).unwrap();
+        let sig = repo.signature().unwrap();
+        let base = repo.commit(Some("HEAD"), &sig, &sig, "add c", &tree, &[&head]).unwrap();
+        std::fs::write(dir.join("c.txt"), "local edit").unwrap();
+        let (_, tip) = crate::repo::test_support::remote_moved_on(&repo);
+        let new = repo.find_commit(tip).unwrap();
+
+        let stale_old = head.id();
+        assert!(fast_forward_branch(&repo, &branch_ref, stale_old, &new, false, false, "test").is_err());
+
+        assert_eq!(repo.head().unwrap().target(), Some(base), "branch must not move");
+        assert_eq!(std::fs::read_to_string(dir.join("a.txt")).unwrap(), "hello");
+        assert!(!dir.join("b.txt").exists());
+        assert_eq!(std::fs::read_to_string(dir.join("c.txt")).unwrap(), "local edit");
+        let statuses = repo.statuses(None).unwrap();
+        let dirty: Vec<_> = statuses.iter().map(|s| (s.path().unwrap().to_owned(), s.status())).collect();
+        assert_eq!(dirty, vec![("c.txt".to_owned(), git2::Status::WT_MODIFIED)]);
+        let _ = std::fs::remove_dir_all(dir);
     }
 
     #[test]

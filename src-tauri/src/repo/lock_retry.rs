@@ -120,14 +120,6 @@ pub(crate) fn checkout_tree(
     retry_on_locked(|| Ok(repo.checkout_tree(target, Some(&mut *opts))?))
 }
 
-/// `checkout_head`, retrying while the index is locked.
-pub(crate) fn checkout_head(
-    repo: &git2::Repository,
-    opts: &mut git2::build::CheckoutBuilder<'_>,
-) -> Result<()> {
-    retry_on_locked(|| Ok(repo.checkout_head(Some(&mut *opts))?))
-}
-
 /// Create a commit, retrying while a ref or reflog lock (`refs/heads/<b>.lock`,
 /// `HEAD.lock`, the reflog's `.lock`) is held. Only `ErrorCode::Locked` is retried:
 /// the lock was not acquired, so nothing was written. libgit2 appends the branch and
@@ -143,6 +135,18 @@ pub(crate) fn commit(
     parents: &[&git2::Commit<'_>],
 ) -> Result<git2::Oid> {
     retry_while(is_lock_held, || Ok(repo.commit(update_ref, sig, sig, message, tree, parents)?))
+}
+
+/// Move `refname` from `old` to `new`, failing if it no longer points at `old`
+/// (someone else moved it). Retries like [`commit`], and for the same reason: the
+/// reflog entries are appended before the ref lockfile is renamed into place.
+pub(crate) fn move_ref(repo: &git2::Repository, refname: &str, new: git2::Oid, old: git2::Oid, msg: &str) -> Result<()> {
+    retry_while(is_lock_held, || Ok(repo.reference_matching(refname, new, true, old, msg).map(|_| ())?))
+}
+
+/// `set_head`, retrying like [`move_ref`].
+pub(crate) fn set_head(repo: &git2::Repository, refname: &str) -> Result<()> {
+    retry_while(is_lock_held, || Ok(repo.set_head(refname)?))
 }
 
 #[cfg(test)]

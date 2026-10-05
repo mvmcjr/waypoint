@@ -269,6 +269,22 @@ pub(crate) mod test_support {
         oid
     }
 
+    /// Simulate the remote moving on: point `refs/remotes/origin/<HEAD branch>` at
+    /// a new child of HEAD that changes a.txt to "hello, remote" and adds b.txt,
+    /// without touching HEAD or the working tree. Returns the branch and new tip.
+    pub(crate) fn remote_moved_on(repo: &Repository) -> (String, git2::Oid) {
+        let branch = repo.head().unwrap().shorthand().unwrap().to_owned();
+        let head = repo.head().unwrap().peel_to_commit().unwrap();
+        let mut tb = repo.treebuilder(Some(&head.tree().unwrap())).unwrap();
+        tb.insert("a.txt", repo.blob(b"hello, remote").unwrap(), 0o100644).unwrap();
+        tb.insert("b.txt", repo.blob(b"new file").unwrap(), 0o100644).unwrap();
+        let tree = repo.find_tree(tb.write().unwrap()).unwrap();
+        let sig = repo.signature().unwrap();
+        let tip = repo.commit(None, &sig, &sig, "remote work", &tree, &[&head]).unwrap();
+        repo.reference(&format!("refs/remotes/origin/{branch}"), tip, true, "test").unwrap();
+        (branch, tip)
+    }
+
     /// Put `repo` into a fresh [`super::RepoState`] under the id `"t"`, so tests can
     /// drive commands through [`super::with_repo`] like the real command handlers do.
     pub(crate) fn state_for(repo: Repository) -> (super::RepoState, String) {

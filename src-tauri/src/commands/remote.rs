@@ -692,12 +692,11 @@ fn pull_merge_in(repo: &git2::Repository, plan: &PullPlan) -> Result<PullResult>
             }
         }
 
-        repo.find_reference(&refname)?
-            .set_target(tracking_oid, "pull: Fast-forward")?;
-        repo.set_head(&refname)?;
-        // No .force() — libgit2 will protect unstaged working-tree changes
-        // that would be overwritten by the fast-forward.
-        lock_retry::checkout_head(repo, &mut git2::build::CheckoutBuilder::new())?;
+        // Safe (not forced): unstaged changes the fast-forward would overwrite
+        // abort it before anything moves.
+        let old = repo.head()?.peel_to_commit()?.id();
+        let new = repo.find_commit(tracking_oid)?;
+        crate::commands::actions::fast_forward_branch(repo, &refname, old, &new, false, false, "pull: Fast-forward")?;
         return Ok(plan.result("fast_forward", vec![]));
     }
 
@@ -929,6 +928,51 @@ mod tests {
 
     fn set_cfg(repo: &Repository, key: &str, value: &str) {
         repo.config().unwrap().set_str(key, value).unwrap();
+    }
+
+    /// Remote moved on by one commit (modifies a.txt, adds b.txt), no local
+    /// changes: the fast-forward pull must leave the working tree matching the
+    /// new tip, not show the incoming changes reversed as local edits.
+    #[test]
+    fn fast_forward_pull_updates_the_working_tree() {
+        let (dir, repo) = crate::repo::test_support::make_repo_with_commit();
+        let (plan, tip) = remote_moved_on(&repo);
+
+        let res = pull_merge_in(&repo, &plan).unwrap();
+
+        assert_eq!(res.kind, "fast_forward");
+        assert_eq!(repo.head().unwrap().target(), Some(tip));
+        assert_eq!(std::fs::read_to_string(dir.join("a.txt")).unwrap(), "hello, remote");
+        assert_eq!(std::fs::read_to_string(dir.join("b.txt")).unwrap(), "new file");
+        let statuses = repo.statuses(None).unwrap();
+        let dirty: Vec<_> = statuses.iter().map(|s| (s.path().unwrap().to_owned(), s.status())).collect();
+        assert!(dirty.is_empty(), "working tree should be clean after a fast-forward pull: {dirty:?}");
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    /// An unstaged edit to a file the fast-forward changes: the pull must refuse
+    /// before moving the branch, keeping both the edit and the old tip.
+    #[test]
+    fn fast_forward_pull_refuses_over_a_conflicting_unstaged_edit() {
+        let (dir, repo) = crate::repo::test_support::make_repo_with_commit();
+        let old_tip = repo.head().unwrap().target();
+        let (plan, _) = remote_moved_on(&repo);
+        std::fs::write(dir.join("a.txt"), "local edit").unwrap();
+
+        assert!(pull_merge_in(&repo, &plan).is_err());
+
+        assert_eq!(repo.head().unwrap().target(), old_tip, "branch must not move");
+        assert_eq!(std::fs::read_to_string(dir.join("a.txt")).unwrap(), "local edit");
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    /// [`remote_moved_on`](crate::repo::test_support::remote_moved_on), plus the
+    /// plan for pulling it into the HEAD branch.
+    fn remote_moved_on(repo: &Repository) -> (PullPlan, git2::Oid) {
+        let (branch, tip) = crate::repo::test_support::remote_moved_on(repo);
+        let tracking_ref = format!("refs/remotes/origin/{branch}");
+        let plan = PullPlan { branch_name: branch.clone(), remote: "origin".into(), remote_branch: branch, tracking_ref };
+        (plan, tip)
     }
 
     fn two_remote_repo() -> (PathBuf, Repository) {
