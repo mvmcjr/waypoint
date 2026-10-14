@@ -18,6 +18,7 @@ tauri-build = { version = "2", features = [] }
 tauri = { version = "2", features = [] }
 tokio = { version = "1", features = ["process"] }
 tauri-plugin-opener = "2"
+url = "2"
 tauri-plugin-dialog = "2"
 tauri-plugin-store = "2"
 serde = { version = "1", features = ["derive"] }
@@ -32,3 +33,6 @@ notify-debouncer-mini = "0.7"
 [target.'cfg(windows)'.dependencies]
 winreg = "0.56"
 
+[target.'cfg(target_os = "linux")'.dependencies]
+open = "5"
+zbus = "5"

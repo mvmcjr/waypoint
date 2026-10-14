@@ -120,9 +120,12 @@ pnpm e2e:typecheck           # tsc -p e2e/tsconfig.json --noEmit
   - `tags.rs` - `create_tag()`, `delete_tag()`
   - `remote.rs` - `list_remotes()`, `fetch_remote()`, `push_branch()`, `pull_branch()`, `push_tag()`, `delete_remote_tag()`, `rename_remote_branch()`. **Shells out to the system `git` binary** (via `tokio::process::Command`) instead of `git2`, so credential helpers (GCM, SSH agent, etc.) behave exactly as they do in a terminal — no re-implementing auth.
   - `fs.rs` - `scan_for_git_repos()` (filesystem scan used by the repo picker)
+  - `opener.rs` - `open_url()` (http(s) only; on Linux via the xdg-desktop-portal OpenURI D-Bus call, falling back to `xdg-open` with our injected env stripped). The frontend uses `ipc.openUrl`, not the opener plugin's `openUrl`
   - `plugins.rs` - `read_local_plugin()` (reads a plugin's manifest + entry module off disk; validation happens on the frontend)
   - `cli.rs` - `register_cli_shim/unregister_cli_shim/check_cli_shim()` (installs a `waypoint` shell shim so the app can be launched from a terminal, e.g. `waypoint .`)
   - top-level in `lib.rs` - `register_explorer_context_menu()` (Windows-only: adds/removes an "Open in Waypoint" entry in Explorer's right-click menu via the registry)
+- `wayland_env.rs` - Linux/Wayland startup env workarounds (`__NV_DISABLE_EXPLICIT_SYNC` for NVIDIA + WebKitGTK, `GTK_USE_PORTAL` for the file picker), applied first thing in `run()`. Variables we inject are tracked so child processes don't inherit them
+- `git_cli.rs` - `std_command()`/`tokio_command()`: the only way to build a `git` child process (no console window on Windows, injected env stripped). Don't `Command::new("git")` elsewhere
 - `graph/` - Commit graph layout engine:
   - `lanes.rs` - `assign_lanes()` function: topological sort + lane assignment for rendering DAG as columns
   - `mod.rs` - `PositionedCommit` struct (commit data + visual position: lane, row, color_idx, edges)

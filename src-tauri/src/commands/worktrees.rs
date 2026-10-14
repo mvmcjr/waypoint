@@ -174,13 +174,8 @@ pub struct RemoveResult {
 
 /// Blocking git CLI call (same credential/safety behaviour as the terminal).
 pub(crate) fn run_git_blocking(dir: &Path, args: &[&str]) -> Result<()> {
-    let mut cmd = std::process::Command::new("git");
-    cmd.current_dir(dir).args(args);
-    #[cfg(target_os = "windows")]
-    {
-        use std::os::windows::process::CommandExt;
-        cmd.creation_flags(0x08000000); // CREATE_NO_WINDOW
-    }
+    let mut cmd = crate::git_cli::std_command(dir);
+    cmd.args(args);
     let out = cmd.output().map_err(|e| Error::InvalidArg(format!("failed to run git: {e}")))?;
     if out.status.success() {
         return Ok(());

@@ -5,7 +5,6 @@ import { ipc } from "@/lib/ipc";
 import { useStore } from "@/lib/store";
 import { useOpenRepo, useOpenWorktree } from "@/lib/useOpenRepo";
 import { getRecentRepos, addManyToRecentRepos } from "@/lib/recentRepos";
-import { openUrl } from "@tauri-apps/plugin-opener";
 import { useRemotes, useHeadInfo, useRefs } from "@/lib/queries";
 import { commandsForSurface } from "@/lib/plugins/registry";
 
@@ -13,6 +12,7 @@ vi.mock("@/lib/ipc", () => ({
   ipc: {
     scanForGitRepos: vi.fn(),
     listWorktrees: vi.fn(),
+    openUrl: vi.fn(),
   },
 }));
 
@@ -38,7 +38,6 @@ vi.mock("@tauri-apps/plugin-dialog", () => ({
 
 vi.mock("@tauri-apps/plugin-opener", () => ({
   revealItemInDir: vi.fn(),
-  openUrl: vi.fn(),
 }));
 
 vi.mock("@/lib/plugins/registry", () => ({
@@ -223,7 +222,7 @@ describe("CommandPalette — open in browser", () => {
     vi.mocked(getRecentRepos).mockResolvedValue([]);
     vi.mocked(useOpenRepo).mockReturnValue(vi.fn());
     vi.mocked(useOpenWorktree).mockReturnValue(vi.fn());
-    vi.mocked(openUrl).mockResolvedValue(undefined);
+    vi.mocked(ipc.openUrl).mockResolvedValue(undefined);
     vi.mocked(useRemotes).mockReturnValue({ data: undefined } as any);
     vi.mocked(useHeadInfo).mockReturnValue({ data: undefined } as any);
     vi.mocked(useRefs).mockReturnValue({ data: undefined } as any);
@@ -252,7 +251,7 @@ describe("CommandPalette — open in browser", () => {
     });
     render(<CommandPalette open onClose={vi.fn()} />);
     fireEvent.click(screen.getByRole("button", { name: "Open Current Branch in Browser" }));
-    expect(openUrl).toHaveBeenCalledWith("https://github.com/me/repo/tree/feat/x");
+    expect(ipc.openUrl).toHaveBeenCalledWith("https://github.com/me/repo/tree/feat/x");
   });
 
   it("says when the current branch is only on a remote without a web page", () => {
@@ -266,7 +265,7 @@ describe("CommandPalette — open in browser", () => {
     render(<CommandPalette open onClose={vi.fn()} />);
     fireEvent.click(screen.getByRole("button", { name: "Open Current Branch in Browser" }));
     expect(screen.getByText("No web page known for origin/feat/x's remote")).toBeInTheDocument();
-    expect(openUrl).not.toHaveBeenCalled();
+    expect(ipc.openUrl).not.toHaveBeenCalled();
   });
 
   it("typing after a message brings the command list back", () => {
@@ -297,7 +296,7 @@ describe("CommandPalette — open in browser", () => {
     expect(labels.some((l) => l?.includes("backup"))).toBe(false);
 
     fireEvent.click(screen.getByRole("button", { name: "Open Remote in Browser: origin" }));
-    expect(openUrl).toHaveBeenCalledWith("https://github.com/me/repo");
+    expect(ipc.openUrl).toHaveBeenCalledWith("https://github.com/me/repo");
     await waitFor(() => expect(onClose).toHaveBeenCalled());
   });
 
@@ -306,7 +305,7 @@ describe("CommandPalette — open in browser", () => {
     const onClose = vi.fn();
     render(<CommandPalette open onClose={onClose} />);
     fireEvent.click(screen.getByRole("button", { name: "Open Current Branch in Browser" }));
-    expect(openUrl).toHaveBeenCalledWith("https://github.com/me/repo/tree/feat/x");
+    expect(ipc.openUrl).toHaveBeenCalledWith("https://github.com/me/repo/tree/feat/x");
     await waitFor(() => expect(onClose).toHaveBeenCalled());
   });
 
@@ -316,7 +315,7 @@ describe("CommandPalette — open in browser", () => {
     render(<CommandPalette open onClose={onClose} />);
     fireEvent.click(screen.getByRole("button", { name: "Open Current Branch in Browser" }));
     expect(screen.getByText("feat/x isn't on any remote yet")).toBeInTheDocument();
-    expect(openUrl).not.toHaveBeenCalled();
+    expect(ipc.openUrl).not.toHaveBeenCalled();
     expect(onClose).not.toHaveBeenCalled();
   });
 

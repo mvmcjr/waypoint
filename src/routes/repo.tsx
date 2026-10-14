@@ -1,7 +1,6 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { getCurrentWindow } from "@tauri-apps/api/window";
 import { listen } from "@tauri-apps/api/event";
-import { openUrl } from "@tauri-apps/plugin-opener";
 import { useStore } from "@/lib/store";
 import { useCommitDiff, useCommits, useFileStatus, useHeadInfo, useRefreshRepo, useRefs, useRemotes, useRepoStatus } from "@/lib/queries";
 import { orderFiles } from "@/lib/fileTree";
@@ -580,7 +579,7 @@ export function RepoView() {
         toast.error(`No web page known for ${action.remoteBranch}'s remote`);
         return;
       }
-      openUrl(url).catch((e) => toast.error(`Couldn't open browser: ${String(e)}`));
+      ipc.openUrl(url).catch((e) => toast.error(`Couldn't open browser: ${String(e)}`));
     }
   }
 

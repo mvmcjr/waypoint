@@ -1,8 +1,10 @@
 mod commands;
 mod error;
+mod git_cli;
 mod git_text;
 mod graph;
 mod repo;
+mod wayland_env;
 
 use repo::{RepoState, WatcherState};
 use std::sync::Mutex;
@@ -81,19 +83,25 @@ fn parse_startup_path(args: impl Iterator<Item = String>) -> Option<String> {
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
+    #[cfg(target_os = "linux")]
+    wayland_env::apply();
+
     let startup_path = parse_startup_path(std::env::args());
 
     tauri::Builder::default()
         .manage(StartupPath(Mutex::new(startup_path)))
         .manage(RepoState::default())
         .manage(WatcherState::default())
-        .plugin(tauri_plugin_opener::init())
+        // Only reveal-in-dir goes through the plugin (D-Bus on Linux, so nothing
+        // inherits our env); URLs go through commands::opener::open_url.
+        .plugin(tauri_plugin_opener::Builder::new().open_js_links_on_click(false).build())
         .plugin(tauri_plugin_dialog::init())
         .plugin(tauri_plugin_store::Builder::default().build())
         .invoke_handler(tauri::generate_handler![
             get_startup_path,
             is_windows,
             register_explorer_context_menu,
+            commands::opener::open_url,
             commands::repo::open_repo,
             commands::repo::init_repo,
             commands::repo::check_init_target,

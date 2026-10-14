@@ -2,7 +2,7 @@ import { useState, useEffect, useRef, useCallback } from "react";
 import { Dialog as DialogPrimitive } from "@base-ui/react/dialog";
 import { FolderOpen, FolderGit2, Search, ArrowLeft, ExternalLink, Download, Settings, Puzzle, Globe } from "lucide-react";
 import { open as openDialog } from "@tauri-apps/plugin-dialog";
-import { revealItemInDir, openUrl } from "@tauri-apps/plugin-opener";
+import { revealItemInDir } from "@tauri-apps/plugin-opener";
 import { cn, repoLabel, truncatePath, explorerName } from "@/lib/utils";
 import { ipc, type WorktreeInfo } from "@/lib/ipc";
 import { useHeadInfo, useRefs, useRemotes } from "@/lib/queries";
@@ -138,7 +138,7 @@ export function CommandPalette({ open, onClose }: Props) {
 
   async function openRemoteInBrowser(url: string) {
     try {
-      await openUrl(url);
+      await ipc.openUrl(url);
       onClose();
     } catch (e) {
       setFeedback(`Couldn't open browser: ${String(e)}`);

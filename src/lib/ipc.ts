@@ -217,6 +217,10 @@ export const ipc = {
   isWindows: () =>
     invoke<boolean>("is_windows"),
 
+  /** Opens an http(s) URL in the default browser (rejects anything else). */
+  openUrl: (url: string) =>
+    invoke<void>("open_url", { url }),
+
   registerExplorerContextMenu: (register: boolean) =>
     invoke<void>("register_explorer_context_menu", { register }),
 

@@ -4437,6 +4437,7 @@ dependencies = [
  "encoding_rs",
  "git2",
  "notify-debouncer-mini",
+ "open",
  "serde",
  "serde_json",
  "tauri",
@@ -4446,8 +4447,10 @@ dependencies = [
  "tauri-plugin-store",
  "thiserror 2.0.21",
  "tokio",
+ "url",
  "uuid",
  "winreg 0.56.0",
+ "zbus",
 ]
 
 [[package]]

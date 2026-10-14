@@ -71,15 +71,8 @@ async fn git_output(
     args: &[&str],
     env: &[(&str, &str)],
 ) -> Result<std::process::Output> {
-    let mut cmd = tokio::process::Command::new("git");
-    cmd.current_dir(workdir).args(args).envs(env.iter().copied());
-
-    #[cfg(target_os = "windows")]
-    {
-        const CREATE_NO_WINDOW: u32 = 0x08000000;
-        cmd.creation_flags(CREATE_NO_WINDOW);
-    }
-
+    let mut cmd = crate::git_cli::tokio_command(workdir);
+    cmd.args(args).envs(env.iter().copied());
     cmd.output().await.map_err(|e| Error::InvalidArg(format!("failed to run git: {}", e)))
 }
 
