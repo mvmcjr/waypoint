@@ -178,6 +178,7 @@ pub fn run() {
             commands::cli::register_cli_shim,
             commands::cli::unregister_cli_shim,
             commands::cli::check_cli_shim,
+            commands::cli::cli_provided_by_package,
         ])
         .run(tauri::generate_context!())
         .expect("error while running waypoint");

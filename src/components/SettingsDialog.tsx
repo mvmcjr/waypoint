@@ -34,11 +34,18 @@ export function SettingsDialog() {
   const [shimPath, setShimPath] = useState<string | null>(null);
   const [needsRestart, setNeedsRestart] = useState(false);
   const [shimError, setShimError] = useState<string | null>(null);
+  // null until known. Fixed for the life of the process (it's the exe path).
+  const [cliFromPackage, setCliFromPackage] = useState<boolean | null>(null);
 
   // One-time init: platform detection + context-menu stored preference +
   // event listener for cross-view sync.
   useEffect(() => {
     let active = true;
+    ipc.cliProvidedByPackage()
+      .catch(() => false)
+      .then((fromPackage) => {
+        if (active) setCliFromPackage(fromPackage);
+      });
     ipc.isWindows().then(async (win) => {
       if (!active) return;
       setIsWin(win);
@@ -222,55 +229,69 @@ export function SettingsDialog() {
 
               <div className="space-y-3 pt-2">
                 {/* ── CLI Shim ─────────────────────────────────────────── */}
-                <div className="rounded-lg border border-border/40 bg-muted/10 overflow-hidden">
-                  <div className="flex items-start justify-between p-3.5 gap-4">
-                    <div className="space-y-1 min-w-0">
-                      <span className="text-xs font-medium text-foreground">Terminal Command</span>
-                      <p className="text-[10px] text-muted-foreground leading-normal max-w-sm">
-                        Register <code className="font-mono bg-muted/60 px-1 py-0.5 rounded text-foreground/80">waypoint</code> as a shell command.
-                        Use <code className="font-mono bg-muted/60 px-1 py-0.5 rounded text-foreground/80">waypoint .</code> or{" "}
-                        <code className="font-mono bg-muted/60 px-1 py-0.5 rounded text-foreground/80">waypoint ~/projects/foo</code> to open a
-                        repository directly from any terminal.
-                      </p>
-                      {shimInstalled && shimPath && (
-                        <p className="text-[10px] text-muted-foreground/60 font-mono truncate pt-0.5" title={shimPath}>
-                          {shimPath}
-                        </p>
+                {/* Rendered once we know whether a package provides the
+                    command, so the toggle doesn't flash on package installs.
+                    A shim registered earlier stays removable. */}
+                {cliFromPackage !== null && (
+                  <div className="rounded-lg border border-border/40 bg-muted/10 overflow-hidden">
+                    <div className="flex items-start justify-between p-3.5 gap-4">
+                      <div className="space-y-1 min-w-0">
+                        <span className="text-xs font-medium text-foreground">Terminal Command</span>
+                        {cliFromPackage ? (
+                          <p className="text-[10px] text-muted-foreground leading-normal max-w-sm">
+                            Waypoint was installed by your package manager, so{" "}
+                            <code className="font-mono bg-muted/60 px-1 py-0.5 rounded text-foreground/80">waypoint .</code> already works from any terminal.
+                          </p>
+                        ) : (
+                          <p className="text-[10px] text-muted-foreground leading-normal max-w-sm">
+                            Register <code className="font-mono bg-muted/60 px-1 py-0.5 rounded text-foreground/80">waypoint</code> as a shell command.
+                            Use <code className="font-mono bg-muted/60 px-1 py-0.5 rounded text-foreground/80">waypoint .</code> or{" "}
+                            <code className="font-mono bg-muted/60 px-1 py-0.5 rounded text-foreground/80">waypoint ~/projects/foo</code> to open a
+                            repository directly from any terminal.
+                          </p>
+                        )}
+                        {shimInstalled && shimPath && (
+                          <p className="text-[10px] text-muted-foreground/60 font-mono truncate pt-0.5" title={shimPath}>
+                            {shimPath}
+                          </p>
+                        )}
+                      </div>
+                      {(!cliFromPackage || shimInstalled) && (
+                        <label className="relative inline-flex items-center cursor-pointer select-none shrink-0 mt-0.5">
+                          <input
+                            type="checkbox"
+                            checked={shimInstalled}
+                            disabled={savingShim}
+                            onChange={(e) => handleToggleCliShim(e.target.checked)}
+                            className="sr-only peer"
+                          />
+                          <div className="w-8 h-4.5 bg-muted rounded-full peer peer-checked:after:translate-x-full after:content-[''] after:absolute after:top-[2px] after:left-[2px] after:bg-foreground/70 peer-checked:after:bg-background after:rounded-full after:h-3.5 after:w-3.5 after:transition-all peer-checked:bg-primary border border-border/30 peer-focus-visible:ring-2 peer-focus-visible:ring-primary/50" />
+                        </label>
                       )}
                     </div>
-                    <label className="relative inline-flex items-center cursor-pointer select-none shrink-0 mt-0.5">
-                      <input
-                        type="checkbox"
-                        checked={shimInstalled}
-                        disabled={savingShim}
-                        onChange={(e) => handleToggleCliShim(e.target.checked)}
-                        className="sr-only peer"
-                      />
-                      <div className="w-8 h-4.5 bg-muted rounded-full peer peer-checked:after:translate-x-full after:content-[''] after:absolute after:top-[2px] after:left-[2px] after:bg-foreground/70 peer-checked:after:bg-background after:rounded-full after:h-3.5 after:w-3.5 after:transition-all peer-checked:bg-primary border border-border/30 peer-focus-visible:ring-2 peer-focus-visible:ring-primary/50" />
-                    </label>
+
+                    {/* Terminal-restart notice */}
+                    {needsRestart && (
+                      <div className="flex items-center gap-2 px-3.5 py-2 border-t border-border/40 bg-primary/5">
+                        <RefreshCw className="size-3 text-primary shrink-0" />
+                        <p className="text-[10px] text-primary/80 leading-normal">
+                          Restart your terminal (or open a new tab) for{" "}
+                          <code className="font-mono">waypoint</code> to appear in your PATH.
+                        </p>
+                      </div>
+                    )}
+
+                    {/* Error notice */}
+                    {shimError && (
+                      <div className="flex items-start gap-2 px-3.5 py-2 border-t border-border/40 bg-destructive/5">
+                        <AlertCircle className="size-3 text-destructive shrink-0 mt-0.5" />
+                        <p className="text-[10px] text-destructive/80 leading-normal break-all">
+                          {shimError}
+                        </p>
+                      </div>
+                    )}
                   </div>
-
-                  {/* Terminal-restart notice */}
-                  {needsRestart && (
-                    <div className="flex items-center gap-2 px-3.5 py-2 border-t border-border/40 bg-primary/5">
-                      <RefreshCw className="size-3 text-primary shrink-0" />
-                      <p className="text-[10px] text-primary/80 leading-normal">
-                        Restart your terminal (or open a new tab) for{" "}
-                        <code className="font-mono">waypoint</code> to appear in your PATH.
-                      </p>
-                    </div>
-                  )}
-
-                  {/* Error notice */}
-                  {shimError && (
-                    <div className="flex items-start gap-2 px-3.5 py-2 border-t border-border/40 bg-destructive/5">
-                      <AlertCircle className="size-3 text-destructive shrink-0 mt-0.5" />
-                      <p className="text-[10px] text-destructive/80 leading-normal break-all">
-                        {shimError}
-                      </p>
-                    </div>
-                  )}
-                </div>
+                )}
 
                 {/* ── Windows Explorer Context Menu ─────────────────────── */}
                 {isWin && (

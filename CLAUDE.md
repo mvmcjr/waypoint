@@ -122,7 +122,7 @@ pnpm e2e:typecheck           # tsc -p e2e/tsconfig.json --noEmit
   - `fs.rs` - `scan_for_git_repos()` (filesystem scan used by the repo picker)
   - `opener.rs` - `open_url()` (http(s) only; on Linux via the xdg-desktop-portal OpenURI D-Bus call, falling back to `xdg-open` with our injected env stripped). The frontend uses `ipc.openUrl`, not the opener plugin's `openUrl`
   - `plugins.rs` - `read_local_plugin()` (reads a plugin's manifest + entry module off disk; validation happens on the frontend)
-  - `cli.rs` - `register_cli_shim/unregister_cli_shim/check_cli_shim()` (installs a `waypoint` shell shim so the app can be launched from a terminal, e.g. `waypoint .`)
+  - `cli.rs` - `register_cli_shim/unregister_cli_shim/check_cli_shim()` (installs a `waypoint` shell shim so the app can be launched from a terminal, e.g. `waypoint .`). `cli_provided_by_package()`: true only for the Arch package layout (binary at `/usr/lib/waypoint/waypoint` plus its `/usr/bin/waypoint` launcher, which does what the shim does), so Settings hides the toggle (unless a shim already exists, so it can be removed) and `register_cli_shim` refuses. .deb/.rpm keep the toggle: their `/usr/bin/waypoint` is the raw binary
   - top-level in `lib.rs` - `register_explorer_context_menu()` (Windows-only: adds/removes an "Open in Waypoint" entry in Explorer's right-click menu via the registry)
 - `wayland_env.rs` - Linux/Wayland startup env workarounds (`__NV_DISABLE_EXPLICIT_SYNC` for NVIDIA + WebKitGTK, `GTK_USE_PORTAL` for the file picker), applied first thing in `run()`. Variables we inject are tracked so child processes don't inherit them
 - `git_cli.rs` - `std_command()`/`tokio_command()`: the only way to build a `git` child process (no console window on Windows, injected env stripped). Don't `Command::new("git")` elsewhere
@@ -232,6 +232,8 @@ waypoint/
 │       └── repo.tsx           # Main repo view
 ├── vitest.config.ts            # Vitest config (jsdom, globals, setup file); excludes scripts/fixtures/** and e2e/**
 ├── e2e/                        # End-to-end tests (Mocha + WebdriverIO + tauri-driver) — see e2e/README.md
+├── packaging/arch/            # PKGBUILD, .desktop and /usr/bin launcher for the Arch package (built by the `arch` job in release.yml; builds in place, so not for local makepkg)
+├── scripts/set-version.mjs     # Stamps the release tag's version into tauri.conf.json, Cargo.toml, package.json, PKGBUILD
 ├── src-tauri/                 # Backend (Rust)
 │   ├── tauri.conf.json       # Tauri config (window size, beforeDevCommand, etc.)
 │   ├── Cargo.toml            # Rust dependencies (git2, tauri, serde, etc.)

@@ -462,6 +462,10 @@ export const ipc = {
   checkCliShim: () =>
     invoke<boolean>("check_cli_shim"),
 
+  /** True when a system package (deb/rpm/Arch) already puts `waypoint` on PATH. */
+  cliProvidedByPackage: () =>
+    invoke<boolean>("cli_provided_by_package"),
+
   listWorktrees: (repoId: string) =>
     invoke<WorktreeInfo[]>("list_worktrees", { repoId }),
 

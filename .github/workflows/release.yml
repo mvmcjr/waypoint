@@ -104,25 +104,7 @@ jobs:
         shell: bash
         env:
           REF_NAME: ${{ github.ref_name }}
-        run: |
-          node -e "
-            const fs = require('fs');
-            const version = process.env.REF_NAME.replace(/^v/, '');
-
-            const conf = JSON.parse(fs.readFileSync('src-tauri/tauri.conf.json', 'utf8'));
-            conf.version = version;
-            fs.writeFileSync('src-tauri/tauri.conf.json', JSON.stringify(conf, null, 2) + '\n');
-
-            let cargo = fs.readFileSync('src-tauri/Cargo.toml', 'utf8');
-            cargo = cargo.replace(/^version = \"[^\"]*\"/m, 'version = \"' + version + '\"');
-            fs.writeFileSync('src-tauri/Cargo.toml', cargo);
-
-            const pkg = JSON.parse(fs.readFileSync('package.json', 'utf8'));
-            pkg.version = version;
-            fs.writeFileSync('package.json', JSON.stringify(pkg, null, 2) + '\n');
-
-            console.log('Version set to', version);
-          "
+        run: node scripts/set-version.mjs "$REF_NAME"
 
       - uses: tauri-apps/tauri-action@1deb371b0cd8bd54025b384f1cd735e725c4060f # v1.0.0
         env:
@@ -159,8 +141,59 @@ jobs:
             **Platforms**
             - **macOS**: `.dmg` (universal — Apple Silicon + Intel)
             - **Linux**: `.AppImage` (portable), `.deb` (Debian/Ubuntu) or `.rpm` (Fedora/openSUSE)
+            - **Arch Linux**: `.pkg.tar.zst` (`sudo pacman -U waypoint-*.pkg.tar.zst`). Prefer it over the AppImage on Arch-based distros: it uses the system WebKitGTK
             - **Windows**: `.msi` (recommended) or `.exe` (NSIS)
           releaseDraft: true
           # Tags containing a hyphen (e.g. v1.0.0-beta.1) are pre-releases.
           prerelease: ${{ contains(github.ref_name, '-') }}
           args: ${{ matrix.args }}${{ matrix.platform == 'macos-latest' && !secrets.APPLE_CERTIFICATE && ' --no-sign' || '' }}
+
+  # Arch package, built against Arch's own WebKitGTK rather than Ubuntu 22.04's.
+  arch:
+    runs-on: ubuntu-latest
+    container: archlinux:base-devel
+    steps:
+      - name: Install build dependencies
+        run: |
+          pacman -Syu --noconfirm --needed \
+            git nodejs pnpm rust cmake \
+            gtk3 webkit2gtk-4.1 xdg-desktop-portal hicolor-icon-theme
+
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - name: Set app version from tag
+        env:
+          REF_NAME: ${{ github.ref_name }}
+        run: node scripts/set-version.mjs "$REF_NAME"
+
+      # makepkg refuses to run as root.
+      - name: Build package
+        run: |
+          useradd --create-home builder
+          chown -R builder: "$GITHUB_WORKSPACE"
+          cd packaging/arch
+          sudo -u builder PKGDEST="$PWD/out" makepkg --noconfirm --nodeps
+
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: arch-package
+          path: packaging/arch/out/*.pkg.tar.zst
+          if-no-files-found: error
+
+  # Separate from `arch` so the package is uploaded only after tauri-action
+  # (the `build` jobs) has created the draft release. Runs even if one of those
+  # platforms failed; any that succeeded created the release.
+  arch-upload:
+    needs: [build, arch]
+    if: ${{ !cancelled() && needs.arch.result == 'success' }}
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: arch-package
+
+      - name: Attach to the draft release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          TAG: ${{ github.ref_name }}
+        run: gh release upload "$TAG" ./*.pkg.tar.zst --repo "$GITHUB_REPOSITORY" --clobber

@@ -1,0 +1,9 @@
+[Desktop Entry]
+Type=Application
+Name=Waypoint
+Comment=Git GUI with a visual commit timeline
+Exec=/usr/lib/waypoint/waypoint %f
+Icon=waypoint
+Terminal=false
+Categories=Development;RevisionControl;
+StartupWMClass=waypoint

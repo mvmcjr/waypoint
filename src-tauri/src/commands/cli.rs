@@ -17,6 +17,26 @@ fn get_exe_path() -> Result<PathBuf, String> {
     std::env::current_exe().map_err(|e| e.to_string())
 }
 
+/// Where the Arch package (packaging/arch) installs the binary. It also ships
+/// /usr/bin/waypoint, a launcher that does what our shim does, so the shim
+/// would only shadow it and outlive the package.
+const PACKAGE_EXE: &str = "/usr/lib/waypoint/waypoint";
+const PACKAGE_LAUNCHER: &str = "/usr/bin/waypoint";
+
+/// True when the package's launcher already provides the `waypoint` command.
+/// .deb/.rpm installs aren't covered: their /usr/bin/waypoint is the raw
+/// binary, which neither detaches nor defaults to the current directory.
+fn cli_from_package(exe: &Path, exists: impl Fn(&Path) -> bool) -> bool {
+    cfg!(target_os = "linux") && exe == Path::new(PACKAGE_EXE) && exists(Path::new(PACKAGE_LAUNCHER))
+}
+
+fn ensure_shim_allowed(exe: &Path, exists: impl Fn(&Path) -> bool) -> Result<(), String> {
+    if cli_from_package(exe, exists) {
+        return Err("Waypoint was installed by your package manager, which already provides the `waypoint` command".into());
+    }
+    Ok(())
+}
+
 /// The directory where the shim script lives.
 /// Windows : %LOCALAPPDATA%\Programs\waypoint-cli\
 /// Unix    : ~/.local/bin/
@@ -274,6 +294,7 @@ fn remove_from_path(dir: &Path) -> Result<(), String> {
 #[tauri::command]
 pub fn register_cli_shim() -> Result<CliShimInfo, String> {
     let exe_path = get_exe_path()?;
+    ensure_shim_allowed(&exe_path, Path::exists)?;
     let exe_str = exe_path.to_str().ok_or("Executable path is not valid UTF-8")?;
 
     let dir = shim_dir()?;
@@ -304,8 +325,67 @@ pub fn unregister_cli_shim() -> Result<(), String> {
     Ok(())
 }
 
+/// True when the package manager provides the `waypoint` command, so the
+/// settings toggle is hidden.
+#[tauri::command]
+pub fn cli_provided_by_package() -> Result<bool, String> {
+    Ok(cli_from_package(&get_exe_path()?, Path::exists))
+}
+
 /// Returns true when the shim script file is present on disk.
 #[tauri::command]
 pub fn check_cli_shim() -> Result<bool, String> {
     Ok(shim_path()?.exists())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn launcher_present(p: &Path) -> bool {
+        p == Path::new("/usr/bin/waypoint")
+    }
+
+    fn launcher_missing(_: &Path) -> bool {
+        false
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn the_arch_package_layout_provides_the_command() {
+        assert!(cli_from_package(Path::new("/usr/lib/waypoint/waypoint"), launcher_present));
+    }
+
+    #[test]
+    fn the_package_binary_without_its_launcher_does_not() {
+        assert!(!cli_from_package(Path::new("/usr/lib/waypoint/waypoint"), launcher_missing));
+    }
+
+    #[test]
+    fn other_install_locations_do_not() {
+        for exe in [
+            // .deb / .rpm put the raw binary here; the shim still adds detaching.
+            "/usr/bin/waypoint",
+            "/usr/local/lib/waypoint/waypoint",
+            "/usr/local/bin/waypoint",
+            "/home/me/.local/lib/waypoint/waypoint",
+            "/home/me/src/waypoint/src-tauri/target/release/waypoint",
+            // An AppImage runs from its own mount, which contains usr/lib.
+            "/tmp/.mount_WaypoXYZ/usr/lib/waypoint/waypoint",
+        ] {
+            assert!(!cli_from_package(Path::new(exe), launcher_present), "{exe}");
+        }
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn a_package_install_refuses_to_write_a_shim() {
+        let err = ensure_shim_allowed(Path::new("/usr/lib/waypoint/waypoint"), launcher_present).unwrap_err();
+        assert!(err.contains("package"), "{err}");
+    }
+
+    #[test]
+    fn other_installs_may_write_a_shim() {
+        assert!(ensure_shim_allowed(Path::new("/usr/bin/waypoint"), launcher_present).is_ok());
+    }
 }

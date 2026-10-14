@@ -1,9 +1,10 @@
 use crate::error::{Error, Result};
 
 /// Only web pages: the frontend opens remote/PR links, never local files.
-fn check_web_url(url: &str) -> Result<()> {
+/// The URL as the parser normalized it, if it's an http(s) page.
+fn check_web_url(url: &str) -> Result<String> {
     match url::Url::parse(url) {
-        Ok(u) if matches!(u.scheme(), "http" | "https") && u.host_str().is_some_and(|h| !h.is_empty()) => Ok(()),
+        Ok(u) if matches!(u.scheme(), "http" | "https") && u.host_str().is_some_and(|h| !h.is_empty()) => Ok(u.into()),
         _ => Err(Error::InvalidArg(format!("not a web URL: {url}"))),
     }
 }
@@ -86,7 +87,7 @@ fn browser_commands(url: &str, injected: &[&str]) -> Vec<std::process::Command> 
 /// hand the browser our Wayland workarounds (see `wayland_env`).
 #[tauri::command]
 pub async fn open_url(app: tauri::AppHandle, url: String) -> Result<()> {
-    check_web_url(&url)?;
+    let url = check_web_url(&url)?;
 
     #[cfg(target_os = "linux")]
     {
@@ -113,6 +114,11 @@ mod tests {
         assert!(check_web_url("https://github.com/me/repo/tree/feat/x").is_ok());
         assert!(check_web_url("http://gitlab.local/me/repo").is_ok());
         assert!(check_web_url("HTTPS://github.com/me/repo").is_ok());
+    }
+
+    #[test]
+    fn hands_back_the_normalized_url() {
+        assert_eq!(check_web_url(" HTTPS://GitHub.com/me/repo").unwrap(), "https://github.com/me/repo");
     }
 
     #[test]
