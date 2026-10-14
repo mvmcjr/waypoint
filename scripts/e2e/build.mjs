@@ -25,7 +25,7 @@ const E2E_TARGET_DIR = join(REPO_ROOT, 'src-tauri', 'target', 'e2e');
 
 /** Absolute path to the built e2e test binary. */
 export function e2eBinaryPath() {
-  return join(E2E_TARGET_DIR, 'debug', 'waypoint.exe');
+  return join(E2E_TARGET_DIR, 'debug', process.platform === 'win32' ? 'waypoint.exe' : 'waypoint');
 }
 
 // Inputs that affect the built binary. Directories are walked recursively.
