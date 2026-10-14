@@ -18,6 +18,7 @@
     "test": "vitest",
     "fixtures": "node scripts/fixtures/make-fixtures.mjs",
     "test:fixtures": "node --test scripts/fixtures/build-scenario.test.mjs",
+    "test:shutdown": "node --test scripts/shutdown/shutdown.test.mjs",
     "notices": "node scripts/generate-notices.mjs",
     "e2e:setup": "node scripts/e2e/setup.mjs",
     "e2e:build": "node scripts/e2e/build.mjs",
